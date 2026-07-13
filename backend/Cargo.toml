@@ -1,0 +1,28 @@
+[package]
+name = "recipe-backend"
+version = "0.1.0"
+edition = "2021"
+description = "recipes backend — SSRF-guarded fetch proxy (Axum, deploys to Render)"
+license = "MIT"
+
+[[bin]]
+name = "recipe-backend"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+dotenvy = "0.15"
+futures-util = "0.3"
+url = "2"
