@@ -2,6 +2,9 @@
 /target
 **/*.rs.bk
 
+# wasm-pack build output
+**/pkg/
+
 # Node / SvelteKit
 node_modules/
 /frontend/.svelte-kit
