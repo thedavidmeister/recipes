@@ -61,7 +61,8 @@ fn extract_recipe_ldjson(html: &str) -> Option<Value> {
 }
 
 /// Recursively find a node whose `@type` is (or includes) `Recipe`, descending
-/// into arrays and `@graph`.
+/// into arrays and into every object property — so a Recipe nested under
+/// `@graph`, `mainEntity`, or any other property is found.
 fn find_recipe_node(value: &Value) -> Option<&Value> {
     match value {
         Value::Array(items) => items.iter().find_map(find_recipe_node),
@@ -69,7 +70,7 @@ fn find_recipe_node(value: &Value) -> Option<&Value> {
             if is_recipe_type(map.get("@type")) {
                 return Some(value);
             }
-            map.get("@graph").and_then(find_recipe_node)
+            map.values().find_map(find_recipe_node)
         }
         _ => None,
     }
@@ -151,13 +152,14 @@ fn extract_ingredients(value: Option<&Value>) -> Vec<Ingredient> {
 
 fn extract_instructions(value: Option<&Value>) -> String {
     match value {
-        Some(Value::String(s)) => s.clone(),
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(instruction_text)
             .collect::<Vec<_>>()
             .join("\n\n"),
-        _ => String::new(),
+        // A single string, or a single HowToStep / HowToSection object.
+        Some(value) => instruction_text(value).unwrap_or_default(),
+        None => String::new(),
     }
 }
 
@@ -259,5 +261,38 @@ mod tests {
         let recipe = parse_html(html, "https://example.com/toast").expect("a Recipe");
         assert_eq!(recipe.title, "Toast");
         assert_eq!(recipe.ingredients.len(), 1);
+    }
+
+    #[test]
+    fn finds_recipe_nested_under_main_entity() {
+        // Very common: a WebPage wrapper with the Recipe under `mainEntity`
+        // (not `@graph`), which the earlier `@graph`-only traversal missed.
+        let html = r#"<script type="application/ld+json">
+        {
+          "@type": "WebPage",
+          "mainEntity": {
+            "@type": "Recipe",
+            "name": "Nested Stew",
+            "recipeIngredient": ["water"]
+          }
+        }
+        </script>"#;
+        let recipe = parse_html(html, "https://example.com/stew").expect("a Recipe");
+        assert_eq!(recipe.title, "Nested Stew");
+        assert_eq!(recipe.ingredients.len(), 1);
+    }
+
+    #[test]
+    fn handles_single_instruction_object() {
+        // `recipeInstructions` as a lone HowToStep object (not a string/array).
+        let html = r#"<script type="application/ld+json">
+        {
+          "@type": "Recipe",
+          "name": "One Step",
+          "recipeInstructions": { "@type": "HowToStep", "text": "Just do it." }
+        }
+        </script>"#;
+        let recipe = parse_html(html, "https://example.com/x").expect("a Recipe");
+        assert_eq!(recipe.instructions, "Just do it.");
     }
 }
