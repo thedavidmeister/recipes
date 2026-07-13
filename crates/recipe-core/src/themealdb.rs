@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{Ingredient, Recipe, RecipeSummary};
+use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "themealdb";
 
@@ -69,17 +69,6 @@ impl Meal {
         out
     }
 
-    fn into_summary(self) -> RecipeSummary {
-        RecipeSummary {
-            id: self.id,
-            source: SOURCE.to_string(),
-            title: self.title,
-            image: self.thumb,
-            category: self.category,
-            area: self.area,
-        }
-    }
-
     fn into_recipe(self) -> Recipe {
         let ingredients = self.ingredients();
         let tags = self.tags.as_deref().map(split_tags).unwrap_or_default();
@@ -106,14 +95,15 @@ fn split_tags(tags: &str) -> Vec<String> {
         .collect()
 }
 
-/// Normalize a TheMealDB `search.php` / `filter.php` response into summaries.
-pub fn normalize_meals(json: &str) -> Vec<RecipeSummary> {
+/// Normalize a TheMealDB `search.php` / `filter.php` response. `filter.php`
+/// returns only header fields, so those recipes come back partially populated.
+pub fn normalize_meals(json: &str) -> Vec<Recipe> {
     serde_json::from_str::<MealsResponse>(json)
         .ok()
         .and_then(|r| r.meals)
         .unwrap_or_default()
         .into_iter()
-        .map(Meal::into_summary)
+        .map(Meal::into_recipe)
         .collect()
 }
 

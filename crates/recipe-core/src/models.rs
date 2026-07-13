@@ -17,9 +17,14 @@ pub struct Ingredient {
     pub measure: Option<String>,
 }
 
-/// A lightweight recipe listing, as returned by search/browse.
+/// A normalized recipe from any source.
+///
+/// Some arrive only partially populated — a browse/listing result (e.g.
+/// TheMealDB `filter.php`) may carry just `id`, `source`, `title`, and `image`,
+/// with the rest empty. Absent detail is represented as empty (`""` / `[]` /
+/// `None`), not as a distinct "unknown".
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipeSummary {
+pub struct Recipe {
     /// Source-specific identifier (opaque to the frontend).
     pub id: String,
     /// Which source this came from, e.g. `"themealdb"`.
@@ -28,17 +33,6 @@ pub struct RecipeSummary {
     pub image: Option<String>,
     pub category: Option<String>,
     /// Cuisine / region of origin.
-    pub area: Option<String>,
-}
-
-/// A fully-resolved recipe.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Recipe {
-    pub id: String,
-    pub source: String,
-    pub title: String,
-    pub image: Option<String>,
-    pub category: Option<String>,
     pub area: Option<String>,
     pub tags: Vec<String>,
     pub ingredients: Vec<Ingredient>,

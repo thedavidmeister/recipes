@@ -10,4 +10,4 @@ pub mod models;
 pub mod schema_org;
 pub mod themealdb;
 
-pub use models::{Ingredient, Recipe, RecipeSummary};
+pub use models::{Ingredient, Recipe};
