@@ -1,0 +1,16 @@
+[package]
+name = "recipe-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM bindings for recipe-core — recipe normalization in the browser"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+recipe-core = { path = "../recipe-core" }
+# Pinned to match the rainix-provided wasm-bindgen CLI (0.2.122); the crate and
+# CLI versions must be identical or `wasm-bindgen` over the built wasm fails.
+wasm-bindgen = "=0.2.122"
+serde-wasm-bindgen = "0.6"
