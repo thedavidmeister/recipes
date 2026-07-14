@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+# Least privilege: the jobs only checkout + build/test, so the workflow token
+# needs no more than read access to repository contents.
+permissions:
+  contents: read
+jobs:
+  # rainix reusable workflows, pinned to @main so toolchain/CI updates
+  # auto-propagate (the rainix convention). wasm-test is intentionally omitted:
+  # it runs `cargo test --target wasm32 --workspace` (no --lib), which would try
+  # to compile the native-only `backend` crate (tokio/reqwest) to wasm. rs-wasm
+  # builds with --lib, so it covers recipe-core + recipe-wasm and skips backend.
+  rs-static:
+    uses: rainlanguage/rainix/.github/workflows/rainix-rs-static.yaml@main
+    secrets: inherit
+  rs-test:
+    uses: rainlanguage/rainix/.github/workflows/rainix-rs-test.yaml@main
+    secrets: inherit
+  rs-wasm:
+    uses: rainlanguage/rainix/.github/workflows/rainix-rs-wasm.yaml@main
+    secrets: inherit
