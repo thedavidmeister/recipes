@@ -5,6 +5,7 @@
 //! write-gateway lands in a follow-up. Parsing happens client-side in
 //! recipe-core WASM, not here.
 
+mod db;
 mod error;
 mod proxy;
 
@@ -29,6 +30,15 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "recipe_backend=debug,tower_http=info,info".into()),
         )
         .init();
+
+    // `recipe-backend migrate` applies pending DB migrations, then exits.
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        let database = db::open().await?;
+        let conn = database.connect()?;
+        db::migrate(&conn).await?;
+        tracing::info!("migrations up to date");
+        return Ok(());
+    }
 
     let state = AppState::new()?;
 
