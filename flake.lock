@@ -234,6 +234,10 @@
           "rainix",
           "flake-utils"
         ],
+        "nixpkgs": [
+          "rainix",
+          "nixpkgs"
+        ],
         "rainix": "rainix"
       }
     },
