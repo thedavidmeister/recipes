@@ -26,7 +26,7 @@
       bind:value={term}
       placeholder="chicken, pasta, curry…"
       aria-label="Search recipes"
-      class="flex-1 rounded-lg border border-neutral-300 px-3 py-2 outline-none focus:border-neutral-900"
+      class="flex-1 rounded-lg border border-neutral-300 px-3 py-2 outline-hidden focus:border-neutral-900"
     />
     <button
       class="rounded-lg bg-neutral-900 px-4 py-2 font-medium text-white hover:bg-neutral-700"
