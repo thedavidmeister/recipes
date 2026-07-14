@@ -24,25 +24,18 @@ const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 4;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub http: reqwest::Client,
-}
-
-impl AppState {
-    pub fn new() -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .dns_resolver(Arc::new(GuardedResolver))
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-            .timeout(FETCH_TIMEOUT)
-            .user_agent(concat!(
-                "recipes-proxy/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://github.com/thedavidmeister/recipes)"
-            ))
-            .build()?;
-        Ok(Self { http })
-    }
+/// Build the SSRF-guarded HTTP client the proxy uses.
+pub fn build_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .dns_resolver(Arc::new(GuardedResolver))
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .timeout(FETCH_TIMEOUT)
+        .user_agent(concat!(
+            "recipes-proxy/",
+            env!("CARGO_PKG_VERSION"),
+            " (+https://github.com/thedavidmeister/recipes)"
+        ))
+        .build()?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +53,7 @@ pub struct FetchResponse {
 
 /// `POST /api/fetch` — fetch `url` server-side and return its body.
 pub async fn fetch(
-    State(state): State<AppState>,
+    State(state): State<crate::AppState>,
     Json(req): Json<FetchRequest>,
 ) -> Result<Json<FetchResponse>, AppError> {
     let url = reqwest::Url::parse(req.url.trim())

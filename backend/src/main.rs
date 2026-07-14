@@ -8,6 +8,7 @@
 mod db;
 mod error;
 mod proxy;
+mod recipes;
 
 use axum::{
     routing::{get, post},
@@ -15,7 +16,13 @@ use axum::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::proxy::AppState;
+/// Shared handler state: the SSRF-guarded HTTP client (proxy) and a Turso/libSQL
+/// connection (write-gateway).
+#[derive(Clone)]
+pub struct AppState {
+    pub http: reqwest::Client,
+    pub db: libsql::Connection,
+}
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
@@ -40,11 +47,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let state = AppState::new()?;
+    // Open the DB, ensure the schema is current, and build the shared state.
+    let database = db::open().await?;
+    let conn = database.connect()?;
+    db::migrate(&conn).await?;
+    let state = AppState {
+        http: proxy::build_client()?,
+        db: conn,
+    };
 
     let api = Router::new()
         .route("/health", get(health))
         .route("/fetch", post(proxy::fetch))
+        .route("/recipes", post(recipes::create_recipe))
         .with_state(state);
 
     let app = Router::new()
