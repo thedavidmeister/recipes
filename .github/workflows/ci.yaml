@@ -4,6 +4,10 @@ on:
     branches:
       - main
   pull_request:
+# Least privilege: the jobs only checkout + build/test, so the workflow token
+# needs no more than read access to repository contents.
+permissions:
+  contents: read
 jobs:
   # rainix reusable workflows, pinned to @main so toolchain/CI updates
   # auto-propagate (the rainix convention). wasm-test is intentionally omitted:
