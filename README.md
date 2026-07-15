@@ -14,20 +14,22 @@ flowchart TD
     end
 
     subgraph render["Rust · Axum — Render · free, managed"]
-        gate["auth gate<br/>every endpoint needs a session"]
+        gate["auth gate<br/>session required (health · complete · webhook exempt)"]
         ingest["ingest<br/>fetch (SSRF-guarded) → derive → store both halves<br/>fails closed on an unknown source"]
         core["recipe-core<br/>adapters: the only way in"]
         derivecmd["derive (command)<br/>rebuild recipes from raw · no network"]
     end
 
-    tg["Telegram<br/>bot deep link — the login"]
+    tg["Telegram<br/>you press Start; the bot links back to you"]
 
     turso[("Turso · libSQL/SQLite<br/>raw_imports — what the source said<br/>recipes — the derived view")]
     ext["Supported sources<br/>TheMealDB · (adapters, one per source)"]
 
     ui -->|"read the corpus · read-only token"| turso
-    ui -->|"0 · log in · t.me/bot?start=nonce"| tg
-    tg -->|"/start nonce + telegram id"| gate
+    ui -->|"0 · points you at the bot · t.me/bot"| tg
+    tg -->|"/start + telegram id (webhook · own secret, no session)"| wh["auth<br/>mints a link FOR that user"]
+    wh -->|"one-time link, sent to their chat"| tg
+    tg -->|"you open it -> session cookie"| ui
     ui -->|"1 · ingest this URL · session"| gate
     gate --> ingest
     ingest -->|"2 · fetch"| ext
@@ -53,12 +55,26 @@ never hold.
 
 ### Auth is mandatory
 
-**Every API endpoint requires a session** — search included. Accounts are
-authenticated by a **Telegram bot deep link**: the site shows
-`t.me/<bot>?start=<nonce>`, and pressing Start sends the bot `/start <nonce>`
-along with your Telegram id, which _is_ the login. The link goes **to** the bot
-because a bot cannot message someone who has not contacted it first, so the
-familiar "we'll DM you a link" is impossible.
+**Search, browse, read and ingest all require a session.** The only endpoints
+that do not are the ones that cannot: `/api/health` (a prober holds no session),
+`/api/auth/complete` (redeeming the bot's link _is_ how you get a session, so
+requiring one would be circular — the secret in the link is the authentication),
+and `/api/telegram/webhook` (called by Telegram, not a browser; it authenticates
+with its own shared secret instead).
+
+**The bot logs you in; the site only points at it.** You press Start, the bot
+replies **to you** with a one-time link, and opening it sets the session cookie
+in your browser. A bot cannot message someone who has not contacted it first, so
+the familiar "we'll DM you a link" is impossible — you message it.
+
+The direction is load-bearing, and it is not the obvious one. A flow where the
+browser starts a login and waits for a tap hands the capability to _redeem_ to
+whoever **started** it, while the identity comes from whoever **tapped** — so an
+attacker starts a login, sends you the link, and takes your session when you
+tap. That was built here and reproduced as a full account takeover before this
+design replaced it. The accepted cost: the session lands in whichever browser
+opens the bot's link, so cross-device sign-in does not work. Cross-device
+transfer _is_ the attack.
 
 Auth exists because **#20 needs identity** — a group deciding what to cook is a
 headcount, and "everyone said yes" means nothing without knowing who everyone
@@ -103,7 +119,7 @@ TheMealDB would be ~1.5 MB against a 5 GB tier.
 | Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                            |
 | Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do.          |
 | Backend scope  | auth + ingest + derive                                           | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus. Fetching is something ingest does, not an endpoint of its own — there is no URL a caller can aim.                 |
-| Accounts       | **Telegram** bot deep link + nonce                               | No email vendor to vet, no sender domain, no SPF/DKIM/DMARC, and no spam folder to lose a login in. A bot can't message a stranger, so the link goes to the bot — which also deletes the email-bombing vector. Costs: needs Telegram. |
+| Accounts       | **Telegram** bot; it links back to you                           | No email vendor to vet, no sender domain, no SPF/DKIM/DMARC, and no spam folder to lose a login in. A bot can't message a stranger, so the link goes to the bot — which also deletes the email-bombing vector. Costs: needs Telegram. |
 | PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.                       |
 
 **The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots

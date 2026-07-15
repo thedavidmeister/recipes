@@ -13,7 +13,7 @@ jobs:
   # auto-propagate (the rainix convention). wasm-test is intentionally omitted:
   # it runs `cargo test --target wasm32 --workspace` (no --lib), which would try
   # to compile the native-only `backend` crate (tokio/reqwest) to wasm. rs-wasm
-  # builds with --lib, so it covers recipe-core + recipe-wasm and skips backend.
+  # builds with --lib, so it covers recipe-core and skips backend.
   rs-static:
     uses: rainlanguage/rainix/.github/workflows/rainix-rs-static.yaml@main
     secrets: inherit
@@ -23,3 +23,31 @@ jobs:
   rs-wasm:
     uses: rainlanguage/rainix/.github/workflows/rainix-rs-wasm.yaml@main
     secrets: inherit
+  # The frontend, which nothing else here covers: the rs-* jobs are Rust only, so
+  # until this existed `svelte-check` ran exactly when someone remembered to run
+  # it, and a broken SPA could land on a green PR.
+  #
+  # Inlined rather than a rainix reusable because rainix has no node workflow —
+  # its rs-static even notes that "frontend repos format svelte/ts via their own
+  # pipeline". The shared *setup* is still reused via rainix's composite action,
+  # so nix + cachix stay one implementation.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rainlanguage/rainix/.github/actions/nix-cachix-setup@main
+        with:
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # `npm ci`, not `install`: CI must build the locked tree, and fail if the
+      # lockfile and package.json disagree rather than quietly resolving.
+      - run: nix develop -c npm --prefix frontend ci
+      # svelte-check: types across .svelte + .ts. The whole reason for this job.
+      - run: nix develop -c npm --prefix frontend run check
+      # The SPA must actually build. Env vars are deliberately unset: with
+      # `$env/dynamic/public` they are read at runtime from the generated
+      # `_app/env.js`, so a build proves compilation without pretending to prove
+      # configuration.
+      - run: nix develop -c npm --prefix frontend run build
+      # Every UI state is a story (see README), so a story that no longer
+      # compiles is a broken contract, not a broken extra. Screenshots stay
+      # manual — this only proves the stories build.
+      - run: nix develop -c npm --prefix frontend run build-storybook
