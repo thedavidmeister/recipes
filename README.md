@@ -9,7 +9,7 @@ author recipes here.
 
 ```mermaid
 flowchart TD
-    subgraph browser["Browser · SvelteKit SPA (static) — Vercel / Cloudflare Pages · free"]
+    subgraph browser["Browser · SvelteKit SPA (static) — Render static site · free"]
         ui["UI — TanStack Query · Bits UI · Tailwind"]
         wasm["recipe-core compiled to WASM<br/>parse + normalize raw bytes, in-browser"]
     end
@@ -45,25 +45,34 @@ The backend only does the two things a browser _can't_:
 
 ### Why these choices
 
-| Decision      | Choice                                                            | Why                                                                                                                                                                     |
-| ------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend host  | **Render** — free, managed, runs a Rust Docker image              | Keeps Rust without a self-managed box. Shuttle's free tier ended 2025‑12‑19; a VPS (Hetzner) would mean owning host security/patching. Render is managed and card-free. |
-| Database      | **Turso** — libSQL/SQLite, 5 GB free                              | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                           |
-| Frontend      | **SvelteKit** SPA (`adapter-static`) on Vercel / Cloudflare Pages | All logic is client-side, so the frontend is a static bundle — free to host anywhere.                                                                                   |
-| Processing    | **Rust → WASM** in the browser                                    | One parser, shared by server and client; keeps compute off the (free, small) backend.                                                                                   |
-| Backend scope | fetch-proxy + write-gateway only                                  | The only jobs that genuinely require a server: cross-origin fetches and holding secrets.                                                                                |
+| Decision       | Choice                                                           | Why                                                                                                                                                                                                                      |
+| -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching. |
+| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                            |
+| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | All logic is client-side, so the frontend is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.            |
+| Processing     | **Rust → WASM** in the browser                                   | One parser, shared by server and client; keeps compute off the (free, small) backend.                                                                                                                                    |
+| Backend scope  | fetch-proxy + write-gateway only                                 | The only jobs that genuinely require a server: cross-origin fetches and holding secrets.                                                                                                                                 |
+| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.          |
 
-The all-in-one alternative (everything on Cloudflare Workers + D1 + KV) is
+**The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots
+only — that is the whole vendor list, so nothing else should be described as
+"already in the stack". That's a statement of fact, not a ban: adding a service
+is a decision to take deliberately when something needs it.
+
+Paths not taken, and why: an all-in-one Cloudflare (Workers + D1 + KV) is
 cheaper still, but its free CPU cap forces a TypeScript backend — it would mean
-dropping Rust, so we didn't take it.
+dropping Rust. Vercel's free tier has no always-on server and treats Rust as a
+community runtime. Both are reasons they don't host **this Rust backend** — not
+verdicts on the vendors.
 
 ## Layout
 
 ```
 crates/recipe-core   shared Rust — models + schema.org + TheMealDB normalize (native + wasm32)
-crates/recipe-wasm   wasm-bindgen wrapper → npm package the frontend imports        [wip]
-backend/             Axum fetch-proxy + Turso write-gateway (deploys to Render)      [wip]
-frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind             [wip]
+crates/recipe-wasm   wasm-bindgen wrapper → npm package the frontend imports
+backend/             Axum fetch-proxy + Turso write-gateway (deploys to Render)
+frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind
+frontend/.storybook  Storybook — every UI state declared as a story (see below)
 flake.nix            rainix `wasm-shell` dev env (Rust + wasm-pack + Node)
 ```
 
@@ -78,13 +87,46 @@ nix develop
 
 - **Shared crate:** `cargo test -p recipe-core`
 - **WASM build:** `cargo build -p recipe-core --target wasm32-unknown-unknown`
-- Backend and frontend instructions land as those crates are built out.
+- **Frontend:** `cd frontend && npm ci && npm run dev`
+- **Storybook:** `cd frontend && npm run storybook`
+
+### UI states live in Storybook
+
+Every state a user can see is **declared as a story** rather than reached by
+driving the live app — `Pending`, `Error` and `Empty` are impractical to reach
+by clicking, and the problem grows as states multiply. Components take their
+state as props (e.g. `SearchResults` takes `status: idle|pending|error|ready`),
+so the page owns the query and the component owns rendering. Story fixtures
+mirror **real** source records; invented ids render as the wrong meal.
+
+### Screenshots for a UI PR
+
+Storybook and screenshots are complementary — Storybook declares the states,
+screenshots pin the work at hand onto a PR. Because each story is its own URL,
+capture is just navigate-and-shoot; no browser automation is involved.
+
+```sh
+(cd frontend && npm run build-storybook)
+nix run .#storybook-shot                  # every story -> ./screenshots (gitignored)
+nix run .#storybook-shot -- results       # only ids matching a regex
+```
+
+`WIDTH`/`HEIGHT`/`SCALE`/`OUT_DIR` tune the capture. The flake pins the two
+things that otherwise silently break it: `chromium` (not `ungoogled-chromium`,
+which crashes headless) and a fontconfig with generic aliases — without it text
+renders invisibly, and with fonts but no aliases a Tailwind sans UI renders
+serif.
+
+Shots are uploaded to a Cloudflare R2 public bucket and embedded in the PR by
+URL (GitHub has no image-upload API). See `.env.example`; run it by hand — it is
+deliberately not in CI.
 
 ## Status
 
-Early. `recipe-core` (the shared normalization logic) exists and is tested; the
-backend is being reshaped into the fetch-proxy/write-gateway above, and the
-`recipe-wasm` package and SvelteKit frontend are next.
+Early. `recipe-core` (shared normalization) is tested and compiles native +
+wasm32; the Axum fetch-proxy and Turso write-gateway exist; the SvelteKit SPA
+searches TheMealDB end-to-end (fetch → WASM normalize → render) and carries a
+Storybook harness. Not yet deployed — see the open issues.
 
 ## License
 
