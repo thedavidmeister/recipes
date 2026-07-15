@@ -1,4 +1,4 @@
-import type { Recipe } from "$lib/types";
+import type { Category, Recipe } from "$lib/types";
 
 // Real TheMealDB records (verified against the live API), shaped the way
 // recipe-core normalizes them. Real data keeps stories honest: invented ids and
@@ -29,6 +29,76 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
     ...over,
   };
 }
+
+/** Real TheMealDB categories (categories.php), trimmed to a browsable few. */
+export const categories: Category[] = [
+  {
+    name: "Beef",
+    thumb: "https://www.themealdb.com/images/category/beef.png",
+    description:
+      "Beef is the culinary name for meat from cattle, particularly skeletal muscle.",
+  },
+  {
+    name: "Chicken",
+    thumb: "https://www.themealdb.com/images/category/chicken.png",
+    description:
+      "Chicken is a type of domesticated fowl, a subspecies of the red junglefowl.",
+  },
+  {
+    name: "Dessert",
+    thumb: "https://www.themealdb.com/images/category/dessert.png",
+    description: "Dessert is a course that concludes a meal.",
+  },
+  {
+    name: "Lamb",
+    thumb: "https://www.themealdb.com/images/category/lamb.png",
+    description:
+      "Lamb, hogget, and mutton are the meat of domestic sheep (species Ovis aries).",
+  },
+  {
+    name: "Miscellaneous",
+    thumb: "https://www.themealdb.com/images/category/miscellaneous.png",
+    description: "General foods that don't fit into another category",
+  },
+  {
+    name: "Seafood",
+    thumb: "https://www.themealdb.com/images/category/seafood.png",
+    description: "Seafood is any form of sea life regarded as food by humans.",
+  },
+];
+
+/**
+ * A category browse result — `filter.php` returns header fields only, so these
+ * are deliberately partial: no ingredients, no instructions.
+ */
+export const partialRecipes: Recipe[] = [
+  {
+    id: "52874",
+    source: "themealdb",
+    title: "Beef and Mustard Pie",
+    image: "https://www.themealdb.com/images/media/meals/sytuqu1511553755.jpg",
+    category: "Beef",
+    area: null,
+    tags: [],
+    ingredients: [],
+    instructions: "",
+    source_url: null,
+    video_url: null,
+  },
+  {
+    id: "52878",
+    source: "themealdb",
+    title: "Beef and Oyster pie",
+    image: "https://www.themealdb.com/images/media/meals/wrssvt1511556563.jpg",
+    category: "Beef",
+    area: null,
+    tags: [],
+    ingredients: [],
+    instructions: "",
+    source_url: null,
+    video_url: null,
+  },
+];
 
 export const recipes: Recipe[] = [
   recipe(),
