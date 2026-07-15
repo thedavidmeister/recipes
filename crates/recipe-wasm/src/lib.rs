@@ -15,24 +15,24 @@ fn js_err(e: serde_wasm_bindgen::Error) -> JsValue {
 }
 
 /// Normalize a document fetched from a supported source into an array of
-/// recipes. **Throws `unsupported source: <host>`** when no adapter claims the
-/// host — the corpus is a cache of sources we support, not arbitrary pages, so
-/// an unknown source fails closed rather than being parsed best-effort.
+/// recipes. **Throws** when the URL is unparseable, or when no adapter claims
+/// its host — the corpus is a cache of sources we support, not arbitrary pages,
+/// so an unknown source fails closed rather than being parsed best-effort.
 ///
-/// `host` is passed in already parsed (`new URL(u).hostname`): recipe-core does
-/// not parse URLs, to keep `url`/`idna` out of the wasm bundle.
+/// The host is derived from `url` inside recipe-core, never passed alongside it:
+/// otherwise a caller could name a supported host for someone else's document.
 #[wasm_bindgen(js_name = normalizeDocument)]
-pub fn normalize_document(host: &str, url: &str, body: &str) -> Result<JsValue, JsValue> {
-    match adapters::normalize(host, url, body) {
+pub fn normalize_document(url: &str, body: &str) -> Result<JsValue, JsValue> {
+    match adapters::normalize(url, body) {
         Ok(recipes) => serde_wasm_bindgen::to_value(&recipes).map_err(js_err),
-        Err(e) => Err(JsValue::from_str(&format!("unsupported source: {}", e.host))),
+        Err(e) => Err(JsValue::from_str(&e.to_string())),
     }
 }
 
-/// Whether a host is a source we ingest.
+/// Whether a URL's host is a source we ingest.
 #[wasm_bindgen(js_name = isSupportedSource)]
-pub fn is_supported_source(host: &str) -> bool {
-    adapters::adapter_for(host).is_some()
+pub fn is_supported_source(url: &str) -> bool {
+    adapters::is_supported(url)
 }
 
 /// Extract a normalized recipe from a page's HTML (its schema.org/Recipe

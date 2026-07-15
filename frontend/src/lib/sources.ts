@@ -12,17 +12,16 @@ async function fetchText(url: string, what: string): Promise<string> {
 /**
  * Fetch a document from a source and normalize it through the adapter registry.
  *
- * Everything that enters the corpus goes through here: recipe-core routes the
- * document to the adapter claiming the host, and **throws for a host no adapter
- * claims**. The corpus is a cache of sources we support, not arbitrary pages, so
- * an unknown source fails closed instead of being parsed best-effort.
+ * Everything that enters the corpus goes through here: recipe-core derives the
+ * host from the URL, routes the document to the adapter claiming it, and
+ * **throws for a host no adapter claims**. The corpus is a cache of sources we
+ * support, not arbitrary pages, so an unknown source fails closed instead of
+ * being parsed best-effort.
  */
 async function ingest(url: string, what: string): Promise<Recipe[]> {
   const body = await fetchText(url, what);
   await ensureWasm();
-  // The host is parsed here: recipe-core deliberately has no URL parser, to keep
-  // `url`/`idna` out of the wasm bundle.
-  return normalizeDocument(new URL(url).hostname, url, body) as Recipe[];
+  return normalizeDocument(url, body) as Recipe[];
 }
 
 /**

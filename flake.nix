@@ -140,9 +140,13 @@
         devShells.default = rainix.devShells.${system}.wasm-shell.overrideAttrs (old: {
           # Turso CLI (from rainix's exposed pkgs) for DB provisioning +
           # migrations, reproducibly via `nix develop`. storybook-shot puts the
-          # screenshot harness on PATH.
+          # screenshot harness on PATH. binaryen supplies `wasm-opt` for the
+          # release bundle — pinned here rather than letting wasm-pack download
+          # a toolchain of its own (`--mode no-install` deliberately stops it,
+          # which also means wasm-opt only runs because we run it).
           buildInputs = (old.buildInputs or [ ]) ++ [
             pkgs.turso-cli
+            pkgs.binaryen
             storybook-shot
           ];
           shellHook = (old.shellHook or "") + ''

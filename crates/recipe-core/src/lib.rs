@@ -11,5 +11,5 @@ pub mod models;
 pub mod schema_org;
 pub mod themealdb;
 
-pub use adapters::{adapter_for, Adapter, UnsupportedSource};
+pub use adapters::{adapter_for, Adapter, IngestError};
 pub use models::{Ingredient, Recipe};

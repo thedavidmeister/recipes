@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// These types derive both `Serialize` and `Deserialize` so they round-trip
 /// across the wire (WASM ⇄ JS ⇄ backend) and in and out of Turso.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ingredient {
     pub name: String,
     pub measure: Option<String>,
@@ -23,7 +23,7 @@ pub struct Ingredient {
 /// TheMealDB `filter.php`) may carry just `id`, `source`, `title`, and `image`,
 /// with the rest empty. Absent detail is represented as empty (`""` / `[]` /
 /// `None`), not as a distinct "unknown".
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     /// Source-specific identifier (opaque to the frontend).
     pub id: String,

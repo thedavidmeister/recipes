@@ -1,3 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/recipe-core", "crates/recipe-wasm", "backend"]
+
+# The wasm bundle ships to every visitor, so optimize for size over speed:
+# normalization is a few hundred microseconds of JSON/HTML work, not a hot loop.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
