@@ -1,6 +1,8 @@
 <script lang="ts">
   import { createQuery } from "@tanstack/svelte-query";
   import { searchThemealdb } from "$lib/sources";
+  import type { SearchStatus } from "$lib/types";
+  import SearchResults from "$lib/components/SearchResults.svelte";
 
   let term = $state("");
   let submitted = $state("");
@@ -10,6 +12,16 @@
     queryFn: () => searchThemealdb(submitted),
     enabled: submitted.length > 0,
   }));
+
+  const status = $derived<SearchStatus>(
+    !submitted
+      ? "idle"
+      : results.isError
+        ? "error"
+        : results.isPending
+          ? "pending"
+          : "ready",
+  );
 
   function search(event: SubmitEvent) {
     event.preventDefault();
@@ -35,36 +47,5 @@
     </button>
   </form>
 
-  {#if results.isPending && submitted}
-    <p class="mt-8 text-neutral-500">Searching…</p>
-  {:else if results.isError}
-    <p class="mt-8 text-red-600">Something went wrong. Try again.</p>
-  {:else if results.data}
-    {#if results.data.length === 0}
-      <p class="mt-8 text-neutral-500">No recipes found for “{submitted}”.</p>
-    {:else}
-      <div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {#each results.data as recipe (recipe.source + recipe.id)}
-          <article
-            class="overflow-hidden rounded-xl border border-neutral-200 bg-white"
-          >
-            {#if recipe.image}
-              <img
-                src={recipe.image}
-                alt={recipe.title}
-                class="aspect-video w-full object-cover"
-                loading="lazy"
-              />
-            {/if}
-            <div class="p-4">
-              <h2 class="font-semibold">{recipe.title}</h2>
-              <p class="mt-1 text-sm text-neutral-500">
-                {[recipe.category, recipe.area].filter(Boolean).join(" · ")}
-              </p>
-            </div>
-          </article>
-        {/each}
-      </div>
-    {/if}
-  {/if}
+  <SearchResults {status} recipes={results.data ?? []} term={submitted} />
 </main>

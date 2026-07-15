@@ -5,6 +5,9 @@ export interface Ingredient {
   measure: string | null;
 }
 
+/** Render state for a search: what the UI shows, independent of the query lib. */
+export type SearchStatus = "idle" | "pending" | "error" | "ready";
+
 export interface Recipe {
   id: string;
   source: string;
