@@ -18,12 +18,14 @@ diagram in [README.md](./README.md).
 - **Turso** (libSQL/SQLite) is the corpus/store. Dev env + CI via **rainix**
   (`nix develop` = rainix `wasm-shell`: Rust + wasm-pack + Node).
 
-## The infra today is Render + Turso
+## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 
 Backend = Render web service (free, spins down at 15 min idle). Frontend +
 Storybook = Render **static site** (permanently free, never spins down).
 Render's **500 build-minutes/month are shared** across the workspace and belong
-to deploys — don't design work that burns them.
+to deploys — don't design work that burns them. **Cloudflare R2** holds PR
+screenshots only (bucket `lehlehleh`) — genuinely $0 at this size, egress always
+free. Render has **no object storage** (MinIO would need a paid instance+disk).
 
 That list is a **fact, not a ban**. Don't claim anything else is "already in our
 stack" (Vercel/Cloudflare are not) — but adding a service when something needs
@@ -76,9 +78,46 @@ re-deriving a settled decision wastes the human's time. Live design notes:
   query, the component owns rendering. Story fixtures mirror **real** source
   records — invented ids/images render as the wrong meal. Stories use
   `const meta = {…} satisfies Meta<typeof Cmp>`, never a `Meta<…>` annotation
-  (an annotation breaks `StoryObj` arg inference). Storybook and screenshots are
-  complementary: Storybook declares the states, screenshots pin the work at hand
-  onto a PR. See #21.
+  (an annotation breaks `StoryObj` arg inference).
+
+## Screenshots on a UI PR (settled — see #21)
+
+Storybook and screenshots are **complementary**: Storybook _declares_ the
+states, screenshots _pin the work at hand_ onto the PR. A UI PR wants both. Run
+this by hand when a PR needs shots — it is deliberately **not** in CI.
+
+```sh
+(cd frontend && npm ci && npm run build-storybook)
+nix run .#storybook-shot                       # every story -> ./screenshots
+WIDTH=760 HEIGHT=90 nix run .#storybook-shot -- 'searchresults--(pending|error)'
+```
+
+Then upload to R2 and embed the **public** URL in a PR comment (`.env.example`
+documents the vars; secrets live in gitignored `.env`):
+
+```sh
+rclone copy screenshots/ "R2:$R2_BUCKET/recipes/pr-<n>/" --header-upload "Content-Type: image/png"
+# embed: $R2_PUBLIC_BASE/recipes/pr-<n>/<story-id>.png
+```
+
+Hard-won details — don't rediscover these:
+
+- **GitHub has no API to attach an image to a comment**
+  (`/upload/policies/assets` is web-UI-only, rejects PAT auth). Hence hosting +
+  embedding by URL.
+- The **public** host (`pub-*.r2.dev`) is NOT the S3 endpoint, and only exists
+  once the bucket has _Public access → Allow_. Camo fetches server-side, so the
+  URL must be unsigned/non-expiring. **Verify each URL returns `200 image/png`
+  anonymously before posting** — a 404 embed looks like success.
+- Upload with **rclone**: awscli's TLS fails against R2 here, and system curl
+  7.81's `--aws-sigv4` omits R2's required `x-amz-content-sha256`.
+- Scope the R2 token to **Object Read & Write on one bucket** — never a global
+  Cloudflare key. It intentionally can't list buckets.
+- `screenshots/` is gitignored. Never commit PNGs; never use an orphan branch.
+- The capture traps live in `flake.nix` (`storybook-shot`): `pkgs.chromium`, not
+  `ungoogled-chromium` (crashes headless); and a fonts.conf with generic
+  aliases, because `makeFontsConf` alone renders a Tailwind sans UI as
+  **serif**.
 - Keep the WASM bundle lean — avoid heavy deps: `recipe-core` extracts JSON-LD
   with the lightweight `tl` tokenizer (a real parser, not html5ever/scraper,
   which bloat wasm and pull in `getrandom`). Not regex.
