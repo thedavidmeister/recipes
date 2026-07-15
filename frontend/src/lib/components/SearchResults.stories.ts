@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import SearchResults from "./SearchResults.svelte";
-import { recipes } from "$lib/fixtures";
+import { recipes, partialRecipes } from "$lib/fixtures";
 
 // `satisfies` (not an annotation): StoryObj<typeof meta> infers args from
 // `component`, which only works when typeof meta keeps the literal shape.
@@ -33,4 +33,13 @@ export const Empty: Story = {
 
 export const Results: Story = {
   args: { status: "ready", recipes, term: "chicken" },
+};
+
+/**
+ * Browsing a category. TheMealDB's `filter.php` returns header fields only, so
+ * these cards render from partial records — title and image, no area. They are
+ * deliberately never written to the corpus (see `backend.isComplete`).
+ */
+export const BrowsePartials: Story = {
+  args: { status: "ready", recipes: partialRecipes, term: "Beef" },
 };

@@ -1,31 +1,68 @@
 <script lang="ts">
   import { createQuery } from "@tanstack/svelte-query";
-  import { searchThemealdb } from "$lib/sources";
-  import type { SearchStatus } from "$lib/types";
+  import {
+    searchThemealdb,
+    listCategories,
+    browseCategory,
+  } from "$lib/sources";
+  import { saveRecipes } from "$lib/backend";
+  import type { Recipe, SearchStatus } from "$lib/types";
   import SearchResults from "$lib/components/SearchResults.svelte";
+  import CategoryPicker from "$lib/components/CategoryPicker.svelte";
 
   let term = $state("");
   let submitted = $state("");
+  let category = $state("");
 
+  // Searching and browsing are one result list: the last action wins.
   const results = createQuery(() => ({
-    queryKey: ["themealdb", submitted],
+    queryKey: ["themealdb", "search", submitted],
     queryFn: () => searchThemealdb(submitted),
     enabled: submitted.length > 0,
   }));
 
+  const browsed = createQuery(() => ({
+    queryKey: ["themealdb", "category", category],
+    queryFn: () => browseCategory(category),
+    enabled: category.length > 0,
+  }));
+
+  const categories = createQuery(() => ({
+    queryKey: ["themealdb", "categories"],
+    queryFn: listCategories,
+  }));
+
+  const active = $derived(category ? browsed : results);
+  const label = $derived(category || submitted);
+
   const status = $derived<SearchStatus>(
-    !submitted
+    !label
       ? "idle"
-      : results.isError
+      : active.isError
         ? "error"
-        : results.isPending
+        : active.isPending
           ? "pending"
           : "ready",
   );
 
+  // Persisting the corpus is a side effect of finding recipes, never a gate on
+  // rendering them: saveRecipes skips partials (category browse returns header
+  // fields only) and swallows individual failures.
+  $effect(() => {
+    const found: Recipe[] | undefined = active.data;
+    if (found?.length) void saveRecipes(found).catch(() => {});
+  });
+
   function search(event: SubmitEvent) {
     event.preventDefault();
+    category = "";
     submitted = term.trim();
+  }
+
+  function browse(next: string) {
+    submitted = "";
+    term = "";
+    category = next;
   }
 </script>
 
@@ -47,5 +84,13 @@
     </button>
   </form>
 
-  <SearchResults {status} recipes={results.data ?? []} term={submitted} />
+  <div class="mt-3 max-w-xs">
+    <CategoryPicker
+      categories={categories.data ?? []}
+      bind:value={category}
+      onSelect={browse}
+    />
+  </div>
+
+  <SearchResults {status} recipes={active.data ?? []} term={label} />
 </main>
