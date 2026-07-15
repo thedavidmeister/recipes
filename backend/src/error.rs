@@ -11,6 +11,10 @@ use serde_json::json;
 pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
+    /// No live session. Auth is mandatory (#25), so this is the default answer
+    /// to an anonymous caller.
+    #[error("{0}")]
+    Unauthorized(String),
     /// The target resolves to a non-public address (SSRF guard).
     #[error("blocked: target address is not permitted")]
     Blocked,
@@ -30,6 +34,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Blocked => StatusCode::FORBIDDEN,
             AppError::Upstream(e) => {
                 tracing::warn!("upstream error: {e}");

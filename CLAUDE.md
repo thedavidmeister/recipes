@@ -85,6 +85,40 @@ re-deriving a settled decision wastes the human's time. Live design notes:
 - **#20 — cook-decider** (realtime transport decided: WS for liveness + Turso
   for persistence).
 
+## Auth is mandatory (#25)
+
+**Every API endpoint requires a session.** The only exceptions are `/health` (a
+prober holds no session), `/auth/start` + `/auth/poll` (how you get one), and
+`/telegram/webhook` (called by Telegram, not a browser — it authenticates with
+its own secret). The static SPA shell still loads; it can do nothing until
+login.
+
+Since #29 `/api/ingest` **is what a search does**, so gating everything gates
+search — deliberately. This is a private cooking app for a group, not a public
+search engine.
+
+Auth exists for **identity** (#20 needs a headcount), _not_ to protect the
+corpus: nothing writes it from outside and ingest fails closed on an unknown
+host, so the surface underneath is already safe. Don't re-argue "gate the
+writes" — there are none.
+
+- **The magic link goes TO the bot.** A bot cannot message someone who has not
+  contacted it (`Forbidden: bot can't initiate conversation with a user`), so
+  "DM me a link" is impossible. We show `t.me/<bot>?start=<nonce>`.
+- **Nonce ≠ poll secret.** The nonce rides in a shareable link; the poll secret
+  never leaves the minting browser and is what redeems the session. One value
+  doing both jobs would let anyone who saw the link steal the session.
+- **The webhook secret is not optional.** Without
+  `X-Telegram-Bot-Api-Secret-Token` anyone can POST a forged `/start` claiming
+  any Telegram id — a forged login.
+- **Identity is the Telegram numeric id, never the username** — usernames are
+  mutable and reassignable.
+- Secrets are **hashed at rest** and the hash is the lookup key. SHA-256 with no
+  KDF is right _here_: they are 256-bit CSPRNG output, so there's nothing to
+  brute-force and a KDF would just tax every request.
+- **CORS is not auth** — it's browser-enforced, `curl` ignores it. `CorsLayer`
+  is permissive on purpose; the session check is the guard.
+
 ## Conventions
 
 - Parsing/normalization lives in **`recipe-core` once**, server-side — never

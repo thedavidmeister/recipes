@@ -14,16 +14,22 @@ flowchart TD
     end
 
     subgraph render["Rust · Axum — Render · free, managed"]
+        gate["auth gate<br/>every endpoint needs a session"]
         ingest["ingest<br/>fetch (SSRF-guarded) → derive → store both halves<br/>fails closed on an unknown source"]
         core["recipe-core<br/>adapters: the only way in"]
         derivecmd["derive (command)<br/>rebuild recipes from raw · no network"]
     end
 
+    tg["Telegram<br/>bot deep link — the login"]
+
     turso[("Turso · libSQL/SQLite<br/>raw_imports — what the source said<br/>recipes — the derived view")]
     ext["Supported sources<br/>TheMealDB · (adapters, one per source)"]
 
     ui -->|"read the corpus · read-only token"| turso
-    ui -->|"1 · ingest this URL"| ingest
+    ui -->|"0 · log in · t.me/bot?start=nonce"| tg
+    tg -->|"/start nonce + telegram id"| gate
+    ui -->|"1 · ingest this URL · session"| gate
+    gate --> ingest
     ingest -->|"2 · fetch"| ext
     ingest --> core
     core -->|"3 · recipes + their raw"| ingest
@@ -44,6 +50,20 @@ normalizing there means one normalizer instead of two, nothing to trust from a
 client, and nothing for a visitor to download. It also lets a source require a
 credential: an API key can live in a Render env var, which a public SPA could
 never hold.
+
+### Auth is mandatory
+
+**Every API endpoint requires a session** — search included. Accounts are
+authenticated by a **Telegram bot deep link**: the site shows
+`t.me/<bot>?start=<nonce>`, and pressing Start sends the bot `/start <nonce>`
+along with your Telegram id, which _is_ the login. The link goes **to** the bot
+because a bot cannot message someone who has not contacted it first, so the
+familiar "we'll DM you a link" is impossible.
+
+Auth exists because **#20 needs identity** — a group deciding what to cook is a
+headcount, and "everyone said yes" means nothing without knowing who everyone
+is. It is not what protects the corpus; adapters already do that (below).
+Requiring Telegram to use the site at all is a deliberate product call.
 
 ### Adapters: the only way in
 
@@ -76,14 +96,15 @@ TheMealDB would be ~1.5 MB against a 5 GB tier.
 
 ### Why these choices
 
-| Decision       | Choice                                                           | Why                                                                                                                                                                                                                          |
-| -------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching.     |
-| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                |
-| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                   |
-| Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do. |
-| Backend scope  | ingest + derive                                                  | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus. Fetching is something ingest does, not an endpoint of its own — there is no URL a caller can aim.        |
-| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.              |
+| Decision       | Choice                                                           | Why                                                                                                                                                                                                                                   |
+| -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching.              |
+| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                         |
+| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                            |
+| Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do.          |
+| Backend scope  | auth + ingest + derive                                           | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus. Fetching is something ingest does, not an endpoint of its own — there is no URL a caller can aim.                 |
+| Accounts       | **Telegram** bot deep link + nonce                               | No email vendor to vet, no sender domain, no SPF/DKIM/DMARC, and no spam folder to lose a login in. A bot can't message a stranger, so the link goes to the bot — which also deletes the email-bombing vector. Costs: needs Telegram. |
+| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.                       |
 
 **The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots
 only — that is the whole vendor list, so nothing else should be described as

@@ -16,6 +16,8 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
+  # The bot replies to Telegram with a JSON body (#25).
+  "json",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,3 +30,17 @@ dotenvy = "0.15"
 futures-util = "0.3"
 url = "2"
 libsql = "0.9.30"
+# Auth (#25). `rand` mints nonces/secrets from the OS CSPRNG; `sha2` hashes them
+# at rest (they are 256-bit random, so a fast hash is right — there is nothing to
+# brute-force, and a KDF would only slow every request); `subtle` compares the
+# webhook secret without leaking a timing signal; `hex` encodes them for URLs and
+# headers.
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2"
+hex = "0.4"
+
+[dev-dependencies]
+# Drives the real Router through `oneshot` so the auth gate is tested against
+# what actually serves traffic, not a lookalike.
+tower = { version = "0.5", features = ["util"] }

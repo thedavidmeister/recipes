@@ -14,6 +14,7 @@ use libsql::{Builder, Connection, Database};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_raw_imports.sql")),
+    (3, include_str!("../migrations/0003_auth.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -84,8 +85,15 @@ mod tests {
         migrate(&conn).await.unwrap(); // second run must apply nothing
 
         // Both halves of the corpus exist and are queryable: `recipes` is the
-        // derived view, `raw_imports` what the sources actually said.
-        for table in ["recipes", "raw_imports"] {
+        // derived view, `raw_imports` what the sources actually said. The auth
+        // tables gate all of it (#25).
+        for table in [
+            "recipes",
+            "raw_imports",
+            "users",
+            "login_attempts",
+            "sessions",
+        ] {
             let mut rows = conn
                 .query(&format!("SELECT COUNT(*) FROM {table}"), ())
                 .await
