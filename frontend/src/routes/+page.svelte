@@ -5,8 +5,8 @@
     listCategories,
     browseCategory,
   } from "$lib/sources";
-  import { me, startLogin, pollLogin, logout } from "$lib/auth";
-  import type { LoginStatus, SearchStatus, LoginStart } from "$lib/types";
+  import { me, logout, botLink } from "$lib/auth";
+  import type { LoginStatus, SearchStatus } from "$lib/types";
   import SearchResults from "$lib/components/SearchResults.svelte";
   import CategoryPicker from "$lib/components/CategoryPicker.svelte";
   import Login from "$lib/components/Login.svelte";
@@ -16,78 +16,24 @@
   // Auth is mandatory (#25), so this gates the whole page — search included,
   // because since #29 a search *is* an ingest.
   //
-  // The session is an HttpOnly cookie, so script cannot answer this locally;
-  // only the server knows. `retry: false` because a 401 is a legitimate answer
+  // The session is an HttpOnly cookie, so script cannot answer this locally; only
+  // the server knows. `retry: false` because a 401 is a legitimate answer
   // ("nobody is logged in"), not a failure worth retrying.
+  //
+  // It refetches while signed out, which is also how this tab notices a login:
+  // opening the bot's link in the same browser sets the cookie, and the next poll
+  // simply starts succeeding. There is nothing to coordinate — the tab that
+  // showed the link holds no secret, deliberately.
   const session = createQuery(() => ({
     queryKey: ["session"],
     queryFn: me,
     retry: false,
+    refetchInterval: (q) => (q.state.data ? false : 2000),
   }));
 
-  // One state machine rather than several flags, so the states the story file
-  // declares are the states that exist.
-  let phase = $state<Exclude<LoginStatus, "checking">>("idle");
-  let attempt = $state<LoginStart | null>(null);
-  let loginError = $state<string | null>(null);
-
-  // `checking` is the query's business; every other phase is ours.
   const loginStatus = $derived<LoginStatus>(
-    session.isPending ? "checking" : phase,
+    session.isError ? "error" : session.isPending ? "checking" : "idle",
   );
-
-  async function beginLogin() {
-    loginError = null;
-    phase = "starting";
-    try {
-      attempt = await startLogin();
-      phase = "waiting";
-    } catch (e) {
-      loginError = e instanceof Error ? e.message : String(e);
-      phase = "error";
-    }
-  }
-
-  // Wait for the tap.
-  //
-  // Polling, because the alternative — waiting on a socket — is #20's to build;
-  // when it lands this can wait on that instead (see #25). The nonce is
-  // short-lived, so this cannot spin forever: it stops on ready, on expiry, or
-  // when the component tears down.
-  $effect(() => {
-    if (phase !== "waiting" || !attempt) return;
-    const secret = attempt.pollSecret;
-
-    let live = true;
-    const timer = setInterval(async () => {
-      if (!live) return;
-      try {
-        const result = await pollLogin(secret);
-        if (!live) return;
-        if (result.status === "ready") {
-          live = false;
-          attempt = null;
-          phase = "idle";
-          // The cookie arrived on that response and script cannot read it, so
-          // there is nothing to store — just ask the server who we are now.
-          await queryClient.invalidateQueries({ queryKey: ["session"] });
-        } else if (result.status === "expired") {
-          live = false;
-          attempt = null;
-          phase = "expired";
-        }
-      } catch (e) {
-        live = false;
-        loginError = e instanceof Error ? e.message : String(e);
-        phase = "error";
-      }
-    }, 2000);
-
-    return () => {
-      live = false;
-      clearInterval(timer);
-    };
-  });
 
   async function signOut() {
     await logout();
@@ -155,9 +101,8 @@
 {#if !authed}
   <Login
     status={loginStatus}
-    link={attempt?.link}
-    error={loginError ?? undefined}
-    onStart={beginLogin}
+    link={botLink()}
+    error={session.error instanceof Error ? session.error.message : undefined}
   />
 {:else}
   <main class="mx-auto max-w-5xl px-4 py-10">

@@ -36,37 +36,12 @@ export interface User {
   username: string | null;
 }
 
-/** What `POST /api/auth/start` hands back. */
-export interface LoginStart {
-  /** `t.me/<bot>?start=<nonce>` — shareable by design. */
-  link: string;
-  /** Redeems the session. Must never go in the link. */
-  pollSecret: string;
-  expiresAt: number;
-}
-
-/** Mirrors `auth::PollResponse`. No token: on `ready` the session arrived as an
- * HttpOnly cookie the browser holds and script cannot read. */
-export type PollResult =
-  | { status: "pending" }
-  | { status: "ready"; username: string | null }
-  | { status: "expired" };
-
 /**
  * Render state for the login screen. Auth is mandatory (#25), so this is the
  * first thing a visitor meets.
  *
  * - `checking` — asking `/api/me` whether a session already exists.
- * - `idle` — no session; offer to start.
- * - `starting` — minting a login.
- * - `waiting` — link is up; waiting for the tap.
- * - `expired` — nobody tapped in time.
- * - `error` — the backend could not be reached or refused.
+ * - `idle` — no session; point at the bot.
+ * - `error` — the backend could not be reached.
  */
-export type LoginStatus =
-  | "checking"
-  | "idle"
-  | "starting"
-  | "waiting"
-  | "expired"
-  | "error";
+export type LoginStatus = "checking" | "idle" | "error";

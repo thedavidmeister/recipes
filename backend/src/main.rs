@@ -70,13 +70,14 @@ pub fn app(state: AppState) -> Router {
     // The only endpoints reachable without a session, each because requiring one
     // would be circular or wrong:
     //   /health           — a liveness probe the host calls, holding no session.
-    //   /auth/start|poll  — how a session is obtained in the first place.
+    //   /auth/complete    — redeems the bot's link; the secret in it IS the
+    //                       authentication, and requiring a session to get one
+    //                       would be circular.
     //   /telegram/webhook — called by Telegram, not a browser; it carries no
     //                       session and authenticates by its own secret instead.
     let public = Router::new()
         .route("/health", get(health))
-        .route("/auth/start", post(auth::start))
-        .route("/auth/poll", post(auth::poll))
+        .route("/auth/complete", post(auth::complete))
         .route("/telegram/webhook", post(auth::webhook));
 
     let api = Router::new().merge(guarded).merge(public).with_state(state);
@@ -176,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
-        cookie: auth::CookieConfig::from_env(),
+        cookie: auth::CookieConfig::from_env()?,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -219,8 +220,8 @@ mod tests {
             db: conn.clone(),
             telegram: auth::TelegramConfig {
                 bot_token: "test-token".into(),
-                bot_username: "testbot".into(),
                 webhook_secret: "test-webhook-secret".into(),
+                frontend_base_url: "https://recipes.test".into(),
             },
             cookie: auth::CookieConfig {
                 domain: None,
@@ -230,6 +231,11 @@ mod tests {
         (app(state), conn)
     }
 
+    /// An **unsupported** host on purpose. Ingest fails closed on one *before*
+    /// fetching, so a request that gets past the gate stops at the adapter check
+    /// with 400 — no network, no flake, and a specific answer that proves the
+    /// middleware let it through rather than something else failing first. A
+    /// supported URL here would make these tests perform real HTTP.
     fn ingest_req(cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
             .method("POST")
@@ -238,10 +244,8 @@ mod tests {
         if let Some(v) = cookie {
             b = b.header("cookie", v);
         }
-        b.body(Body::from(
-            r#"{"url":"https://www.themealdb.com/api/json/v1/1/lookup.php?i=1"}"#,
-        ))
-        .unwrap()
+        b.body(Body::from(r#"{"url":"https://example.com/not-a-source"}"#))
+            .unwrap()
     }
 
     /// The headline: an anonymous caller cannot reach the corpus. Since #29
@@ -279,10 +283,10 @@ mod tests {
     }
 
     /// The other half of the proof: with a real session the request gets *past*
-    /// the gate. It then fails on the network (no upstream in a test), which is
-    /// exactly the point — a 401 here would mean the gate rejects valid
-    /// sessions, and only distinguishing the two shows the gate is doing the
-    /// work rather than something else failing first.
+    /// the gate and lands on the adapter check, which refuses an unsupported host
+    /// with 400. Asserting that exact status — rather than merely "not 401" —
+    /// is what makes this prove the middleware ran and passed: a bare `!= 401`
+    /// would also be satisfied by a 500, or by the gate being absent entirely.
     #[tokio::test]
     async fn a_valid_session_passes_the_gate() {
         let (app, conn) = test_app().await;
@@ -291,10 +295,10 @@ mod tests {
             .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             res.status(),
-            StatusCode::UNAUTHORIZED,
-            "a live session must get past the gate"
+            StatusCode::BAD_REQUEST,
+            "a live session must reach ingest, which then refuses the host"
         );
     }
 
@@ -345,21 +349,59 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    /// Login cannot require a login.
+    /// Login cannot require a login: `complete` is reachable, and refuses an
+    /// unknown secret rather than 401-ing for want of a session.
     #[tokio::test]
-    async fn auth_start_is_reachable_without_a_session() {
+    async fn auth_complete_is_reachable_without_a_session() {
         let (app, _conn) = test_app().await;
         let res = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/auth/start")
-                    .body(Body::empty())
+                    .uri("/api/auth/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"c":"not-a-real-secret"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        // 401 because the secret is bogus — the endpoint itself was reachable.
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// **The regression test for the account takeover this design replaced.**
+    ///
+    /// The old flow let a browser start a login and keep a poll secret. An
+    /// attacker started one, sent the link to a victim, and redeemed a session as
+    /// them the moment they tapped — reproduced end-to-end before this rewrite.
+    ///
+    /// The fix is structural, so this asserts the structure: there is no endpoint
+    /// through which anyone can *begin* a login and hold something that redeems
+    /// it. The only way to a session is a secret the bot sent to a specific
+    /// Telegram user's private chat.
+    #[tokio::test]
+    async fn no_endpoint_lets_a_caller_start_a_login_it_could_redeem() {
+        let (app, _conn) = test_app().await;
+        for path in ["/api/auth/start", "/api/auth/poll", "/api/auth/begin"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not exist: a caller-initiated login is what let an \
+                 attacker hand a victim a link and redeem their session"
+            );
+        }
     }
 
     /// The webhook is public, so its own secret is the only thing standing

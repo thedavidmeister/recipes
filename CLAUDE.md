@@ -102,12 +102,21 @@ corpus: nothing writes it from outside and ingest fails closed on an unknown
 host, so the surface underneath is already safe. Don't re-argue "gate the
 writes" — there are none.
 
-- **The magic link goes TO the bot.** A bot cannot message someone who has not
-  contacted it (`Forbidden: bot can't initiate conversation with a user`), so
-  "DM me a link" is impossible. We show `t.me/<bot>?start=<nonce>`.
-- **Nonce ≠ poll secret.** The nonce rides in a shareable link; the poll secret
-  never leaves the minting browser and is what redeems the session. One value
-  doing both jobs would let anyone who saw the link steal the session.
+- **The bot logs you in; the site only points at it.** You press Start, the bot
+  replies **to you** with a one-time link, and opening it sets the cookie in
+  your browser. A bot cannot message someone who has not contacted it first
+  (`Forbidden: bot can't initiate conversation with a user`), so "DM me a link"
+  is impossible.
+- **NEVER add a browser-initiated login.** "The browser starts a login and waits
+  for a tap" hands the capability to _redeem_ to whoever **started** it while
+  the identity comes from whoever **tapped** — so an attacker starts one, sends
+  you the link, and takes your session when you tap. That was built here,
+  defended in comments, and reproduced as a full account takeover. Splitting a
+  nonce from a poll secret does **not** fix it: that defends "someone saw my
+  link", not "the person who sent me this link is the attacker".
+- **Accepted cost**: the session lands in whichever browser opens the bot's
+  link, so phone-Telegram cannot sign in a desktop. Cross-device transfer _is_
+  the attack.
 - **The webhook secret is not optional.** Without
   `X-Telegram-Bot-Api-Secret-Token` anyone can POST a forged `/start` claiming
   any Telegram id — a forged login.

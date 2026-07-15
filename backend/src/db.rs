@@ -91,7 +91,7 @@ mod tests {
             "recipes",
             "raw_imports",
             "users",
-            "login_attempts",
+            "login_completions",
             "sessions",
         ] {
             let mut rows = conn

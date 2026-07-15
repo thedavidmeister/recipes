@@ -7,8 +7,8 @@
 
 -- A person. Bound to the Telegram *user id*, never the username: usernames are
 -- mutable and reassignable, so a username-keyed account could be silently
--- inherited by whoever claims a released handle. `username` is stored only to
--- show a human-readable name, and is refreshed on each login.
+-- inherited by whoever claims a released handle. `username` is stored only as a
+-- display name, and tracks whatever Telegram last reported.
 CREATE TABLE IF NOT EXISTS users (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_user_id TEXT    NOT NULL UNIQUE,
@@ -16,36 +16,42 @@ CREATE TABLE IF NOT EXISTS users (
     created_at       INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
--- One login attempt: the browser mints it, Telegram claims it.
+-- A pending login, minted **by the bot for the person who messaged it** and
+-- redeemed by that same person clicking the link the bot sends back.
 --
--- Two secrets, deliberately: `nonce` travels in a t.me link and is therefore
--- *shareable* (the user may screenshot it, and #20 wants the bot posting links
--- into group chats), while `poll_secret` never leaves the browser that minted
--- it. If a single value did both jobs, anyone who saw the link could redeem the
--- session it mints. Split, a shared link only lets someone claim the attempt
--- with their OWN Telegram id — it never hands them someone else's session.
+-- The direction is the whole security property, and it is the opposite of the
+-- obvious design. A "the browser starts a login and waits for someone to tap a
+-- link" flow hands the redeeming capability to whoever *started* it, while the
+-- identity comes from whoever *tapped*. Nothing ties those to the same person,
+-- so an attacker starts a login, sends the link to a victim, and redeems a
+-- session as them the moment they tap. That is not theoretical: it was
+-- implemented, and demonstrated end-to-end, before this table replaced it.
 --
--- Only hashes are stored: a leaked DB must not yield a usable login. They are
--- 256-bit random, so the hash is also the lookup key — we never compare a secret
--- in application code, which is what a constant-time compare would have been
--- protecting.
-CREATE TABLE IF NOT EXISTS login_attempts (
-    nonce_hash       TEXT    PRIMARY KEY,
-    poll_secret_hash TEXT    NOT NULL UNIQUE,
-    created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
-    -- Short TTL: an unclaimed attempt is a live credential until it expires.
-    expires_at       INTEGER NOT NULL,
-    -- Set when the bot receives `/start <nonce>`. NULL means unclaimed.
-    telegram_user_id TEXT,
+-- So there is no browser-initiated attempt at all. The row is created only when
+-- Telegram tells us a specific user pressed Start, and the secret that redeems
+-- it is delivered to that user's private chat. Whoever holds the secret is
+-- whoever the bot sent it to.
+--
+-- A side effect worth having: no anonymous HTTP caller can write here, so this
+-- table cannot be grown by an unauthenticated request.
+CREATE TABLE IF NOT EXISTS login_completions (
+    -- Only the hash: a leaked db must not yield a usable login. 256-bit random,
+    -- so the digest is also the lookup key and no secret is ever compared in
+    -- application code.
+    completion_hash  TEXT    PRIMARY KEY,
+    -- Who it will log in. Comes from Telegram, never from a caller.
+    telegram_user_id TEXT    NOT NULL,
     username         TEXT,
-    claimed_at       INTEGER
+    created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+    -- Short TTL: until redeemed or expired this is a live credential sitting in
+    -- a chat message.
+    expires_at       INTEGER NOT NULL
 );
 
--- Claiming and polling both look up by hash; expiry sweeps scan by time.
-CREATE INDEX IF NOT EXISTS login_attempts_expires_idx ON login_attempts (expires_at);
+CREATE INDEX IF NOT EXISTS login_completions_expires_idx ON login_completions (expires_at);
 
--- An issued session. The token is 256-bit random and stored only as a hash, so
--- the same reasoning as above applies: a DB leak yields no usable session.
+-- An issued session. The token is 256-bit random and stored only as a hash, so a
+-- db leak yields no usable session.
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT    PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users (id),

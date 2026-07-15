@@ -13,40 +13,24 @@ type Story = StoryObj<typeof meta>;
 
 /**
  * A visitor with no session — the first screen anyone sees, since auth is
- * mandatory (#25).
+ * mandatory (#25). It points at the bot and nothing more: the login is started
+ * by messaging the bot, never by this page.
  */
 export const Idle: Story = {
-  args: { status: "idle" },
+  args: { status: "idle", link: "https://t.me/lehlehlehbot" },
 };
 
 /** Boot: asking `/api/me` whether a session already exists. */
 export const Checking: Story = {
-  args: { status: "checking" },
+  args: { status: "checking", link: "https://t.me/lehlehlehbot" },
 };
 
-export const Starting: Story = {
-  args: { status: "starting" },
-};
-
-/**
- * The state that makes this component worth having as a story: reaching it for
- * real needs a live nonce, and *leaving* it needs someone to tap the link in
- * Telegram. The link here is a fixture — nothing is minted.
- */
-export const Waiting: Story = {
-  args: {
-    status: "waiting",
-    link: "https://t.me/lehlehlehbot?start=0000000000000000000000000000000000000000000000000000000000000000",
-  },
-};
-
-/** Nobody tapped within the nonce's 15 minutes — unclickable-to by design. */
-export const Expired: Story = {
-  args: { status: "expired" },
-};
-
-/** The backend is down or refused. Recoverable: the user can retry. */
+/** The backend is unreachable. Not clickable-to, hence a story. */
 export const ErrorState: Story = {
   name: "Error",
-  args: { status: "error", error: "could not start login (503)" },
+  args: {
+    status: "error",
+    link: "https://t.me/lehlehlehbot",
+    error: "could not check session (503)",
+  },
 };

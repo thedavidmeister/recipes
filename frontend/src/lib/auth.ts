@@ -1,20 +1,32 @@
 import { env } from "$env/dynamic/public";
-import type { LoginStart, PollResult, User } from "./types";
+import type { User } from "./types";
 
 /**
  * Telegram magic-link auth (#25). Auth is **mandatory**: every API call needs a
  * session, search included, because since #29 a search *is* an ingest.
  *
- * Nothing here ever holds the session token. It lives in an `HttpOnly` cookie
- * the browser sets and sends on its own, so this module cannot read it even to
- * check — which is the point: an XSS can ride the session but cannot steal it.
- * `me()` is therefore the only way to ask "am I logged in?", and the honest
- * answer comes from the server.
+ * Nothing here ever holds the session token. It lives in an `HttpOnly` cookie the
+ * browser sets and sends on its own, so this module cannot read it even to check
+ * — which is the point: an XSS can ride the session but cannot steal it. `me()`
+ * is therefore the only way to ask "am I logged in?", and the server answers.
+ *
+ * There is deliberately **no way to start a login from here**. The bot mints the
+ * secret for whoever messages it and sends the link to that person's chat. A
+ * browser-initiated flow would hand the redeeming capability to whoever started
+ * it while the identity came from whoever tapped — which is a full account
+ * takeover, and was one, before this design replaced it.
  */
 function backend(): string {
   const url = env.PUBLIC_BACKEND_URL;
   if (!url) throw new Error("PUBLIC_BACKEND_URL is not set");
   return url.replace(/\/$/, "");
+}
+
+/** The bot to send people to, e.g. `lehlehlehbot`. Public by nature. */
+export function botLink(): string {
+  const bot = env.PUBLIC_TELEGRAM_BOT;
+  if (!bot) throw new Error("PUBLIC_TELEGRAM_BOT is not set");
+  return `https://t.me/${bot}`;
 }
 
 /**
@@ -36,8 +48,8 @@ async function api(path: string, init?: RequestInit): Promise<Response> {
  *
  * A 401 is not an error here — it is the expected answer for a visitor without a
  * session, and the SPA's boot question. Anything else is a real failure and
- * throws, so a broken backend cannot masquerade as "logged out" and quietly
- * bounce someone to a login they do not need.
+ * throws, so a broken backend cannot masquerade as "logged out" and bounce
+ * someone to a login they do not need.
  */
 export async function me(): Promise<User | null> {
   const res = await api("/api/me");
@@ -47,37 +59,16 @@ export async function me(): Promise<User | null> {
 }
 
 /**
- * Begin a login: returns the deep link to show, and the secret that redeems it.
- *
- * The two are deliberately different values. The link is **shareable** — it is
- * meant to be tapped, screenshotted, and (for #20) posted into a group chat — so
- * it cannot also be what claims the session. `pollSecret` never leaves this tab.
+ * Redeem the secret from the bot's link. The session arrives as a cookie on this
+ * response, so there is nothing to store.
  */
-export async function startLogin(): Promise<LoginStart> {
-  const res = await api("/api/auth/start", { method: "POST" });
-  if (!res.ok) throw new Error(`could not start login (${res.status})`);
-  const json = await res.json();
-  return {
-    link: json.link as string,
-    pollSecret: json.poll_secret as string,
-    expiresAt: json.expires_at as number,
-  };
-}
-
-/**
- * Ask whether the link has been tapped yet.
- *
- * On `ready` the server has already set the session cookie on this response —
- * there is no token in the body to store, and nothing for this code to do but
- * stop polling.
- */
-export async function pollLogin(pollSecret: string): Promise<PollResult> {
-  const res = await api("/api/auth/poll", {
+export async function completeLogin(c: string): Promise<void> {
+  const res = await api("/api/auth/complete", {
     method: "POST",
-    body: JSON.stringify({ poll_secret: pollSecret }),
+    body: JSON.stringify({ c }),
   });
-  if (!res.ok) throw new Error(`login check failed (${res.status})`);
-  return (await res.json()) as PollResult;
+  if (res.status === 401) throw new Error("That link is expired or already used.");
+  if (!res.ok) throw new Error(`could not sign in (${res.status})`);
 }
 
 /** Drop the session, server-side and in the browser. */
