@@ -165,7 +165,11 @@ mod tests {
             "ingredients must survive a partial, got {ingredients}"
         );
         assert_eq!(tags, r#"["easy"]"#, "tags must survive a partial");
-        assert_eq!(area.as_deref(), Some("Italian"), "area must survive a partial");
+        assert_eq!(
+            area.as_deref(),
+            Some("Italian"),
+            "area must survive a partial"
+        );
     }
 
     /// The other direction still has to work: a full record fills in a partial.
