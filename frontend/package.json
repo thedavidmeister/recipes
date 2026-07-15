@@ -4,15 +4,16 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "npm run build:wasm && vite build",
+    "dev": "npm run build:wasm && vite dev",
+    "build": "npm run build:wasm:release && vite build",
     "build:wasm": "cd ../crates/recipe-wasm && wasm-pack build --dev --mode no-install --target web --out-dir pkg",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "build:wasm:release": "cd ../crates/recipe-wasm && wasm-pack build --release --mode no-install --target web --out-dir pkg"
   },
   "devDependencies": {
     "@storybook/sveltekit": "^10.5.0",

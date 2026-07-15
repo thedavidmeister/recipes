@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use url::Url;
+
 use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "themealdb";
@@ -93,6 +95,20 @@ fn split_tags(tags: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Whether a host is TheMealDB. See [`crate::adapters`].
+pub fn handles(host: &str) -> bool {
+    host == "themealdb.com" || host.ends_with(".themealdb.com")
+}
+
+/// Normalize any TheMealDB document into recipes, for [`crate::adapters`].
+///
+/// No endpoint dispatch is needed: `search.php`, `filter.php` and `lookup.php`
+/// all return the same `{"meals":[…]}` envelope, and a document carrying no
+/// meals (`categories.php`) normalizes to nothing.
+pub fn normalize_document(_url: &Url, body: &str) -> Vec<Recipe> {
+    normalize_meals(body)
 }
 
 /// Normalize a TheMealDB `search.php` / `filter.php` response. `filter.php`
