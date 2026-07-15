@@ -20,10 +20,17 @@ function backend(): string {
  * a credential, which a public SPA could never hold.
  *
  * The server fails closed on a host no adapter claims.
+ *
+ * **This is what a search does**, which is why auth is mandatory here: gating
+ * ingest gates search, deliberately (#25). `credentials: "include"` is required
+ * — the frontend and backend are different *origins* (`recipes.` vs
+ * `api.recipes.`), so the browser withholds the session cookie without it and
+ * every call 401s.
  */
 async function ingest(url: string, what: string): Promise<Recipe[]> {
   const res = await fetch(`${backend()}/api/ingest`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });

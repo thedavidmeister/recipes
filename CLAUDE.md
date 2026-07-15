@@ -85,6 +85,57 @@ re-deriving a settled decision wastes the human's time. Live design notes:
 - **#20 — cook-decider** (realtime transport decided: WS for liveness + Turso
   for persistence).
 
+## Auth is mandatory (#25)
+
+**Every API endpoint requires a session.** The only exceptions are `/health` (a
+prober holds no session), `/auth/start` + `/auth/poll` (how you get one), and
+`/telegram/webhook` (called by Telegram, not a browser — it authenticates with
+its own secret). The static SPA shell still loads; it can do nothing until
+login.
+
+Since #29 `/api/ingest` **is what a search does**, so gating everything gates
+search — deliberately. This is a private cooking app for a group, not a public
+search engine.
+
+Auth exists for **identity** (#20 needs a headcount), _not_ to protect the
+corpus: nothing writes it from outside and ingest fails closed on an unknown
+host, so the surface underneath is already safe. Don't re-argue "gate the
+writes" — there are none.
+
+- **The bot logs you in; the site only points at it.** You press Start, the bot
+  replies **to you** with a one-time link, and opening it sets the cookie in
+  your browser. A bot cannot message someone who has not contacted it first
+  (`Forbidden: bot can't initiate conversation with a user`), so "DM me a link"
+  is impossible.
+- **NEVER add a browser-initiated login.** "The browser starts a login and waits
+  for a tap" hands the capability to _redeem_ to whoever **started** it while
+  the identity comes from whoever **tapped** — so an attacker starts one, sends
+  you the link, and takes your session when you tap. That was built here,
+  defended in comments, and reproduced as a full account takeover. Splitting a
+  nonce from a poll secret does **not** fix it: that defends "someone saw my
+  link", not "the person who sent me this link is the attacker".
+- **Accepted cost**: the session lands in whichever browser opens the bot's
+  link, so phone-Telegram cannot sign in a desktop. Cross-device transfer _is_
+  the attack.
+- **The webhook secret is not optional.** Without
+  `X-Telegram-Bot-Api-Secret-Token` anyone can POST a forged `/start` claiming
+  any Telegram id — a forged login.
+- **Identity is the Telegram numeric id, never the username** — usernames are
+  mutable and reassignable.
+- Secrets are **hashed at rest** and the hash is the lookup key. SHA-256 with no
+  KDF is right _here_: they are 256-bit CSPRNG output, so there's nothing to
+  brute-force and a KDF would just tax every request.
+- **The session is an `HttpOnly` cookie**, never a body field or JS-readable
+  token: an XSS can then ride the session but cannot exfiltrate it.
+  `SameSite=Lax` suffices **because we own `lehlehleh.com`** — `recipes.` and
+  `api.recipes.` are the same site, so the cookie reaches the #20 WebSocket too.
+  This is impossible on `onrender.com`: it is on the Public Suffix List, so two
+  subdomains of it are different _sites_ and a shared cookie is rejected.
+- **CORS is not auth** — it's browser-enforced, `curl` ignores it; the session
+  check is the guard. But it must be **explicit**: a credentialed request may
+  not be answered `Access-Control-Allow-Origin: *`, and `Any` for origin _or
+  methods_ makes tower-http **panic at startup**. Enumerate both.
+
 ## Conventions
 
 - Parsing/normalization lives in **`recipe-core` once**, server-side — never
