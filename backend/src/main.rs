@@ -57,6 +57,11 @@ pub fn app(state: AppState) -> Router {
     // search does — gating it gates search, deliberately.
     let guarded = Router::new()
         .route("/ingest", post(ingest::ingest))
+        // `/me` is guarded like everything else, which is what makes it useful:
+        // the session cookie is HttpOnly, so the SPA cannot see whether it is
+        // logged in. A 401 here *is* the answer.
+        .route("/me", get(auth::me))
+        .route("/auth/logout", post(auth::logout))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,

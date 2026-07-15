@@ -28,7 +28,7 @@ use axum::{
     },
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
+    Extension, Json,
 };
 use libsql::Connection;
 use rand::{rngs::OsRng, RngCore};
@@ -359,8 +359,8 @@ async fn issue_session(conn: &Connection, user_id: i64) -> Result<String, AppErr
 pub struct CurrentUser {
     #[allow(dead_code)] // #20 is what reads this.
     pub id: i64,
-    #[allow(dead_code)]
     pub telegram_user_id: String,
+    pub username: Option<String>,
 }
 
 /// Reject any request without a live session.
@@ -380,7 +380,7 @@ pub async fn require_session(
     let mut rows = state
         .db
         .query(
-            "SELECT s.user_id, s.expires_at, u.telegram_user_id
+            "SELECT s.user_id, s.expires_at, u.telegram_user_id, u.username
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1",
             libsql::params![hash_secret(&token)],
@@ -397,6 +397,7 @@ pub async fn require_session(
     let user_id: i64 = row.get(0).map_err(row_err)?;
     let expires_at: i64 = row.get(1).map_err(row_err)?;
     let telegram_user_id: String = row.get(2).map_err(row_err)?;
+    let username: Option<String> = row.get(3).map_err(row_err)?;
 
     // Checked on read, not left to a sweep: an expired session must be dead the
     // moment it expires, whatever housekeeping has or has not run.
@@ -407,8 +408,74 @@ pub async fn require_session(
     req.extensions_mut().insert(CurrentUser {
         id: user_id,
         telegram_user_id,
+        username,
     });
     Ok(next.run(req).await)
+}
+
+/// `GET /api/me` — who am I?
+///
+/// The SPA cannot answer this for itself: the session is an `HttpOnly` cookie, so
+/// script cannot see whether one exists, let alone whose it is. That is the point
+/// of the cookie, and it is why this endpoint has to exist — without it the
+/// frontend would have to guess at boot, or fish a 401 out of a real request and
+/// infer.
+///
+/// Guarded like everything else, so 401 *is* the answer to "not logged in".
+pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<MeResponse> {
+    Json(MeResponse {
+        telegram_user_id: user.telegram_user_id,
+        username: user.username,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct MeResponse {
+    pub telegram_user_id: String,
+    pub username: Option<String>,
+}
+
+/// `POST /api/auth/logout` — drop the session.
+///
+/// Deletes the row *and* expires the cookie. Deleting the row is what actually
+/// ends the session: a cookie the client keeps would be useless anyway, since the
+/// gate looks it up. Clearing the cookie only saves the browser sending a corpse.
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if let Some(token) = session_from_cookie(&headers) {
+        state
+            .db
+            .execute(
+                "DELETE FROM sessions WHERE token_hash = ?1",
+                libsql::params![hash_secret(&token)],
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("logout failed: {e}")))?;
+    }
+
+    let mut res = StatusCode::NO_CONTENT.into_response();
+    res.headers_mut().insert(
+        SET_COOKIE,
+        expire_cookie(&state.cookie)
+            .parse()
+            .map_err(|e| AppError::Internal(format!("bad cookie: {e}")))?,
+    );
+    Ok(res)
+}
+
+/// A cookie that tells the browser to forget the session. Attributes must match
+/// the ones it was set with, or the browser keeps the original alongside it.
+fn expire_cookie(cfg: &CookieConfig) -> String {
+    let mut c = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    if let Some(domain) = &cfg.domain {
+        c.push_str(&format!("; Domain={domain}"));
+    }
+    if cfg.secure {
+        c.push_str("; Secure");
+    }
+    c
 }
 
 /// Pull the session out of the `Cookie` header.

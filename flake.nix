@@ -140,9 +140,13 @@
         devShells.default = rainix.devShells.${system}.rust-node-shell.overrideAttrs (old: {
           # Turso CLI (from rainix's exposed pkgs) for DB provisioning +
           # migrations, reproducibly via `nix develop`. storybook-shot puts the
-          # screenshot harness on PATH.
+          # screenshot harness on PATH. rclone uploads the shots it takes to R2
+          # — the README documents it as *the* way (awscli's TLS fails against
+          # R2 here, and curl 7.81's --aws-sigv4 omits R2's required
+          # x-amz-content-sha256), so the shell has to actually provide it.
           buildInputs = (old.buildInputs or [ ]) ++ [
             pkgs.turso-cli
+            pkgs.rclone
             storybook-shot
           ];
           shellHook = (old.shellHook or "") + ''
