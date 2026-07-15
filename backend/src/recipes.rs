@@ -30,6 +30,14 @@ pub async fn create_recipe(
 
 /// Upsert a recipe keyed by `(source, id)`. `tags` and `ingredients` are stored
 /// as JSON; `fetched_at` is refreshed on update.
+///
+/// **Merge non-empty**: an empty incoming field never overwrites a populated
+/// stored one. Sources hand us the same recipe at different completeness — a
+/// TheMealDB category browse (`filter.php`) returns header fields only, with no
+/// ingredients or instructions — so overwriting column-for-column would let a
+/// listing silently blank a full record. An absent field means "this view
+/// didn't carry it", not "this recipe has none". `title` is exempt: the handler
+/// rejects an empty one, so it is always meaningful.
 async fn upsert(conn: &Connection, recipe: &Recipe) -> anyhow::Result<()> {
     let tags = serde_json::to_string(&recipe.tags)?;
     let ingredients = serde_json::to_string(&recipe.ingredients)?;
@@ -39,14 +47,17 @@ async fn upsert(conn: &Connection, recipe: &Recipe) -> anyhow::Result<()> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
-            image        = excluded.image,
-            category     = excluded.category,
-            area         = excluded.area,
-            tags         = excluded.tags,
-            ingredients  = excluded.ingredients,
-            instructions = excluded.instructions,
-            source_url   = excluded.source_url,
-            video_url    = excluded.video_url,
+            image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
+            category     = COALESCE(NULLIF(excluded.category, ''), recipes.category),
+            area         = COALESCE(NULLIF(excluded.area, ''), recipes.area),
+            tags         = CASE WHEN json_array_length(excluded.tags) > 0
+                                THEN excluded.tags ELSE recipes.tags END,
+            ingredients  = CASE WHEN json_array_length(excluded.ingredients) > 0
+                                THEN excluded.ingredients ELSE recipes.ingredients END,
+            instructions = CASE WHEN trim(excluded.instructions) <> ''
+                                THEN excluded.instructions ELSE recipes.instructions END,
+            source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
+            video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch()",
         libsql::params![
             recipe.source.clone(),
@@ -88,6 +99,107 @@ mod tests {
             source_url: None,
             video_url: None,
         }
+    }
+
+    /// A category browse (`filter.php`) shaped record: header fields only.
+    fn partial() -> Recipe {
+        Recipe {
+            id: "1".into(),
+            source: "themealdb".into(),
+            title: "Soup".into(),
+            image: Some("img".into()),
+            category: Some("Starter".into()),
+            area: None,
+            tags: vec![],
+            ingredients: vec![],
+            instructions: String::new(),
+            source_url: None,
+            video_url: None,
+        }
+    }
+
+    async fn conn() -> Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        conn
+    }
+
+    async fn read(conn: &Connection) -> (String, String, String, Option<String>) {
+        let mut rows = conn
+            .query(
+                "SELECT instructions, ingredients, tags, area FROM recipes
+                 WHERE source = ?1 AND id = ?2",
+                libsql::params!["themealdb", "1"],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        (
+            row.get::<String>(0).unwrap(),
+            row.get::<String>(1).unwrap(),
+            row.get::<String>(2).unwrap(),
+            row.get::<Option<String>>(3).unwrap(),
+        )
+    }
+
+    /// The bug this guards: browsing a category yields partials, and a
+    /// column-for-column upsert would blank a stored full recipe's detail.
+    #[tokio::test]
+    async fn partial_does_not_clobber_a_full_record() {
+        let conn = conn().await;
+
+        let mut full = sample();
+        full.area = Some("Italian".into());
+        upsert(&conn, &full).await.unwrap();
+
+        upsert(&conn, &partial()).await.unwrap();
+
+        let (instructions, ingredients, tags, area) = read(&conn).await;
+        assert_eq!(instructions, "Boil.", "instructions must survive a partial");
+        assert!(
+            ingredients.contains("water"),
+            "ingredients must survive a partial, got {ingredients}"
+        );
+        assert_eq!(tags, r#"["easy"]"#, "tags must survive a partial");
+        assert_eq!(area.as_deref(), Some("Italian"), "area must survive a partial");
+    }
+
+    /// The other direction still has to work: a full record fills in a partial.
+    #[tokio::test]
+    async fn full_upgrades_a_partial_record() {
+        let conn = conn().await;
+
+        upsert(&conn, &partial()).await.unwrap();
+        let (instructions, ingredients, ..) = read(&conn).await;
+        assert_eq!(instructions, "");
+        assert_eq!(ingredients, "[]");
+
+        upsert(&conn, &sample()).await.unwrap();
+
+        let (instructions, ingredients, tags, _) = read(&conn).await;
+        assert_eq!(instructions, "Boil.");
+        assert!(ingredients.contains("water"));
+        assert_eq!(tags, r#"["easy"]"#);
+    }
+
+    /// Merging must not freeze a field: a non-empty value still overwrites.
+    #[tokio::test]
+    async fn non_empty_still_overwrites() {
+        let conn = conn().await;
+        upsert(&conn, &sample()).await.unwrap();
+
+        let mut revised = sample();
+        revised.instructions = "Simmer gently.".into();
+        revised.area = Some("French".into());
+        upsert(&conn, &revised).await.unwrap();
+
+        let (instructions, _, _, area) = read(&conn).await;
+        assert_eq!(instructions, "Simmer gently.");
+        assert_eq!(area.as_deref(), Some("French"));
     }
 
     #[tokio::test]
