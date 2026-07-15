@@ -1658,6 +1658,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "libsql",
+ "recipe-core",
  "reqwest",
  "serde",
  "serde_json",

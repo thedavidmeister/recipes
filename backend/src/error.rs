@@ -16,6 +16,8 @@ pub enum AppError {
     Blocked,
     #[error("upstream fetch failed: {0}")]
     Upstream(String),
+    #[error("internal error")]
+    Internal(String),
 }
 
 impl From<reqwest::Error> for AppError {
@@ -32,6 +34,10 @@ impl IntoResponse for AppError {
             AppError::Upstream(e) => {
                 tracing::warn!("upstream error: {e}");
                 StatusCode::BAD_GATEWAY
+            }
+            AppError::Internal(e) => {
+                tracing::error!("internal error: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
             }
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
