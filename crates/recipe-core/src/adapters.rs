@@ -27,7 +27,10 @@ pub struct Adapter {
     pub handles: fn(host: &str) -> bool,
     /// Normalize a document fetched from this source. Empty when the document
     /// carries no recipes (a category listing, say).
-    pub normalize: fn(url: &str, body: &str) -> Vec<Recipe>,
+    ///
+    /// Takes the **parsed** URL: it was already parsed to find the host, so
+    /// handing adapters the string would make them re-derive what we have.
+    pub normalize: fn(url: &Url, body: &str) -> Vec<Recipe>,
 }
 
 /// Every supported source, in match order.
@@ -80,7 +83,7 @@ pub fn normalize(url: &str, body: &str) -> Result<Vec<Recipe>, IngestError> {
         .ok_or_else(|| IngestError::InvalidUrl(url.to_string()))?;
 
     match adapter_for(host) {
-        Some(adapter) => Ok((adapter.normalize)(url, body)),
+        Some(adapter) => Ok((adapter.normalize)(&parsed, body)),
         None => Err(IngestError::UnsupportedSource {
             host: host.to_string(),
         }),

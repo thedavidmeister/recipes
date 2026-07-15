@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use url::Url;
+
 use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "themealdb";
@@ -105,7 +107,7 @@ pub fn handles(host: &str) -> bool {
 /// No endpoint dispatch is needed: `search.php`, `filter.php` and `lookup.php`
 /// all return the same `{"meals":[…]}` envelope, and a document carrying no
 /// meals (`categories.php`) normalizes to nothing.
-pub fn normalize_document(_url: &str, body: &str) -> Vec<Recipe> {
+pub fn normalize_document(_url: &Url, body: &str) -> Vec<Recipe> {
     normalize_meals(body)
 }
 

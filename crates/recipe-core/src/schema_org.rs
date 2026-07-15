@@ -9,6 +9,8 @@
 
 use serde_json::Value;
 
+use url::Url;
+
 use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "url";
@@ -32,8 +34,8 @@ pub fn handles(host: &str) -> bool {
 
 /// Normalize a page into recipes, for [`crate::adapters`]. A page carries at
 /// most one recipe.
-pub fn normalize_document(url: &str, body: &str) -> Vec<Recipe> {
-    parse_html(body, url).into_iter().collect()
+pub fn normalize_document(url: &Url, body: &str) -> Vec<Recipe> {
+    parse_html(body, url.as_str()).into_iter().collect()
 }
 
 /// Parse `html` (fetched from `url`) and return a normalized recipe if the page
