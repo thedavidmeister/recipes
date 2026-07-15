@@ -45,19 +45,24 @@ The backend only does the two things a browser _can't_:
 
 ### Why these choices
 
-| Decision      | Choice                                                           | Why                                                                                                                                                                                                           |
-| ------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend host  | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box. Shuttle's free tier ended 2025‑12‑19; a VPS (Hetzner) would mean owning host security/patching. Render is managed and card-free.                                       |
-| Database      | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                 |
-| Frontend      | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | All logic is client-side, so the frontend is a static bundle. Render static sites are permanently free, never spin down (unlike the free web service), and need no card — and it keeps the stack to one host. |
-| Processing    | **Rust → WASM** in the browser                                   | One parser, shared by server and client; keeps compute off the (free, small) backend.                                                                                                                         |
-| Backend scope | fetch-proxy + write-gateway only                                 | The only jobs that genuinely require a server: cross-origin fetches and holding secrets.                                                                                                                      |
+| Decision      | Choice                                                           | Why                                                                                                                                                                                                                      |
+| ------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Backend host  | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching. |
+| Database      | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                            |
+| Frontend      | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | All logic is client-side, so the frontend is a static bundle. Render static sites are permanently free, never spin down (unlike the free web service), and need no card — and it keeps the stack to one host.            |
+| Processing    | **Rust → WASM** in the browser                                   | One parser, shared by server and client; keeps compute off the (free, small) backend.                                                                                                                                    |
+| Backend scope | fetch-proxy + write-gateway only                                 | The only jobs that genuinely require a server: cross-origin fetches and holding secrets.                                                                                                                                 |
 
-**The stack is Render + Turso — that's the whole vendor list.** Alternatives
-were considered and rejected: an all-in-one Cloudflare (Workers + D1 + KV) is
+**The infra today is Render + Turso** — that is the whole vendor list, so
+nothing else should be described as "already in the stack". That's a statement
+of fact, not a ban: adding a service is a decision to take deliberately when
+something needs it.
+
+Paths not taken, and why: an all-in-one Cloudflare (Workers + D1 + KV) is
 cheaper still, but its free CPU cap forces a TypeScript backend — it would mean
 dropping Rust. Vercel's free tier has no always-on server and treats Rust as a
-community runtime. Neither is part of this stack; don't reintroduce them.
+community runtime. Both are reasons they don't host **this Rust backend** — not
+verdicts on the vendors.
 
 ## Layout
 

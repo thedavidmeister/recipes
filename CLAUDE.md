@@ -18,14 +18,26 @@ diagram in [README.md](./README.md).
 - **Turso** (libSQL/SQLite) is the corpus/store. Dev env + CI via **rainix**
   (`nix develop` = rainix `wasm-shell`: Rust + wasm-pack + Node).
 
-## The stack is Render + Turso — that is the whole vendor list
+## The infra today is Render + Turso
 
-Do **not** reintroduce Vercel, Cloudflare (Pages/Workers/D1/R2), IPFS, or any
-other host: they were considered and rejected (see README "Why these choices").
 Backend = Render web service (free, spins down at 15 min idle). Frontend +
-Storybook = Render **static site** (permanently free, never spins down, no
-card). Render's **500 build-minutes/month are shared** across the workspace and
-belong to deploys — don't design work that burns them.
+Storybook = Render **static site** (permanently free, never spins down).
+Render's **500 build-minutes/month are shared** across the workspace and belong
+to deploys — don't design work that burns them.
+
+That list is a **fact, not a ban**. Don't claim anything else is "already in our
+stack" (Vercel/Cloudflare are not) — but adding a service when something needs
+one is a normal decision, not a forbidden move. Vercel/Cloudflare were ruled out
+as hosts for _this Rust backend_ specifically; that says nothing about, say,
+Cloudflare R2 as an object store.
+
+**Do not invent constraints.** The real bar for a dependency is: **is it
+actually free at our size** (verify the bill, not the marketing — Shuttle's free
+tier ended; Fly.io removed its free allowances). Things that are **NOT**
+constraints, and must not be treated as such: needing a **credit card** is fine;
+**link rot** is fine; regenerable artifacts like screenshots **need no
+expiry/deletion**. Constraints come from the human — don't harden an observation
+into a rule and then optimise against it.
 
 ## Working memory — READ THIS FIRST, EVERY SESSION
 
