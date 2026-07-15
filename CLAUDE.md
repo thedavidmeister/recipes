@@ -11,10 +11,11 @@ diagram in [README.md](./README.md).
   serving a valid recipe. It derives the host from the URL itself, never from a
   caller-supplied argument (the two could disagree). schema.org is kept but
   **demoted**: its allowlist is empty, so it claims nothing.
-- **`backend/`** — Rust/Axum on **Render**. Fetch-proxy (SSRF-guarded),
-  **ingest** (fetch → derive → store both halves), the corpus store, and
-  **`derive`** (a command that rebuilds `recipes` from `raw_imports`, no
-  network).
+- **`backend/`** — Rust/Axum on **Render**. **ingest** (fetch → derive → store
+  both halves), the corpus store, and **`derive`** (a command that rebuilds
+  `recipes` from `raw_imports`, no network). Fetching is SSRF-guarded and is
+  something ingest **does** — not an endpoint: there is no URL a caller can aim,
+  so the backend is not a relay.
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
   site**. It **parses nothing**: it drives ingestion (`POST /api/ingest`), reads
   **Turso** directly (read-only token), and renders. TanStack Query · Bits UI ·

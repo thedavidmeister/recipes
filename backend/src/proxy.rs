@@ -1,21 +1,19 @@
-//! SSRF-guarded fetch proxy.
+//! SSRF-guarded fetching.
 //!
 //! The browser can't fetch arbitrary cross-origin pages (CORS) and recipe sites
-//! block scrapers, so the frontend asks this endpoint to fetch a URL
-//! server-side and hand back the raw bytes (which it then parses via
-//! recipe-core WASM). Because this fetches attacker-influenced URLs, it is an
-//! SSRF surface: the guard below rejects any target that resolves to a
-//! non-public address, and it does so at the DNS layer so it also covers
-//! redirect hops (no TOCTOU / DNS-rebinding gap between validation and connect).
+//! block scrapers, so [`crate::ingest`] fetches server-side. Because that means
+//! fetching attacker-influenced URLs, it is an SSRF surface: the guard below
+//! rejects any target resolving to a non-public address, and does so at the DNS
+//! layer so it also covers redirect hops (no TOCTOU / DNS-rebinding gap between
+//! validation and connect).
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{extract::State, Json};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::CONTENT_TYPE;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::AppError;
 
@@ -38,11 +36,6 @@ pub fn build_client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FetchRequest {
-    pub url: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct FetchResponse {
     /// The URL actually fetched (after any redirects).
@@ -51,17 +44,16 @@ pub struct FetchResponse {
     pub body: String,
 }
 
-/// `POST /api/fetch` — fetch `url` server-side and return its body.
-pub async fn fetch(
-    State(state): State<crate::AppState>,
-    Json(req): Json<FetchRequest>,
-) -> Result<Json<FetchResponse>, AppError> {
-    Ok(Json(fetch_url(&state.http, &req.url).await?))
-}
-
-/// Fetch a URL through the SSRF guard. Shared by the `/api/fetch` handler and
-/// by ingest, so both get the same checks — the guard belongs to fetching, not
-/// to one endpoint.
+/// Fetch a URL through the SSRF guard.
+///
+/// There is no endpoint that fetches a caller's URL: the only caller is
+/// [`crate::ingest`], which refuses a host no adapter claims *before* getting
+/// here. So a request can only ever reach a source we support, and the backend
+/// is not a general-purpose relay for someone else's traffic.
+///
+/// The guard stays regardless — an adapter names a host, but DNS resolves it,
+/// and this fetches attacker-influenced URLs the moment a supported source
+/// redirects.
 pub async fn fetch_url(http: &reqwest::Client, raw_url: &str) -> Result<FetchResponse, AppError> {
     let url = reqwest::Url::parse(raw_url.trim())
         .map_err(|_| AppError::BadRequest("invalid url".into()))?;
