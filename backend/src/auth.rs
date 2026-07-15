@@ -22,9 +22,12 @@
 
 use axum::{
     extract::{Request, State},
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{
+        header::{COOKIE, SET_COOKIE},
+        HeaderMap, StatusCode,
+    },
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     Json,
 };
 use libsql::Connection;
@@ -46,6 +49,9 @@ const SESSION_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 /// Telegram caps a `start` payload at 64 chars from `[A-Za-z0-9_-]`, so 32 random
 /// bytes hex-encoded lands exactly on the limit.
 const SECRET_BYTES: usize = 32;
+
+/// Name of the session cookie.
+const SESSION_COOKIE: &str = "recipes_session";
 
 /// Backend-only Telegram config. Absent config is a hard startup error rather
 /// than a per-request surprise: with mandatory auth, a backend that cannot mint
@@ -164,11 +170,9 @@ pub struct PollRequest {
 pub enum PollResponse {
     /// Nobody has tapped the link yet.
     Pending,
-    /// Claimed: here is the session.
-    Ready {
-        token: String,
-        username: Option<String>,
-    },
+    /// Claimed. The session rides in a `Set-Cookie`, deliberately **not** in this
+    /// body: the client never holds the token, so script cannot read it.
+    Ready { username: Option<String> },
     /// The attempt ran out of time. Mint a new one.
     Expired,
 }
@@ -176,12 +180,13 @@ pub enum PollResponse {
 /// `POST /api/auth/poll` — redeem a claimed attempt for a session.
 ///
 /// Single-use: the attempt is deleted as it is redeemed, so a replayed poll
-/// secret gets nothing. The session token is returned once and stored only as a
-/// hash.
+/// secret gets nothing. The session token is returned **only** as an `HttpOnly`
+/// cookie and stored only as a hash, so it exists in exactly two places the
+/// client cannot read: the browser's cookie jar, and a digest in our database.
 pub async fn poll(
     State(state): State<AppState>,
     Json(req): Json<PollRequest>,
-) -> Result<Json<PollResponse>, AppError> {
+) -> Result<Response, AppError> {
     let secret_hash = hash_secret(&req.poll_secret);
 
     let mut rows = state
@@ -201,7 +206,7 @@ pub async fn poll(
         .await
         .map_err(|e| AppError::Internal(format!("poll failed: {e}")))?
     else {
-        return Ok(Json(PollResponse::Expired));
+        return Ok(Json(PollResponse::Expired).into_response());
     };
 
     let nonce_hash: String = row.get(0).map_err(row_err)?;
@@ -213,18 +218,82 @@ pub async fn poll(
         // Expiry is enforced here, not only by a sweep: a sweep that has not run
         // yet must never mean an expired attempt still works.
         delete_attempt(&state.db, &nonce_hash).await?;
-        return Ok(Json(PollResponse::Expired));
+        return Ok(Json(PollResponse::Expired).into_response());
     }
 
     let Some(telegram_user_id) = telegram_user_id else {
-        return Ok(Json(PollResponse::Pending));
+        return Ok(Json(PollResponse::Pending).into_response());
     };
 
     let user_id = upsert_user(&state.db, &telegram_user_id, username.as_deref()).await?;
     let token = issue_session(&state.db, user_id).await?;
     delete_attempt(&state.db, &nonce_hash).await?;
 
-    Ok(Json(PollResponse::Ready { token, username }))
+    let mut res = Json(PollResponse::Ready { username }).into_response();
+    res.headers_mut().insert(
+        SET_COOKIE,
+        session_cookie(&token, &state.cookie)
+            .parse()
+            .map_err(|e| AppError::Internal(format!("bad cookie: {e}")))?,
+    );
+    Ok(res)
+}
+
+/// How the session cookie is scoped. Differs between dev and prod in ways that
+/// must not be guessed: `Secure` would make the cookie invisible over plain
+/// `http://localhost`, and a `Domain` of the production site would make it
+/// invisible in dev.
+#[derive(Debug, Clone)]
+pub struct CookieConfig {
+    /// Parent domain both services live under, e.g. `lehlehleh.com`, so
+    /// `recipes.` and `api.recipes.` share one cookie. `None` in dev, which
+    /// scopes it to the host that set it.
+    ///
+    /// This is exactly what `onrender.com` could not do: it is on the Public
+    /// Suffix List, so browsers reject a `Domain` of it — two Render subdomains
+    /// are different *sites*, not one. A domain we own is what makes a shared
+    /// cookie legal at all.
+    pub domain: Option<String>,
+    /// Off only for local http. Anything reachable must set this.
+    pub secure: bool,
+}
+
+impl CookieConfig {
+    /// `COOKIE_DOMAIN` unset means dev: host-scoped and non-`Secure`.
+    pub fn from_env() -> Self {
+        let domain = std::env::var("COOKIE_DOMAIN")
+            .ok()
+            .filter(|d| !d.trim().is_empty());
+        Self {
+            secure: domain.is_some(),
+            domain,
+        }
+    }
+}
+
+/// Build the session cookie.
+///
+/// `HttpOnly` is the point of the whole transport: script cannot read it, so an
+/// XSS cannot exfiltrate the session for offline or later reuse — which is
+/// exactly what a token in JS-reachable storage cannot prevent.
+///
+/// `SameSite=Lax` is sufficient rather than `None` **because we own the domain**:
+/// `recipes.lehlehleh.com` and `api.recipes.lehlehleh.com` share a registrable
+/// domain, so requests between them are same-site and the cookie rides along —
+/// including the #20 WebSocket handshake, which is cross-origin but same-site.
+/// `SameSite=None` would mean a third-party cookie, which Safari and Firefox
+/// block by default.
+fn session_cookie(token: &str, cfg: &CookieConfig) -> String {
+    let mut c = format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_TTL_SECS}"
+    );
+    if let Some(domain) = &cfg.domain {
+        c.push_str(&format!("; Domain={domain}"));
+    }
+    if cfg.secure {
+        c.push_str("; Secure");
+    }
+    c
 }
 
 fn row_err(e: libsql::Error) -> AppError {
@@ -305,7 +374,7 @@ pub async fn require_session(
     mut req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let token = bearer(req.headers())
+    let token = session_from_cookie(req.headers())
         .ok_or_else(|| AppError::Unauthorized("a session is required".into()))?;
 
     let mut rows = state
@@ -342,15 +411,21 @@ pub async fn require_session(
     Ok(next.run(req).await)
 }
 
-/// Pull a bearer token out of `Authorization`, tolerating case in the scheme.
-fn bearer(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = raw.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_owned())
+/// Pull the session out of the `Cookie` header.
+///
+/// Hand-parsed rather than pulling in a cookie crate: this reads one name from a
+/// header, and the parse is the security boundary, so it is worth being able to
+/// see all of it. A `Cookie` header is `a=1; b=2`, and a name must match whole —
+/// matching a prefix would let `xsession=…` satisfy `session=…`.
+fn session_from_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name.trim() == SESSION_COOKIE)
+            .then(|| value.trim())
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// A Telegram `Update`, narrowed to the part that logs someone in.
@@ -592,20 +667,93 @@ mod tests {
     }
 
     #[test]
-    fn bearer_parsing() {
+    fn session_cookie_parsing() {
         let mut h = HeaderMap::new();
-        assert_eq!(bearer(&h), None);
-        h.insert(AUTHORIZATION, HeaderValue::from_static("Bearer abc"));
-        assert_eq!(bearer(&h).as_deref(), Some("abc"));
-        // Scheme is case-insensitive per RFC 7235.
-        h.insert(AUTHORIZATION, HeaderValue::from_static("bearer abc"));
-        assert_eq!(bearer(&h).as_deref(), Some("abc"));
-        // Not a bearer token.
-        h.insert(AUTHORIZATION, HeaderValue::from_static("Basic abc"));
-        assert_eq!(bearer(&h), None);
-        // Empty token is not a token.
-        h.insert(AUTHORIZATION, HeaderValue::from_static("Bearer   "));
-        assert_eq!(bearer(&h), None);
+        assert_eq!(session_from_cookie(&h), None, "no Cookie header");
+
+        h.insert(COOKIE, HeaderValue::from_static("recipes_session=abc"));
+        assert_eq!(session_from_cookie(&h).as_deref(), Some("abc"));
+
+        // Found among others, in any position, with the spaces browsers send.
+        h.insert(
+            COOKIE,
+            HeaderValue::from_static("theme=dark; recipes_session=abc; lang=en"),
+        );
+        assert_eq!(session_from_cookie(&h).as_deref(), Some("abc"));
+
+        // A name must match WHOLE — a prefix or suffix must not satisfy it, or
+        // an attacker-set `xrecipes_session` could stand in for the real one.
+        for hostile in [
+            "xrecipes_session=abc",
+            "recipes_session_x=abc",
+            "notrecipes_session=abc",
+        ] {
+            h.insert(COOKIE, HeaderValue::from_str(hostile).unwrap());
+            assert_eq!(session_from_cookie(&h), None, "{hostile} must not match");
+        }
+
+        // Present but empty is not a session.
+        h.insert(COOKIE, HeaderValue::from_static("recipes_session="));
+        assert_eq!(session_from_cookie(&h), None);
+
+        // Junk must not panic or match.
+        h.insert(COOKIE, HeaderValue::from_static("garbage"));
+        assert_eq!(session_from_cookie(&h), None);
+    }
+
+    /// The whole reason for choosing a cookie over a bearer token: script must
+    /// not be able to read the session.
+    #[test]
+    fn the_session_cookie_is_httponly_and_lax() {
+        let prod = CookieConfig {
+            domain: Some("lehlehleh.com".into()),
+            secure: true,
+        };
+        let c = session_cookie("tok123", &prod);
+        assert!(c.contains("HttpOnly"), "script must not read it: {c}");
+        assert!(c.contains("SameSite=Lax"), "{c}");
+        assert!(c.contains("Secure"), "{c}");
+        // Scoped to the parent domain so `recipes.` and `api.recipes.` share it —
+        // which is legal only because we own the domain. `onrender.com` is on the
+        // Public Suffix List, so a Domain of it would be rejected outright.
+        assert!(c.contains("Domain=lehlehleh.com"), "{c}");
+        assert!(c.starts_with("recipes_session=tok123;"), "{c}");
+    }
+
+    /// Dev is http on localhost: `Secure` would make the cookie invisible, and a
+    /// production `Domain` would too.
+    #[test]
+    fn the_dev_cookie_is_host_scoped_and_not_secure() {
+        let dev = CookieConfig {
+            domain: None,
+            secure: false,
+        };
+        let c = session_cookie("tok123", &dev);
+        assert!(
+            c.contains("HttpOnly"),
+            "HttpOnly is not a prod-only luxury: {c}"
+        );
+        assert!(!c.contains("Secure"), "{c}");
+        assert!(!c.contains("Domain="), "{c}");
+    }
+
+    /// A cookie set by `poll` must be readable back by the gate — the two parse
+    /// the same value from opposite ends, so a mismatch would lock everyone out.
+    #[test]
+    fn a_minted_cookie_round_trips_through_the_gate_parser() {
+        let token = mint_secret();
+        let set = session_cookie(
+            &token,
+            &CookieConfig {
+                domain: Some("lehlehleh.com".into()),
+                secure: true,
+            },
+        );
+        // What a browser would echo back: just the name=value pair.
+        let pair = set.split(';').next().unwrap().to_owned();
+        let mut h = HeaderMap::new();
+        h.insert(COOKIE, HeaderValue::from_str(&pair).unwrap());
+        assert_eq!(session_from_cookie(&h).as_deref(), Some(token.as_str()));
     }
 
     #[tokio::test]

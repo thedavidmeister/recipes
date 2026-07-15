@@ -116,8 +116,16 @@ writes" — there are none.
 - Secrets are **hashed at rest** and the hash is the lookup key. SHA-256 with no
   KDF is right _here_: they are 256-bit CSPRNG output, so there's nothing to
   brute-force and a KDF would just tax every request.
-- **CORS is not auth** — it's browser-enforced, `curl` ignores it. `CorsLayer`
-  is permissive on purpose; the session check is the guard.
+- **The session is an `HttpOnly` cookie**, never a body field or JS-readable
+  token: an XSS can then ride the session but cannot exfiltrate it.
+  `SameSite=Lax` suffices **because we own `lehlehleh.com`** — `recipes.` and
+  `api.recipes.` are the same site, so the cookie reaches the #20 WebSocket too.
+  This is impossible on `onrender.com`: it is on the Public Suffix List, so two
+  subdomains of it are different _sites_ and a shared cookie is rejected.
+- **CORS is not auth** — it's browser-enforced, `curl` ignores it; the session
+  check is the guard. But it must be **explicit**: a credentialed request may
+  not be answered `Access-Control-Allow-Origin: *`, and `Any` for origin _or
+  methods_ makes tower-http **panic at startup**. Enumerate both.
 
 ## Conventions
 

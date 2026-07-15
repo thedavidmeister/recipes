@@ -22,10 +22,14 @@ mod proxy;
 mod recipes;
 
 use axum::{
+    http::Method,
     routing::{get, post},
     Json, Router,
 };
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 
 /// Shared handler state: the SSRF-guarded HTTP client, a Turso/libSQL
 /// connection, and the Telegram config auth runs on.
@@ -34,6 +38,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub db: libsql::Connection,
     pub telegram: auth::TelegramConfig,
+    pub cookie: auth::CookieConfig,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -73,11 +78,48 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .nest("/api", api)
-        // Permissive, and that is fine: CORS is not auth. It is browser-enforced,
-        // so `curl` ignores it — the session check is what guards these
-        // endpoints, and it does not care what origin asks.
-        .layer(CorsLayer::permissive())
+        .layer(cors())
         .layer(TraceLayer::new_for_http())
+}
+
+/// CORS for a credentialed, cross-origin, same-site frontend.
+///
+/// **This is not a security control.** CORS is browser-enforced — `curl` ignores
+/// it entirely, and the session check is what actually guards these endpoints. A
+/// previous revision described restricting CORS as if it stopped abuse; it does
+/// not, and cannot.
+///
+/// It has to be explicit anyway, for a browser reason rather than a security
+/// one: a credentialed request may not be answered with
+/// `Access-Control-Allow-Origin: *`, so the permissive layer would silently stop
+/// the browser sending the session cookie at all. `CORS_ALLOWED_ORIGIN` names the
+/// frontend; unset means dev, where any origin may ask *and still needs a valid
+/// session to get anything*.
+///
+/// Methods are enumerated rather than `Any` for the same reason the origin is:
+/// `Any` is **illegal** with credentials. tower-http panics on
+/// `Allow-Credentials: true` + `Allow-Methods: *`, so getting this wrong is a
+/// startup crash rather than a bad response.
+fn cors() -> CorsLayer {
+    let base = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([axum::http::header::CONTENT_TYPE])
+        .allow_credentials(true);
+
+    match std::env::var("CORS_ALLOWED_ORIGIN") {
+        Ok(origin) if !origin.trim().is_empty() => {
+            let origins: Vec<_> = origin
+                .split(',')
+                .filter_map(|o| o.trim().parse::<axum::http::HeaderValue>().ok())
+                .collect();
+            base.allow_origin(origins)
+        }
+        // `mirror_request` echoes the caller's origin — `*` with credentials made
+        // legal. Fine for dev, and not a session leak even there: the cookie is
+        // `SameSite=Lax`, so a cross-site page's request never carries it however
+        // permissive CORS is. Prod names its origin anyway.
+        _ => base.allow_origin(AllowOrigin::mirror_request()),
+    }
 }
 
 #[tokio::main]
@@ -129,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
+        cookie: auth::CookieConfig::from_env(),
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -174,17 +217,21 @@ mod tests {
                 bot_username: "testbot".into(),
                 webhook_secret: "test-webhook-secret".into(),
             },
+            cookie: auth::CookieConfig {
+                domain: None,
+                secure: false,
+            },
         };
         (app(state), conn)
     }
 
-    fn ingest_req(auth_header: Option<&str>) -> Request<Body> {
+    fn ingest_req(cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
             .method("POST")
             .uri("/api/ingest")
             .header("content-type", "application/json");
-        if let Some(v) = auth_header {
-            b = b.header("authorization", v);
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
         }
         b.body(Body::from(
             r#"{"url":"https://www.themealdb.com/api/json/v1/1/lookup.php?i=1"}"#,
@@ -202,18 +249,20 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// A guessed or stale token is not a session. Note this would pass even if
-    /// the gate were absent *and* ingest happened to fail — so it is paired with
-    /// `a_valid_session_passes_the_gate`, which pins that the gate is what
+    /// A guessed or malformed cookie is not a session. Note this would pass even
+    /// if the gate were absent *and* ingest happened to fail — so it is paired
+    /// with `a_valid_session_passes_the_gate`, which pins that the gate is what
     /// answers here.
     #[tokio::test]
-    async fn a_bogus_token_is_not_a_session() {
+    async fn a_bogus_cookie_is_not_a_session() {
         let (app, _conn) = test_app().await;
         for header in [
-            "Bearer deadbeef",
-            "Bearer ",
-            "Basic dXNlcjpwYXNz",
+            "recipes_session=deadbeef",
+            "recipes_session=",
+            "other=abc",
             "garbage",
+            // A name must match whole: a prefix must not satisfy the gate.
+            "xrecipes_session=deadbeef",
         ] {
             let res = app.clone().oneshot(ingest_req(Some(header))).await.unwrap();
             assert_eq!(
@@ -234,7 +283,7 @@ mod tests {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let res = app
-            .oneshot(ingest_req(Some(&format!("Bearer {token}"))))
+            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
         assert_ne!(
@@ -253,10 +302,25 @@ mod tests {
             .await
             .unwrap();
         let res = app
-            .oneshot(ingest_req(Some(&format!("Bearer {token}"))))
+            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The session must be found among other cookies — real browsers send more
+    /// than one.
+    #[tokio::test]
+    async fn the_session_is_found_alongside_other_cookies() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(ingest_req(Some(&format!(
+                "theme=dark; recipes_session={token}; lang=en"
+            ))))
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Health has to answer an unauthenticated prober or the host cannot tell if
