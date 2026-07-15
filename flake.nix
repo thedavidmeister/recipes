@@ -26,12 +26,125 @@
         # plugin-svelte + plugin-tailwindcss) so the SvelteKit frontend formats
         # to the org standard; wasm-shell doesn't export it by default.
         inherit (rainix.packages.${system}) prettier-bundle;
+        mkTask = rainix.mkTask.${system};
+
+        # Headless chromium carries no fonts. Without a fontconfig it renders
+        # text invisibly (harfbuzz reports `font:''`, `glyph_count:0`) and can
+        # take the renderer down with it. Supplying font *directories* alone is
+        # not enough either: Tailwind's `font-sans` stack leads with
+        # `ui-sans-serif`/`system-ui`, which match no installed family, so a
+        # sans-serif UI silently falls back to DejaVu **Serif** and the capture
+        # misrepresents the app. Alias the generics explicitly.
+        fontsConf = pkgs.writeText "recipes-fonts.conf" ''
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <dir>${pkgs.dejavu_fonts}/share/fonts</dir>
+            <dir>${pkgs.liberation_ttf}/share/fonts</dir>
+            <cachedir prefix="xdg">fontconfig</cachedir>
+
+            <alias><family>sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>serif</family><prefer><family>DejaVu Serif</family></prefer></alias>
+            <alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
+
+            <alias><family>ui-sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>system-ui</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>-apple-system</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>BlinkMacSystemFont</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>Segoe UI</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>Roboto</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>Helvetica Neue</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>Helvetica</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>Arial</family><prefer><family>DejaVu Sans</family></prefer></alias>
+            <alias><family>ui-monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
+          </fontconfig>
+        '';
+
+        # Screenshot Storybook stories. Every story is its own URL, so a state is
+        # *declared* rather than driven — capture needs no browser automation
+        # (no puppeteer, no CDP), just navigate + `--screenshot`.
+        #
+        #   nix run .#storybook-shot              # every story
+        #   nix run .#storybook-shot -- results   # only ids matching a regex
+        #
+        # Env: OUT_DIR, SB_DIR, PORT, WIDTH, HEIGHT, SCALE.
+        storybook-shot = mkTask {
+          name = "storybook-shot";
+          # `chromium`, NOT `ungoogled-chromium` — the latter crashes headless
+          # (crashpad/ptrace) in sandboxed environments.
+          additionalBuildInputs = [
+            pkgs.chromium
+            pkgs.python3
+            pkgs.jq
+          ];
+          body = ''
+            #!/usr/bin/env bash
+            set -euo pipefail
+
+            SB_DIR="''${SB_DIR:-frontend/storybook-static}"
+            OUT_DIR="''${OUT_DIR:-screenshots}"
+            PORT="''${PORT:-6008}"
+            WIDTH="''${WIDTH:-1280}"
+            HEIGHT="''${HEIGHT:-720}"
+            SCALE="''${SCALE:-2}"
+
+            if [ ! -f "$SB_DIR/index.json" ]; then
+              echo "no storybook build at $SB_DIR" >&2
+              echo "build it first:  (cd frontend && npm ci && npm run build-storybook)" >&2
+              exit 1
+            fi
+
+            export FONTCONFIG_FILE=${fontsConf}
+            mkdir -p "$OUT_DIR"
+
+            python3 -m http.server "$PORT" --directory "$SB_DIR" >/dev/null 2>&1 &
+            server=$!
+            trap 'kill $server 2>/dev/null || true' EXIT
+            for _ in $(seq 1 40); do
+              (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null && break
+              sleep 0.25
+            done
+
+            # Story ids come from the build index, so stories added later are
+            # picked up with no list to maintain here.
+            ids=$(jq -r '.entries | keys[]' "$SB_DIR/index.json")
+            if [ "$#" -gt 0 ]; then
+              ids=$(printf '%s\n' "$ids" | grep -E "$1" || true)
+            fi
+            if [ -z "$ids" ]; then
+              echo "no stories matched" >&2
+              exit 1
+            fi
+
+            for id in $ids; do
+              out="$OUT_DIR/$id.png"
+              chromium \
+                --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
+                --hide-scrollbars \
+                --window-size="$WIDTH,$HEIGHT" \
+                --force-device-scale-factor="$SCALE" \
+                --virtual-time-budget=15000 \
+                --screenshot="$out" \
+                "http://127.0.0.1:$PORT/iframe.html?id=$id&viewMode=story" \
+                >/dev/null 2>&1
+              echo "$out"
+            done
+          '';
+        };
       in
       {
+        packages = {
+          inherit storybook-shot;
+        };
+
         devShells.default = rainix.devShells.${system}.wasm-shell.overrideAttrs (old: {
           # Turso CLI (from rainix's exposed pkgs) for DB provisioning +
-          # migrations, reproducibly via `nix develop`.
-          buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.turso-cli ];
+          # migrations, reproducibly via `nix develop`. storybook-shot puts the
+          # screenshot harness on PATH.
+          buildInputs = (old.buildInputs or [ ]) ++ [
+            pkgs.turso-cli
+            storybook-shot
+          ];
           shellHook = (old.shellHook or "") + ''
             export RAINIX_PRETTIER_BUNDLE_DIR=${prettier-bundle}
           '';
