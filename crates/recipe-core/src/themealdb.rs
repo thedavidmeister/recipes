@@ -116,10 +116,17 @@ pub fn handles(host: &str) -> bool {
 /// a 25-meal search yields 25 small payloads instead of 25 copies of the
 /// response, and each one re-normalizes through this very function.
 ///
-/// The meal is carried through as the JSON it arrived as, not re-serialized from
-/// our own struct: re-serializing would store *our current reading* of the
-/// source, silently discarding any field this version does not yet map — which
-/// is exactly what deriving later needs.
+/// The meal travels as the JSON that arrived, not re-serialized from our own
+/// [`Meal`] struct: going through the struct would store *our current reading* of
+/// the source and silently drop every field this version does not yet map, which
+/// is exactly what deriving later needs. Round-tripping through [`Value`] keeps
+/// those fields, values and nulls intact.
+///
+/// It is a re-encoding, not a byte copy: `serde_json` sorts object keys and keeps
+/// the last of a duplicate key, so `raw` is *equivalent* to the source's meal
+/// rather than identical to it. Normalization reads fields by name, so neither
+/// affects what derives from it — but do not treat `raw` as bytes the source
+/// signed or as something to diff against a fresh fetch.
 pub fn normalize_document(url: &Url, body: &str) -> Vec<Ingested> {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
@@ -227,6 +234,24 @@ mod tests {
         assert_eq!(recipe.ingredients[0].measure.as_deref(), Some("1/2 cup"));
         assert_eq!(recipe.ingredients[1].name, "chicken");
         assert_eq!(recipe.ingredients[1].measure, None);
+    }
+
+    /// Why `raw` is built from the parsed JSON and never from [`Meal`]: a field
+    /// this version does not map must still reach `raw_imports`, or deriving
+    /// could only ever recover what we already knew how to read. Serializing our
+    /// struct would silently drop `strCreativeCommonsConfirmed` here.
+    #[test]
+    fn raw_keeps_fields_the_struct_does_not_map() {
+        let json = r#"{"meals":[{"idMeal":"1","strMeal":"Toast","strInstructions":"Toast it.","strIngredient1":"Bread","strMeasure1":"1","strCreativeCommonsConfirmed":"Yes","dateModified":null}]}"#;
+        let url = Url::parse("https://www.themealdb.com/api/json/v1/1/lookup.php?i=1").unwrap();
+        let ingested = normalize_document(&url, json);
+        assert_eq!(ingested.len(), 1);
+
+        let raw: serde_json::Value = serde_json::from_str(&ingested[0].raw).unwrap();
+        let meal = &raw["meals"][0];
+        assert_eq!(meal["strCreativeCommonsConfirmed"], "Yes");
+        assert!(meal["dateModified"].is_null());
+        assert_eq!(meal["strMeal"], "Toast");
     }
 
     #[test]
