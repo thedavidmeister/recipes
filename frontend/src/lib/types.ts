@@ -15,6 +15,22 @@ export interface Category {
   description: string | null;
 }
 
+/**
+ * The outcome of importing a URL. A discriminated union, not a thrown error:
+ * "that page has no recipe" is an ordinary result of pasting a link, and the UI
+ * has to distinguish it from a fetch that failed or a save that failed.
+ */
+export type ImportResult =
+  | { kind: "saved"; recipe: Recipe }
+  /** A page with schema.org/Recipe data too thin to be worth storing. */
+  | { kind: "incomplete"; recipe: Recipe }
+  /** Fetched fine, but the page publishes no schema.org/Recipe. */
+  | { kind: "no-recipe"; url: string }
+  | { kind: "invalid-url"; message: string }
+  /** The proxy couldn't fetch it — unreachable, blocked, or non-2xx. */
+  | { kind: "fetch-failed"; message: string }
+  | { kind: "save-failed"; recipe: Recipe; message: string };
+
 export interface Recipe {
   id: string;
   source: string;
