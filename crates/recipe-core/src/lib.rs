@@ -6,8 +6,10 @@
 //! these functions turn them into the normalized [`models`] types. The same
 //! logic therefore runs server-side and in-browser without duplication.
 
+pub mod adapters;
 pub mod models;
 pub mod schema_org;
 pub mod themealdb;
 
+pub use adapters::{adapter_for, Adapter, UnsupportedSource};
 pub use models::{Ingredient, Recipe};

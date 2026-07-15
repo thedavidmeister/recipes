@@ -1,9 +1,4 @@
-import {
-  ensureWasm,
-  normalizeThemealdbSearch,
-  normalizeThemealdbCategories,
-  normalizeThemealdbMeal,
-} from "./wasm";
+import { ensureWasm, normalizeDocument, normalizeThemealdbCategories } from "./wasm";
 import type { Category, Recipe } from "./types";
 
 const THEMEALDB = "https://www.themealdb.com/api/json/v1/1";
@@ -15,19 +10,30 @@ async function fetchText(url: string, what: string): Promise<string> {
 }
 
 /**
- * Search TheMealDB by name. It sends `Access-Control-Allow-Origin: *`, so the
- * browser fetches it directly; recipe-wasm normalizes the raw JSON.
+ * Fetch a document from a source and normalize it through the adapter registry.
+ *
+ * Everything that enters the corpus goes through here: recipe-core routes the
+ * document to the adapter claiming the host, and **throws for a host no adapter
+ * claims**. The corpus is a cache of sources we support, not arbitrary pages, so
+ * an unknown source fails closed instead of being parsed best-effort.
  */
-export async function searchThemealdb(query: string): Promise<Recipe[]> {
-  const json = await fetchText(
-    `${THEMEALDB}/search.php?s=${encodeURIComponent(query)}`,
-    "search",
-  );
+async function ingest(url: string, what: string): Promise<Recipe[]> {
+  const body = await fetchText(url, what);
   await ensureWasm();
-  return normalizeThemealdbSearch(json) as Recipe[];
+  // The host is parsed here: recipe-core deliberately has no URL parser, to keep
+  // `url`/`idna` out of the wasm bundle.
+  return normalizeDocument(new URL(url).hostname, url, body) as Recipe[];
 }
 
-/** The category list that drives browsing. */
+/**
+ * Search TheMealDB by name. It sends `Access-Control-Allow-Origin: *`, so the
+ * browser fetches it directly.
+ */
+export async function searchThemealdb(query: string): Promise<Recipe[]> {
+  return ingest(`${THEMEALDB}/search.php?s=${encodeURIComponent(query)}`, "search");
+}
+
+/** The category list that drives browsing. Categories are a taxonomy, not recipes. */
 export async function listCategories(): Promise<Category[]> {
   const json = await fetchText(`${THEMEALDB}/categories.php`, "categories");
   await ensureWasm();
@@ -42,21 +48,18 @@ export async function listCategories(): Promise<Category[]> {
  * response itself omits.
  */
 export async function browseCategory(category: string): Promise<Recipe[]> {
-  const json = await fetchText(
+  const recipes = await ingest(
     `${THEMEALDB}/filter.php?c=${encodeURIComponent(category)}`,
     "category filter",
   );
-  await ensureWasm();
-  const recipes = normalizeThemealdbSearch(json) as Recipe[];
   return recipes.map((r) => ({ ...r, category: r.category ?? category }));
 }
 
 /** Look a meal up by id — the full record behind a browsed partial. */
 export async function lookupMeal(id: string): Promise<Recipe | null> {
-  const json = await fetchText(
+  const recipes = await ingest(
     `${THEMEALDB}/lookup.php?i=${encodeURIComponent(id)}`,
     "lookup",
   );
-  await ensureWasm();
-  return (normalizeThemealdbMeal(json) as Recipe | null) ?? null;
+  return recipes[0] ?? null;
 }

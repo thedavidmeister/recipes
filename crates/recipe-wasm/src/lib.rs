@@ -8,10 +8,31 @@
 
 use wasm_bindgen::prelude::*;
 
-use recipe_core::{schema_org, themealdb};
+use recipe_core::{adapters, schema_org, themealdb};
 
 fn js_err(e: serde_wasm_bindgen::Error) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+/// Normalize a document fetched from a supported source into an array of
+/// recipes. **Throws `unsupported source: <host>`** when no adapter claims the
+/// host — the corpus is a cache of sources we support, not arbitrary pages, so
+/// an unknown source fails closed rather than being parsed best-effort.
+///
+/// `host` is passed in already parsed (`new URL(u).hostname`): recipe-core does
+/// not parse URLs, to keep `url`/`idna` out of the wasm bundle.
+#[wasm_bindgen(js_name = normalizeDocument)]
+pub fn normalize_document(host: &str, url: &str, body: &str) -> Result<JsValue, JsValue> {
+    match adapters::normalize(host, url, body) {
+        Ok(recipes) => serde_wasm_bindgen::to_value(&recipes).map_err(js_err),
+        Err(e) => Err(JsValue::from_str(&format!("unsupported source: {}", e.host))),
+    }
+}
+
+/// Whether a host is a source we ingest.
+#[wasm_bindgen(js_name = isSupportedSource)]
+pub fn is_supported_source(host: &str) -> bool {
+    adapters::adapter_for(host).is_some()
 }
 
 /// Extract a normalized recipe from a page's HTML (its schema.org/Recipe

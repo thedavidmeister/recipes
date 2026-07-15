@@ -13,6 +13,29 @@ use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "url";
 
+/// Hosts allowed to be ingested via generic schema.org parsing.
+///
+/// **Deliberately empty.** The corpus is a cache of sources we support, so
+/// generic parsing is no longer the way in — arbitrary domains are not ingested.
+/// This adapter is kept, and demoted: if generic parsing ever earns its place
+/// for a specific site, allowlist that host here rather than reopening the whole
+/// web (which would mean normalizing pages an attacker authored).
+const ALLOWED_HOSTS: &[&str] = &[];
+
+/// Whether a host is allowlisted for generic schema.org parsing. See
+/// [`crate::adapters`].
+pub fn handles(host: &str) -> bool {
+    ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+}
+
+/// Normalize a page into recipes, for [`crate::adapters`]. A page carries at
+/// most one recipe.
+pub fn normalize_document(url: &str, body: &str) -> Vec<Recipe> {
+    parse_html(body, url).into_iter().collect()
+}
+
 /// Parse `html` (fetched from `url`) and return a normalized recipe if the page
 /// embeds a schema.org/Recipe.
 pub fn parse_html(html: &str, url: &str) -> Option<Recipe> {

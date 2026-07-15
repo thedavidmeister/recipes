@@ -95,6 +95,20 @@ fn split_tags(tags: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a host is TheMealDB. See [`crate::adapters`].
+pub fn handles(host: &str) -> bool {
+    host == "themealdb.com" || host.ends_with(".themealdb.com")
+}
+
+/// Normalize any TheMealDB document into recipes, for [`crate::adapters`].
+///
+/// No endpoint dispatch is needed: `search.php`, `filter.php` and `lookup.php`
+/// all return the same `{"meals":[…]}` envelope, and a document carrying no
+/// meals (`categories.php`) normalizes to nothing.
+pub fn normalize_document(_url: &str, body: &str) -> Vec<Recipe> {
+    normalize_meals(body)
+}
+
 /// Normalize a TheMealDB `search.php` / `filter.php` response. `filter.php`
 /// returns only header fields, so those recipes come back partially populated.
 pub fn normalize_meals(json: &str) -> Vec<Recipe> {

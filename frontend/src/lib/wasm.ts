@@ -5,6 +5,8 @@ import init, {
   normalizeThemealdbSearch,
   normalizeThemealdbMeal,
   normalizeThemealdbCategories,
+  normalizeDocument,
+  isSupportedSource,
 } from "recipe-wasm";
 
 let ready: Promise<unknown> | null = null;
@@ -19,4 +21,6 @@ export {
   normalizeThemealdbSearch,
   normalizeThemealdbMeal,
   normalizeThemealdbCategories,
+  normalizeDocument,
+  isSupportedSource,
 };
