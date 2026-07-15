@@ -4,16 +4,14 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "dev": "npm run build:wasm && vite dev",
-    "build": "npm run build:wasm:release && vite build",
-    "build:wasm": "cd ../crates/recipe-wasm && wasm-pack build --dev --mode no-install --target web --out-dir pkg",
+    "dev": "vite dev",
+    "build": "vite build",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "build:wasm:release": "cd ../crates/recipe-wasm && wasm-pack build --release --mode no-install --target web --out-dir pkg"
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
   "devDependencies": {
     "@storybook/sveltekit": "^10.5.0",
@@ -32,7 +30,6 @@
   "dependencies": {
     "@libsql/client": "^0.17.4",
     "@tanstack/svelte-query": "^6.1.36",
-    "bits-ui": "^2.18.1",
-    "recipe-wasm": "file:../crates/recipe-wasm/pkg"
+    "bits-ui": "^2.18.1"
   }
 }

@@ -4,19 +4,41 @@ Cooking **recipe aggregator** (NOT a CRUD app / CMS — it normalizes existing
 public recipe sources into a searchable corpus). Client-heavy design; see the
 diagram in [README.md](./README.md).
 
-- **`crates/recipe-core`** — shared Rust: models + schema.org + TheMealDB
-  normalization. Compiles **native** (backend) _and_ **wasm32** (browser).
-- **`crates/recipe-wasm`** — wasm-bindgen wrapper → npm package the frontend
-  imports.
-- **`backend/`** — thin Rust/Axum on **Render**: a **fetch-proxy** (fetches
-  external pages server-side to bypass CORS/bot walls) + **Turso write-gateway**
-  (holds the write token). It does NOT parse.
+- **`crates/recipe-core`** — normalization. **`adapters` is the only way into
+  the corpus**: an adapter is a source we support (id + host matcher +
+  normalizer), `adapters::normalize(url, body)` is the single entry point **and
+  the gate**, and it **fails closed** for any host no adapter claims — even one
+  serving a valid recipe. It derives the host from the URL itself, never from a
+  caller-supplied argument (the two could disagree). schema.org is kept but
+  **demoted**: its allowlist is empty, so it claims nothing.
+- **`backend/`** — Rust/Axum on **Render**. Fetch-proxy (SSRF-guarded),
+  **ingest** (fetch → derive → store both halves), the corpus store, and
+  **`derive`** (a command that rebuilds `recipes` from `raw_imports`, no
+  network).
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
-  site**: parses/normalizes via recipe-core **WASM**, reads **Turso** directly
-  (read-only token), calls the backend to fetch and to write. TanStack Query ·
-  Bits UI · Tailwind. UI states are declared as **Storybook** stories.
-- **Turso** (libSQL/SQLite) is the corpus/store. Dev env + CI via **rainix**
-  (`nix develop` = rainix `wasm-shell`: Rust + wasm-pack + Node).
+  site**. It **parses nothing**: it drives ingestion (`POST /api/ingest`), reads
+  **Turso** directly (read-only token), and renders. TanStack Query · Bits UI ·
+  Tailwind. UI states are declared as **Storybook** stories.
+- **Turso** (libSQL/SQLite) is the corpus, in two halves: **`raw_imports`**
+  (each recipe's payload as its source gave it) and **`recipes`** (the derived
+  view search and browse read). Dev env + CI via **rainix** (`nix develop`).
+
+## The client drives ingestion; the server performs it
+
+The client decides what to look for; the server fetches it, derives recipes, and
+stores both halves. **There is no WASM, deliberately.** An in-browser normalizer
+only ever existed to parse arbitrary pages the browser fetched itself, and the
+corpus no longer ingests arbitrary pages. Once the server fetches, it already
+holds the bytes: one normalizer instead of two, nothing to trust from a client,
+nothing for a visitor to download, and a source may require a key (which a
+public SPA could never hold). **Do not reintroduce client-side parsing** without
+undoing that reasoning first.
+
+`recipes` is **derived** — never hand-edit it as a source of truth. Fix the
+normalizer and run `derive`; that reaches rows imported before the fix, because
+re-fetching is not a recovery plan (sources 502 scrapers, die, and paywall).
+**Raw is not an archive**: we only want recipes, so a taxonomy or a browse of
+partials leaves no payload.
 
 ## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 
@@ -64,12 +86,15 @@ re-deriving a settled decision wastes the human's time. Live design notes:
 
 ## Conventions
 
-- Parsing/normalization lives in **`recipe-core` once** (native + wasm) — never
-  duplicate it in the backend or re-implement it in JS.
-- The backend is a **fetch-proxy + write-gateway ONLY**. All writes go through
-  it — the Turso _write_ token never reaches the browser (the browser gets a
-  read-only token). **SSRF-guard every proxied fetch**: http(s) only; block
+- Parsing/normalization lives in **`recipe-core` once**, server-side — never
+  re-implement it in JS or ship it to the browser.
+- **Nothing writes the corpus from outside.** There is no "POST a recipe"
+  endpoint: the server stores only what it fetched itself, so the corpus cannot
+  be injected. The Turso _write_ token never reaches the browser (it gets a
+  read-only token). **SSRF-guard every fetch**: http(s) only; block
   private/loopback/link-local/metadata IPs; timeout; size + redirect caps.
+  Ingest additionally fails closed on an unsupported host _before_ fetching, so
+  it cannot be used as a general fetch relay.
 - **Turso is the store** — there is no server-side cache layer.
 - **Every UI state is a Storybook story**, not something you reach by driving
   the live app. `Pending`/`Error`/`Empty` are impractical to click to, and it
@@ -118,9 +143,9 @@ Hard-won details — don't rediscover these:
   `ungoogled-chromium` (crashes headless); and a fonts.conf with generic
   aliases, because `makeFontsConf` alone renders a Tailwind sans UI as
   **serif**.
-- Keep the WASM bundle lean — avoid heavy deps: `recipe-core` extracts JSON-LD
-  with the lightweight `tl` tokenizer (a real parser, not html5ever/scraper,
-  which bloat wasm and pull in `getrandom`). Not regex.
+- `recipe-core` extracts JSON-LD with the `tl` tokenizer — **a real parser, not
+  regex**. Finding a tag amid comments, quoted attributes and raw script text is
+  a parser's job.
 - Formatting and CI come from **rainix**. Do NOT add `prettier`,
   `prettier-plugin-*`, or a `.prettierrc` to the frontend — rainix's
   `no-consumer-prettier` pre-commit hook forbids it; the curated bundle

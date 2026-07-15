@@ -1,12 +1,22 @@
-//! recipes backend — an SSRF-guarded fetch proxy.
+//! recipes backend — an SSRF-guarded fetch proxy and Turso write-gateway.
 //!
-//! Deploys to Render. Its only job (for now) is to fetch external pages/APIs
-//! server-side so the browser can get past CORS and bot walls; the Turso
-//! write-gateway lands in a follow-up. Parsing happens client-side in
-//! recipe-core WASM, not here.
+//! Deploys to Render. It does the two things a browser cannot: fetch external
+//! pages/APIs server-side (past CORS and bot walls), and hold the Turso *write*
+//! token. Ingest-time parsing happens client-side in recipe-core WASM, not here.
+//!
+//! One exception, and it is deliberate: `derive` rebuilds the `recipes` view
+//! from stored payloads, which needs normalization natively. That is an offline
+//! command over data we already hold, not a request path — no page is fetched
+//! and no client is involved.
+//!
+//! Usage:
+//!   recipe-backend                    serve
+//!   recipe-backend derive [<source>]  rebuild `recipes` from `raw_imports`
 
 mod db;
+mod derive;
 mod error;
+mod ingest;
 mod proxy;
 mod recipes;
 
@@ -47,6 +57,25 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `recipe-backend derive [<source>]` rebuilds the `recipes` view from the
+    // payloads in `raw_imports`, then exits. No network: it only reads what we
+    // already hold, which is the point — re-fetching is not a reliable recovery
+    // plan (sources 502 scrapers, die, and paywall).
+    if std::env::args().nth(1).as_deref() == Some("derive") {
+        let database = db::open().await?;
+        let conn = database.connect()?;
+        db::migrate(&conn).await?;
+        let source = std::env::args().nth(2);
+        let report = derive::derive(&conn, source.as_deref()).await?;
+        tracing::info!(
+            read = report.read,
+            derived = report.derived,
+            skipped = report.skipped,
+            "derive complete"
+        );
+        return Ok(());
+    }
+
     // Open the DB, ensure the schema is current, and build the shared state.
     let database = db::open().await?;
     let conn = database.connect()?;
@@ -59,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let api = Router::new()
         .route("/health", get(health))
         .route("/fetch", post(proxy::fetch))
-        .route("/recipes", post(recipes::create_recipe))
+        .route("/ingest", post(ingest::ingest))
         .with_state(state);
 
     let app = Router::new()

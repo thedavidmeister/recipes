@@ -1,31 +1,59 @@
-//! Turso write-gateway: persist a normalized recipe into the corpus.
+//! The corpus store: both halves of it.
 //!
-//! The browser produces a `Recipe` (via recipe-core WASM) and POSTs it here; the
-//! backend holds the Turso *write* token (the browser never does) and upserts on
-//! `(source, id)`. Reads do not come through here — the frontend reads Turso
-//! directly with a read-only token.
+//! `recipes` is the **derived** view that search and browse read. `raw_imports`
+//! is what the source actually said, kept so the derived view can be rebuilt by
+//! [`crate::derive`] when normalization improves — without re-fetching, which is
+//! not reliably possible.
+//!
+//! Nothing writes here from outside: [`crate::ingest`] fetches and derives, then
+//! stores both. The backend holds the Turso *write* token; the browser only ever
+//! gets a read-only one and reads Turso directly.
 
-use axum::{extract::State, http::StatusCode, Json};
 use libsql::Connection;
 use recipe_core::Recipe;
 
-use crate::{error::AppError, AppState};
+/// Store both halves of one ingested recipe: what the source said, and what we
+/// derived from it.
+///
+/// They are written together and only from here, so a recipe can never exist
+/// without the payload it came from — which is what makes `recipes` rebuildable
+/// by [`crate::derive`].
+pub(crate) async fn store(
+    conn: &Connection,
+    item: &recipe_core::adapters::Ingested,
+    content_type: Option<&str>,
+) -> anyhow::Result<()> {
+    store_raw(conn, item, content_type).await?;
+    upsert(conn, &item.recipe).await
+}
 
-/// `POST /api/recipes` — validate and upsert a normalized recipe.
-pub async fn create_recipe(
-    State(state): State<AppState>,
-    Json(recipe): Json<Recipe>,
-) -> Result<StatusCode, AppError> {
-    if recipe.source.trim().is_empty() || recipe.id.trim().is_empty() {
-        return Err(AppError::BadRequest("source and id are required".into()));
-    }
-    if recipe.title.trim().is_empty() {
-        return Err(AppError::BadRequest("title is required".into()));
-    }
-    upsert(&state.db, &recipe)
-        .await
-        .map_err(|e| AppError::Internal(format!("db write failed: {e}")))?;
-    Ok(StatusCode::NO_CONTENT)
+/// Upsert the raw payload keyed by `(source, id)` — one row per recipe, however
+/// many responses mentioned it. Raw is not an archive of everything fetched: a
+/// category listing is a taxonomy and a browse of partials never reaches the
+/// corpus, so neither is stored.
+async fn store_raw(
+    conn: &Connection,
+    item: &recipe_core::adapters::Ingested,
+    content_type: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO raw_imports (source, id, raw, content_type, source_url)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(source, id) DO UPDATE SET
+            raw          = excluded.raw,
+            content_type = excluded.content_type,
+            source_url   = excluded.source_url,
+            fetched_at   = unixepoch()",
+        libsql::params![
+            item.recipe.source.clone(),
+            item.recipe.id.clone(),
+            item.raw.clone(),
+            content_type.map(str::to_owned),
+            item.fetched_from.clone(),
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 /// Upsert a recipe keyed by `(source, id)`. `tags` and `ingredients` are stored
@@ -38,7 +66,7 @@ pub async fn create_recipe(
 /// listing silently blank a full record. An absent field means "this view
 /// didn't carry it", not "this recipe has none". `title` is exempt: the handler
 /// rejects an empty one, so it is always meaningful.
-async fn upsert(conn: &Connection, recipe: &Recipe) -> anyhow::Result<()> {
+pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe) -> anyhow::Result<()> {
     let tags = serde_json::to_string(&recipe.tags)?;
     let ingredients = serde_json::to_string(&recipe.ingredients)?;
     conn.execute(

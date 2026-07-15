@@ -56,7 +56,14 @@ pub async fn fetch(
     State(state): State<crate::AppState>,
     Json(req): Json<FetchRequest>,
 ) -> Result<Json<FetchResponse>, AppError> {
-    let url = reqwest::Url::parse(req.url.trim())
+    Ok(Json(fetch_url(&state.http, &req.url).await?))
+}
+
+/// Fetch a URL through the SSRF guard. Shared by the `/api/fetch` handler and
+/// by ingest, so both get the same checks — the guard belongs to fetching, not
+/// to one endpoint.
+pub async fn fetch_url(http: &reqwest::Client, raw_url: &str) -> Result<FetchResponse, AppError> {
+    let url = reqwest::Url::parse(raw_url.trim())
         .map_err(|_| AppError::BadRequest("invalid url".into()))?;
 
     if !matches!(url.scheme(), "http" | "https") {
@@ -75,7 +82,7 @@ pub async fn fetch(
         _ => {}
     }
 
-    let resp = state.http.get(url).send().await?.error_for_status()?;
+    let resp = http.get(url).send().await?.error_for_status()?;
     let final_url = resp.url().to_string();
     let content_type = resp
         .headers()
@@ -84,11 +91,11 @@ pub async fn fetch(
         .map(str::to_owned);
     let body = read_capped(resp, MAX_BODY_BYTES).await?;
 
-    Ok(Json(FetchResponse {
+    Ok(FetchResponse {
         final_url,
         content_type,
         body,
-    }))
+    })
 }
 
 /// Read the response body, failing if it exceeds `max` bytes.
