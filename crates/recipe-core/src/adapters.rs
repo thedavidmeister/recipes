@@ -18,6 +18,29 @@ use url::Url;
 use crate::models::Recipe;
 use crate::{schema_org, themealdb};
 
+/// A normalized recipe together with the raw payload it came from.
+///
+/// The two travel together so the corpus can keep both: `recipe` is the derived
+/// view, `raw` is what the source actually said. Deriving replays `raw` through
+/// this same adapter, so a normalization fix reaches rows imported before it
+/// existed — without re-fetching, which is not reliably possible (sources 502
+/// scrapers, die, and paywall).
+///
+/// `raw` is **this recipe's** payload, not the whole response: a search
+/// returning 25 meals yields 25 `Ingested`, each carrying only its own meal. Raw
+/// is not an archive of everything downloaded — we only want recipes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Ingested {
+    pub recipe: Recipe,
+    /// A minimal document this adapter can normalize on its own — so deriving
+    /// runs the ingest path, not a parallel one.
+    pub raw: String,
+    /// The URL this was fetched from, carried so the store does not have to be
+    /// told separately (and cannot be told wrongly). `derive` replays it, since
+    /// schema.org reads a recipe's id and source_url off its URL.
+    pub fetched_from: String,
+}
+
 /// A source we support.
 pub struct Adapter {
     /// Recorded as [`Recipe::source`], and how a stored row says where it came
@@ -25,12 +48,13 @@ pub struct Adapter {
     pub id: &'static str,
     /// Whether this adapter claims `host`.
     pub handles: fn(host: &str) -> bool,
-    /// Normalize a document fetched from this source. Empty when the document
-    /// carries no recipes (a category listing, say).
+    /// Normalize a document fetched from this source into recipes, each paired
+    /// with its own raw payload. Empty when the document carries no recipes (a
+    /// category listing, say).
     ///
     /// Takes the **parsed** URL: it was already parsed to find the host, so
-    /// handing adapters the string would make them re-derive what we have.
-    pub normalize: fn(url: &Url, body: &str) -> Vec<Recipe>,
+    /// handing adapters the string would make them redo work we have done.
+    pub normalize: fn(url: &Url, body: &str) -> Vec<Ingested>,
 }
 
 /// Every supported source, in match order.
@@ -76,7 +100,7 @@ impl core::fmt::Display for IngestError {
 ///
 /// This is the single entry point for ingestion — routing through it is what
 /// keeps unknown sources out of the corpus.
-pub fn normalize(url: &str, body: &str) -> Result<Vec<Recipe>, IngestError> {
+pub fn normalize(url: &str, body: &str) -> Result<Vec<Ingested>, IngestError> {
     let parsed = Url::parse(url).map_err(|_| IngestError::InvalidUrl(url.to_string()))?;
     let host = parsed
         .host_str()
@@ -88,6 +112,12 @@ pub fn normalize(url: &str, body: &str) -> Result<Vec<Recipe>, IngestError> {
             host: host.to_string(),
         }),
     }
+}
+
+/// The adapter with this id — how `derive` finds the right one, since a stored
+/// row knows its `source` rather than a host.
+pub fn adapter_by_id(id: &str) -> Option<&'static Adapter> {
+    ADAPTERS.iter().find(|a| a.id == id)
 }
 
 /// Whether the URL's host is a source we ingest.
@@ -177,8 +207,42 @@ mod tests {
         )
         .expect("supported");
         assert_eq!(recipes.len(), 1);
-        assert_eq!(recipes[0].title, "Toast");
-        assert_eq!(recipes[0].source, "themealdb");
+        assert_eq!(recipes[0].recipe.title, "Toast");
+        assert_eq!(recipes[0].recipe.source, "themealdb");
+    }
+
+    /// The property `derive` depends on: replaying a stored `raw` through its
+    /// adapter reproduces the same recipe. If this drifts, the corpus cannot be
+    /// rebuilt from raw and #18's whole premise fails.
+    #[test]
+    fn raw_round_trips_to_the_same_recipe() {
+        // Two meals in one response — each Ingested must carry only its own.
+        let json = r#"{"meals":[
+            {"idMeal":"1","strMeal":"Toast","strInstructions":"Toast it.","strIngredient1":"Bread","strMeasure1":"1 slice"},
+            {"idMeal":"2","strMeal":"Soup","strInstructions":"Boil it.","strIngredient1":"Water","strMeasure1":"1 cup"}
+        ]}"#;
+        let url = "https://www.themealdb.com/api/json/v1/1/search.php?s=x";
+        let ingested = normalize(url, json).expect("supported");
+        assert_eq!(ingested.len(), 2);
+
+        for item in &ingested {
+            // The raw is this recipe's payload alone, not the whole response.
+            assert!(
+                !item.raw.contains(if item.recipe.id == "1" {
+                    "Soup"
+                } else {
+                    "Toast"
+                }),
+                "raw must not carry the other meal: {}",
+                item.raw
+            );
+            // Replaying it yields exactly this recipe again.
+            let again = normalize(url, &item.raw).expect("raw is a valid document");
+            assert_eq!(again.len(), 1);
+            assert_eq!(again[0].recipe, item.recipe, "raw must derive its recipe");
+            // And is itself stable, so deriving repeatedly cannot drift.
+            assert_eq!(again[0].raw, item.raw);
+        }
     }
 
     /// A document with no recipes is a normal outcome, not an error — only an

@@ -5,8 +5,7 @@
     listCategories,
     browseCategory,
   } from "$lib/sources";
-  import { saveRecipes } from "$lib/backend";
-  import type { Recipe, SearchStatus } from "$lib/types";
+  import type { SearchStatus } from "$lib/types";
   import SearchResults from "$lib/components/SearchResults.svelte";
   import CategoryPicker from "$lib/components/CategoryPicker.svelte";
 
@@ -44,14 +43,6 @@
           ? "pending"
           : "ready",
   );
-
-  // Persisting the corpus is a side effect of finding recipes, never a gate on
-  // rendering them: saveRecipes skips partials (category browse returns header
-  // fields only) and swallows individual failures.
-  $effect(() => {
-    const found: Recipe[] | undefined = active.data;
-    if (found?.length) void saveRecipes(found).catch(() => {});
-  });
 
   function search(event: SubmitEvent) {
     event.preventDefault();

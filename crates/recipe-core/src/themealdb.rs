@@ -10,9 +10,11 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use url::Url;
 
+use crate::adapters::Ingested;
 use crate::models::{Ingredient, Recipe};
 
 pub const SOURCE: &str = "themealdb";
@@ -102,13 +104,43 @@ pub fn handles(host: &str) -> bool {
     host == "themealdb.com" || host.ends_with(".themealdb.com")
 }
 
-/// Normalize any TheMealDB document into recipes, for [`crate::adapters`].
+/// Normalize any TheMealDB document into recipes, each paired with its own raw
+/// payload, for [`crate::adapters`].
 ///
 /// No endpoint dispatch is needed: `search.php`, `filter.php` and `lookup.php`
 /// all return the same `{"meals":[…]}` envelope, and a document carrying no
 /// meals (`categories.php`) normalizes to nothing.
-pub fn normalize_document(_url: &Url, body: &str) -> Vec<Recipe> {
-    normalize_meals(body)
+///
+/// Each recipe's `raw` is **its own meal object**, re-wrapped in the `{"meals":
+/// […]}` envelope — i.e. what `lookup.php` would have returned for it alone. So
+/// a 25-meal search yields 25 small payloads instead of 25 copies of the
+/// response, and each one re-normalizes through this very function.
+///
+/// The meal is carried through as the JSON it arrived as, not re-serialized from
+/// our own struct: re-serializing would store *our current reading* of the
+/// source, silently discarding any field this version does not yet map — which
+/// is exactly what deriving later needs.
+pub fn normalize_document(url: &Url, body: &str) -> Vec<Ingested> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(meals) = value.get("meals").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    meals
+        .iter()
+        .filter_map(|meal| {
+            let recipe = serde_json::from_value::<Meal>(meal.clone())
+                .ok()?
+                .into_recipe();
+            let raw = json!({ "meals": [meal] }).to_string();
+            Some(Ingested {
+                recipe,
+                raw,
+                fetched_from: url.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Normalize a TheMealDB `search.php` / `filter.php` response. `filter.php`

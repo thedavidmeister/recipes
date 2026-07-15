@@ -1,58 +1,89 @@
 # recipes
 
-A cooking **recipe aggregator** — it normalizes recipes from existing public
-sources (TheMealDB, and any site that publishes schema.org/Recipe data) into one
-shape and builds them into a searchable corpus. It is _not_ a CMS: you don't
-author recipes here.
+A cooking **recipe aggregator** — it normalizes recipes from public sources into
+one shape and builds them into a searchable corpus. It is _not_ a CMS: you don't
+author recipes here, and the corpus is **a cache of sources we support, not user
+input**.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
     subgraph browser["Browser · SvelteKit SPA (static) — Render static site · free"]
-        ui["UI — TanStack Query · Bits UI · Tailwind"]
-        wasm["recipe-core compiled to WASM<br/>parse + normalize raw bytes, in-browser"]
+        ui["UI — TanStack Query · Bits UI · Tailwind<br/>drives ingestion, renders results"]
     end
 
     subgraph render["Rust · Axum — Render · free, managed"]
-        proxy["fetch-proxy<br/>server-side fetch — bypasses CORS / bot walls<br/>SSRF-guarded"]
-        write["write-gateway<br/>holds Turso write token · validates + INSERT"]
+        ingest["ingest<br/>fetch (SSRF-guarded) → derive → store both halves<br/>fails closed on an unknown source"]
+        core["recipe-core<br/>adapters: the only way in"]
+        derivecmd["derive (command)<br/>rebuild recipes from raw · no network"]
     end
 
-    turso[("Turso<br/>libSQL / SQLite — the recipe corpus")]
-    ext["External sources<br/>TheMealDB (sends CORS) · any recipe site (schema.org JSON-LD)"]
+    turso[("Turso · libSQL/SQLite<br/>raw_imports — what the source said<br/>recipes — the derived view")]
+    ext["Supported sources<br/>TheMealDB · (adapters, one per source)"]
 
-    ui -->|"read corpus · read-only token"| turso
-    ui -->|"1 · fetch a URL via proxy"| proxy
-    proxy -->|"2 · fetch server-side"| ext
-    proxy -->|"3 · raw HTML / JSON"| wasm
-    wasm -->|"4 · save normalized recipe"| write
-    write -->|"5 · INSERT"| turso
+    ui -->|"read the corpus · read-only token"| turso
+    ui -->|"1 · ingest this URL"| ingest
+    ingest -->|"2 · fetch"| ext
+    ingest --> core
+    core -->|"3 · recipes + their raw"| ingest
+    ingest -->|"4 · store both"| turso
+    ingest -->|"5 · render these"| ui
+    derivecmd -->|"replay raw → recipes"| turso
 ```
 
-**The client does the heavy lifting; the backend is deliberately thin.** The
-same Rust crate (`recipe-core`) that could parse on the server is compiled to
-**WASM and runs in the browser**, so parsing/normalization happens client-side.
-The backend only does the two things a browser _can't_:
+**The client drives ingestion; the server performs it.** The client decides what
+to look for. The server fetches it, derives recipes, and stores both halves. The
+browser parses nothing.
 
-1. **Fetch external pages** — browsers can't fetch arbitrary cross-origin sites
-   (CORS), and recipe sites actively block scrapers. The backend fetches them
-   server-side and returns the raw bytes. (TheMealDB is the exception — it sends
-   `Access-Control-Allow-Origin: *`, so the browser calls it directly.)
-2. **Write to the database** — the Turso write token must never ship to a public
-   browser, so all writes go through the backend write-gateway. Reads use a
-   separate read-only token and go direct from the browser.
+That split is deliberate, and it is why there is **no WASM**. An in-browser copy
+of the normalizer only ever existed to parse arbitrary pages the browser had
+fetched itself — and the corpus no longer ingests arbitrary pages (see
+adapters). Once the server does the fetching it already holds the bytes, so
+normalizing there means one normalizer instead of two, nothing to trust from a
+client, and nothing for a visitor to download. It also lets a source require a
+credential: an API key can live in a Render env var, which a public SPA could
+never hold.
+
+### Adapters: the only way in
+
+An adapter is a source we support — an id, a host matcher, and a normalizer.
+`recipe-core::adapters::normalize` is the single entry point **and the gate**:
+it derives the host from the URL and **fails closed** for any host no adapter
+claims, even one serving a perfectly valid recipe.
+
+Arbitrary-domain import was removed. If adapters are needed to normalize well
+anyway, supporting the whole web buys nothing — it only yields mediocre data for
+sites nobody has looked at, and means normalizing pages an attacker authored. A
+generic schema.org adapter is kept but demoted: its allowlist is empty, so it
+claims nothing until a domain is deliberately allowlisted into it.
+
+### The corpus has two halves
+
+- **`raw_imports`** — each recipe's payload, exactly as its source gave it.
+- **`recipes`** — the **derived** view that search and browse read.
+
+`recipes` is derived, so it can always be rebuilt: `recipe-backend derive`
+replays every stored payload through the current adapter, **with zero upstream
+calls**. That matters because re-fetching is not a recovery plan — sources 502
+scrapers (Serious Eats does), disappear, and paywall. A normalization fix
+therefore reaches rows imported before the fix existed.
+
+Raw is not an archive of everything downloaded — **we only want recipes**. A
+category listing is a taxonomy, and a browse returns partials we refuse to
+store, so neither leaves a payload. 25 recipes cost ~61 KB of raw; all 747 of
+TheMealDB would be ~1.5 MB against a 5 GB tier.
 
 ### Why these choices
 
-| Decision       | Choice                                                           | Why                                                                                                                                                                                                                      |
-| -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching. |
-| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                            |
-| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | All logic is client-side, so the frontend is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.            |
-| Processing     | **Rust → WASM** in the browser                                   | One parser, shared by server and client; keeps compute off the (free, small) backend.                                                                                                                                    |
-| Backend scope  | fetch-proxy + write-gateway only                                 | The only jobs that genuinely require a server: cross-origin fetches and holding secrets.                                                                                                                                 |
-| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.          |
+| Decision       | Choice                                                           | Why                                                                                                                                                                                                                          |
+| -------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching.     |
+| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                |
+| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                   |
+| Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do. |
+| Backend scope  | fetch-proxy + ingest + derive                                    | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus.                                                                                                          |
+| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.              |
 
 **The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots
 only — that is the whole vendor list, so nothing else should be described as
@@ -68,25 +99,28 @@ verdicts on the vendors.
 ## Layout
 
 ```
-crates/recipe-core   shared Rust — models + schema.org + TheMealDB normalize (native + wasm32)
-crates/recipe-wasm   wasm-bindgen wrapper → npm package the frontend imports
-backend/             Axum fetch-proxy + Turso write-gateway (deploys to Render)
-frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind
+crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers
+backend/             Axum: fetch-proxy · ingest · derive · corpus store (deploys to Render)
+frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind (parses nothing)
 frontend/.storybook  Storybook — every UI state declared as a story (see below)
-flake.nix            rainix `wasm-shell` dev env (Rust + wasm-pack + Node)
+flake.nix            rainix dev shell (Rust + Node) + storybook-shot
 ```
 
 ## Getting started
 
 The dev toolchain comes from [rainix](https://github.com/rainlanguage/rainix)
-via Nix — Rust (+ `wasm-pack`), Node, and the shared formatting/CI tooling:
+via Nix — Rust, Node, and the shared formatting/CI tooling:
 
 ```sh
 nix develop
 ```
 
-- **Shared crate:** `cargo test -p recipe-core`
-- **WASM build:** `cargo build -p recipe-core --target wasm32-unknown-unknown`
+- **Tests:** `cargo test`
+- **Backend:** `cargo run --manifest-path backend/Cargo.toml` (serves on :8080)
+- **Migrate:** `cargo run --manifest-path backend/Cargo.toml -- migrate`
+- **Derive:**
+  `cargo run --manifest-path backend/Cargo.toml -- derive [<source>]` — rebuild
+  `recipes` from `raw_imports`, no network
 - **Frontend:** `cd frontend && npm ci && npm run dev`
 - **Storybook:** `cd frontend && npm run storybook`
 
@@ -123,10 +157,11 @@ deliberately not in CI.
 
 ## Status
 
-Early. `recipe-core` (shared normalization) is tested and compiles native +
-wasm32; the Axum fetch-proxy and Turso write-gateway exist; the SvelteKit SPA
-searches TheMealDB end-to-end (fetch → WASM normalize → render) and carries a
-Storybook harness. Not yet deployed — see the open issues.
+Early, and working end-to-end locally: search and category browse against
+TheMealDB (747 recipes, its whole catalogue) go through the server, which
+fetches, derives and stores both halves; `derive` rebuilds the corpus from raw
+with the network unplugged. The SPA carries a Storybook harness. Not yet
+deployed — see the open issues.
 
 ## License
 

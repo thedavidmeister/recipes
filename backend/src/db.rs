@@ -11,7 +11,10 @@ use libsql::{Builder, Connection, Database};
 
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
 /// Append new migrations here as `NNNN_*.sql` files with the next integer.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_init.sql")),
+    (2, include_str!("../migrations/0002_raw_imports.sql")),
+];
 
 /// Open the database described by `DATABASE_URL`.
 ///
@@ -80,15 +83,20 @@ mod tests {
         migrate(&conn).await.unwrap();
         migrate(&conn).await.unwrap(); // second run must apply nothing
 
-        // The recipes table exists and is queryable.
-        let mut rows = conn
-            .query("SELECT COUNT(*) FROM recipes", ())
-            .await
-            .unwrap();
-        let count = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
-        assert_eq!(count, 0);
+        // Both halves of the corpus exist and are queryable: `recipes` is the
+        // derived view, `raw_imports` what the sources actually said.
+        for table in ["recipes", "raw_imports"] {
+            let mut rows = conn
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .unwrap_or_else(|e| panic!("{table} must exist: {e}"));
+            let count = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            assert_eq!(count, 0);
+        }
 
-        // Exactly one migration is recorded.
-        assert_eq!(highest_applied(&conn).await.unwrap(), 1);
+        // Every migration is recorded — asserted against the list rather than a
+        // literal, so adding one does not fail a test about idempotence.
+        let latest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
+        assert_eq!(highest_applied(&conn).await.unwrap(), latest);
     }
 }
