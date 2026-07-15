@@ -82,7 +82,7 @@ TheMealDB would be ~1.5 MB against a 5 GB tier.
 | Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                |
 | Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                   |
 | Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do. |
-| Backend scope  | fetch-proxy + ingest + derive                                    | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus.                                                                                                          |
+| Backend scope  | ingest + derive                                                  | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus. Fetching is something ingest does, not an endpoint of its own — there is no URL a caller can aim.        |
 | PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.              |
 
 **The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots
@@ -100,7 +100,7 @@ verdicts on the vendors.
 
 ```
 crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers
-backend/             Axum: fetch-proxy · ingest · derive · corpus store (deploys to Render)
+backend/             Axum: ingest · derive · corpus store · SSRF-guarded fetching (deploys to Render)
 frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind (parses nothing)
 frontend/.storybook  Storybook — every UI state declared as a story (see below)
 flake.nix            rainix dev shell (Rust + Node) + storybook-shot

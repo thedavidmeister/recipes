@@ -1,11 +1,11 @@
-//! recipes backend — an SSRF-guarded fetch proxy and Turso write-gateway.
+//! recipes backend — ingest, the corpus store, and `derive`.
 //!
-//! Deploys to Render. It does the two things a browser cannot: fetch external
-//! pages/APIs server-side (past CORS and bot walls), and hold the Turso *write*
-//! token. Ingest-time parsing happens client-side in recipe-core WASM, not here.
+//! Deploys to Render. It does what a browser cannot: fetch external pages/APIs
+//! server-side (past CORS and bot walls), hold the Turso *write* token, and own
+//! what enters the corpus. Normalization runs here, natively — the client drives
+//! ingestion and the server performs it.
 //!
-//! One exception, and it is deliberate: `derive` rebuilds the `recipes` view
-//! from stored payloads, which needs normalization natively. That is an offline
+//! `derive` rebuilds the `recipes` view from stored payloads. It is an offline
 //! command over data we already hold, not a request path — no page is fetched
 //! and no client is involved.
 //!
@@ -87,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
 
     let api = Router::new()
         .route("/health", get(health))
-        .route("/fetch", post(proxy::fetch))
         .route("/ingest", post(ingest::ingest))
         .with_state(state);
 
