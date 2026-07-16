@@ -1,0 +1,25 @@
+# Keep the build context small and the image reproducible. Everything the build
+# needs is Cargo.toml, Cargo.lock, crates/ and backend/ — nothing else should be
+# shipped to the daemon, and some of it must never be.
+
+# Secrets. .env is gitignored, but the Docker context is not git: without this it
+# would be sent to the daemon and could land in a layer.
+.env
+.env.*
+!.env.example
+
+# Build outputs. `target` is gigabytes of host artifacts that would be rebuilt
+# inside the image anyway, and copying them in is the slowest possible way to
+# ignore them.
+target
+frontend/node_modules
+frontend/build
+frontend/.svelte-kit
+frontend/storybook-static
+
+# Not the backend's business.
+.git
+.github
+.worklog
+screenshots
+result

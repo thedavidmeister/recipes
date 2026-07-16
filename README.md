@@ -192,13 +192,60 @@ Shots are uploaded to a Cloudflare R2 public bucket and embedded in the PR by
 URL (GitHub has no image-upload API). See `.env.example`; run it by hand — it is
 deliberately not in CI.
 
+## Deploying
+
+The whole deploy is `render.yaml` — a Render **Blueprint**, so it lives in the
+repo rather than in someone's memory of a dashboard. Apply it from the Render
+dashboard (New → Blueprint); it prompts for every secret marked `sync: false`,
+none of which are in git.
+
+|                             |                                   |
+| --------------------------- | --------------------------------- |
+| `recipes.lehlehleh.com`     | static site → the SPA             |
+| `api.recipes.lehlehleh.com` | web service → Rust/Axum in Docker |
+
+**Two subdomains of one domain, deliberately.** They are the _same site_, which
+is what lets one `SameSite=Lax` cookie authenticate both the REST calls and
+#20's WebSocket. `onrender.com` is on the
+[Public Suffix List](https://publicsuffix.org/list/), so two `*.onrender.com`
+subdomains would be different _sites_ and no shared cookie would be possible at
+all. Render's free tier includes two custom domains with managed TLS — exactly
+these, at $0.
+
+Then point Telegram at the webhook, once the API has a public URL:
+
+```sh
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -d "url=https://api.recipes.lehlehleh.com/api/telegram/webhook" \
+  -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+`secret_token` is not optional: the webhook URL is public, so without it anyone
+can POST a forged `/start` claiming any Telegram id — i.e. log in as anybody.
+
+Two traps worth knowing before they cost an afternoon:
+
+- `lehlehleh.com` is on Cloudflare and **proxied**. Render's certificate
+  issuance wants **DNS-only** (grey cloud) at least until the domain verifies,
+  or the challenge fails and Render looks broken.
+- Migrations run at startup inside the binary, so there is no release step to
+  forget — but auth config is validated at startup too. A missing
+  `TELEGRAM_BOT_TOKEN` or `COOKIE_SECURE` means the service **refuses to boot**
+  rather than 500ing on the first request. That is deliberate: with auth
+  mandatory, a backend that cannot mint a login can serve nothing.
+
 ## Status
 
 Early, and working end-to-end locally: search and category browse against
 TheMealDB (747 recipes, its whole catalogue) go through the server, which
 fetches, derives and stores both halves; `derive` rebuilds the corpus from raw
-with the network unplugged. The SPA carries a Storybook harness. Not yet
-deployed — see the open issues.
+with the network unplugged. Auth is mandatory and the login runs end-to-end
+against the backend. The SPA carries a Storybook harness.
+
+Not yet deployed, and three things stay **unproven** until it is (#10): the
+production cookie (`Domain=lehlehleh.com; Secure` cannot be exercised against
+`localhost` over http), the browser half of the login (proven by stories, not a
+live round trip), and the full loop against Turso.
 
 ## License
 

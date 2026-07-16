@@ -1,0 +1,95 @@
+# Render Blueprint (#10) — the whole deploy, in the repo rather than in someone's
+# memory of a dashboard.
+#
+# Apply with: Render dashboard -> New -> Blueprint -> pick this repo. Values with
+# `sync: false` are NOT in git: Render prompts for them on first apply, which is
+# why every secret below carries it.
+services:
+  # The backend: Rust/Axum in Docker.
+  #
+  # Free, so it spins down after 15 minutes idle and the next request waits ~1
+  # minute. Under mandatory auth that cold start is the *first* thing a visitor
+  # meets, which is a UX cost worth knowing rather than discovering.
+  - name: recipes-api
+    type: web
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    # Render probes this to decide the service is up. It is deliberately outside
+    # the auth gate — a prober holds no session, so gating it would make a
+    # healthy service look dead.
+    healthCheckPath: /api/health
+    envVars:
+      # --- Turso -------------------------------------------------------------
+      - key: DATABASE_URL
+        sync: false # libsql://<db>.turso.io
+      - key: TURSO_AUTH_TOKEN
+        sync: false # the WRITE token. Never reaches the browser.
+      # --- Telegram auth (#25) ----------------------------------------------
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # from @BotFather
+      - key: TELEGRAM_WEBHOOK_SECRET
+        # Not optional. The webhook URL is public, so without this anyone can
+        # POST a forged /start claiming any Telegram id — i.e. log in as anybody.
+        # Generate: head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+        sync: false
+      - key: FRONTEND_BASE_URL
+        # Where the bot's completion link points. Must be the site the user's
+        # browser can open, not this service.
+        value: https://recipes.lehlehleh.com
+      # --- Session cookie ----------------------------------------------------
+      - key: COOKIE_DOMAIN
+        # The parent domain both services share, so recipes. and api.recipes.
+        # see one cookie — which is what carries it to #20's WebSocket. This is
+        # only legal because we own the domain: onrender.com is on the Public
+        # Suffix List, so a Domain of it is rejected outright and the two
+        # services would be different *sites*.
+        value: lehlehleh.com
+      - key: COOKIE_SECURE
+        # Stated, never inferred: a forgotten variable that silently puts a
+        # session on plain http is not a failure anyone notices.
+        value: "true"
+      # --- CORS --------------------------------------------------------------
+      - key: CORS_ALLOWED_ORIGIN
+        # NOT a security control — CORS is browser-enforced and curl ignores it;
+        # the session check is the guard. It must be explicit anyway because a
+        # credentialed request may not be answered `Access-Control-Allow-Origin: *`,
+        # so leaving this unset would stop the browser sending the cookie at all.
+        value: https://recipes.lehlehleh.com
+      - key: RUST_LOG
+        value: recipe_backend=info,tower_http=warn,warn
+  # The frontend: the SvelteKit SPA as a static site.
+  #
+  # Permanently free and never spins down (unlike the free web service), so the
+  # shell always loads — though it can do nothing until a session exists.
+  - name: recipes-web
+    type: web
+    runtime: static
+    plan: free
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./build
+    # Only rebuild when the frontend changes: build minutes are shared across the
+    # workspace, and a backend-only commit has nothing to rebuild here.
+    buildFilter:
+      paths:
+        - frontend/**
+    envVars:
+      - key: PUBLIC_BACKEND_URL
+        value: https://api.recipes.lehlehleh.com
+      - key: PUBLIC_TELEGRAM_BOT
+        value: lehlehlehbot
+      - key: PUBLIC_TURSO_URL
+        sync: false
+      - key: PUBLIC_TURSO_TOKEN
+        # The READ-ONLY token. Public by design — it ships to the browser, which
+        # is why it must never be the write token.
+        sync: false
+    routes:
+      # SPA fallback: every path is client-rendered, so unknown paths must serve
+      # the shell rather than 404. `/auth/finish` (where the bot's link lands) is
+      # a client route and would 404 without this.
+      - type: rewrite
+        source: /*
+        destination: /index.html
