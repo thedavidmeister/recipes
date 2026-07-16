@@ -45,3 +45,6 @@ export interface User {
  * - `error` — the backend could not be reached.
  */
 export type LoginStatus = "checking" | "idle" | "error";
+
+/** The four top-level destinations (#36): the arc of a meal. */
+export type Section = "pick" | "buy" | "cook" | "joy";
