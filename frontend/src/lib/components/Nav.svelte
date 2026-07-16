@@ -24,11 +24,11 @@
 
   let { current }: Props = $props();
 
-  const stops: { id: Section; label: string; ring: string }[] = [
-    { id: "pick", label: "pick", ring: "border-pesto-500 ring-pesto-500/20" },
-    { id: "buy", label: "buy", ring: "border-plum-500 ring-plum-500/20" },
-    { id: "cook", label: "cook", ring: "border-paprika-500 ring-paprika-500/20" },
-    { id: "joy", label: "joy", ring: "border-honey-500 ring-honey-500/20" },
+  const stops: { id: Section; label: string; ring: string; line: string }[] = [
+    { id: "pick", label: "pick", ring: "border-pesto-500 ring-pesto-500/20", line: "bg-pesto-500" },
+    { id: "buy", label: "buy", ring: "border-plum-500 ring-plum-500/20", line: "bg-plum-500" },
+    { id: "cook", label: "cook", ring: "border-paprika-500 ring-paprika-500/20", line: "bg-paprika-500" },
+    { id: "joy", label: "joy", ring: "border-honey-500 ring-honey-500/20", line: "bg-honey-500" },
   ];
 
   const index = $derived(
@@ -40,10 +40,10 @@
 
   // The line runs between the first and last dot, not edge to edge: with four
   // equal columns the outer dots sit an eighth in from each side, so the track
-  // spans 12.5% → 87.5% and the travelled part is a fraction of that 75%.
+  // spans 12.5% → 87.5%. One leg (the gap between two dots) is a third of that.
   const TRACK_LEFT = 12.5;
   const TRACK_WIDTH = 75;
-  const travelled = $derived((index / (stops.length - 1)) * TRACK_WIDTH);
+  const LEG = TRACK_WIDTH / (stops.length - 1);
 </script>
 
 <nav
@@ -57,12 +57,18 @@
       style="left: {TRACK_LEFT}%; width: {TRACK_WIDTH}%"
       aria-hidden="true"
     ></div>
-    <!-- The line behind, drawn over it. -->
-    <div
-      class="absolute top-[7px] h-0.5 bg-stone-900 transition-[width] duration-300"
-      style="left: {TRACK_LEFT}%; width: {travelled}%"
-      aria-hidden="true"
-    ></div>
+    <!-- The line behind: one coloured segment per leg you have walked, each in
+         the colour of the stop it arrives at, so the trail flows into the
+         current dot's colour. -->
+    {#each stops as stop, i (stop.id)}
+      {#if i > 0 && i <= index}
+        <div
+          class="absolute top-[7px] h-0.5 {stop.line}"
+          style="left: {TRACK_LEFT + (i - 1) * LEG}%; width: {LEG}%"
+          aria-hidden="true"
+        ></div>
+      {/if}
+    {/each}
 
     {#each stops as stop, i (stop.id)}
       {@const passed = i < index}
