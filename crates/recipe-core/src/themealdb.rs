@@ -104,6 +104,25 @@ pub fn handles(host: &str) -> bool {
     host == "themealdb.com" || host.ends_with(".themealdb.com")
 }
 
+/// TheMealDB's whole catalog, for a server-driven sync (#49).
+///
+/// The free API has no "list everything" call, but `search.php?f=<letter>`
+/// returns every meal whose name starts with that letter — **complete**
+/// (ingredients and instructions, not the header-only shape `filter.php` gives).
+/// So the 26 letters a–z enumerate the corpus in full, flat, with no crawl. A few
+/// names start with a digit; TheMealDB has none of those today, so a–z is the
+/// catalog.
+pub fn catalog() -> Vec<String> {
+    (b'a'..=b'z')
+        .map(|letter| {
+            format!(
+                "https://www.themealdb.com/api/json/v1/1/search.php?f={}",
+                letter as char
+            )
+        })
+        .collect()
+}
+
 /// Normalize any TheMealDB document into recipes, each paired with its own raw
 /// payload, for [`crate::adapters`].
 ///

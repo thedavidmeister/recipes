@@ -20,6 +20,7 @@ mod error;
 mod ingest;
 mod proxy;
 mod recipes;
+mod sync;
 
 use axum::{
     http::Method,
@@ -231,26 +232,22 @@ mod tests {
         (app(state), conn)
     }
 
-    /// An **unsupported** host on purpose. Ingest fails closed on one *before*
-    /// fetching, so a request that gets past the gate stops at the adapter check
-    /// with 400 — no network, no flake, and a specific answer that proves the
-    /// middleware let it through rather than something else failing first. A
-    /// supported URL here would make these tests perform real HTTP.
+    /// A `POST /api/ingest`. The endpoint takes no body now — it triggers a
+    /// server-driven sync (#49) — so these requests carry none. They exist to
+    /// prove the auth gate answers *before* the handler runs: an unauthenticated
+    /// caller is rejected at the middleware and never reaches the sync (so these
+    /// perform no network, whatever ingest would do downstream).
     fn ingest_req(cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
-            .method("POST")
-            .uri("/api/ingest")
-            .header("content-type", "application/json");
+        let mut b = Request::builder().method("POST").uri("/api/ingest");
         if let Some(v) = cookie {
             b = b.header("cookie", v);
         }
-        b.body(Body::from(r#"{"url":"https://example.com/not-a-source"}"#))
-            .unwrap()
+        b.body(Body::empty()).unwrap()
     }
 
-    /// The headline: an anonymous caller cannot reach the corpus. Since #29
-    /// `/ingest` is what a search does, so this is also "you cannot search
-    /// without logging in" — deliberate, per the ruling on #25.
+    /// The headline: an anonymous caller cannot reach the corpus. Ingest is now a
+    /// server-driven sync rather than a search (#49), but the corpus stays gated
+    /// — logging in is mandatory (#25).
     #[tokio::test]
     async fn ingest_is_closed_without_a_session() {
         let (app, _conn) = test_app().await;
@@ -283,22 +280,26 @@ mod tests {
     }
 
     /// The other half of the proof: with a real session the request gets *past*
-    /// the gate and lands on the adapter check, which refuses an unsupported host
-    /// with 400. Asserting that exact status — rather than merely "not 401" —
-    /// is what makes this prove the middleware ran and passed: a bare `!= 401`
-    /// would also be satisfied by a 500, or by the gate being absent entirely.
+    /// the gate and lands on a handler. We check `/api/me` — a lightweight authed
+    /// route — rather than `/api/ingest`, which now triggers a real network sync.
+    /// Asserting an exact 200 (rather than merely "not 401") is what makes this
+    /// prove the middleware ran and passed: a bare `!= 401` would also be
+    /// satisfied by a 500, or by the gate being absent entirely.
     #[tokio::test]
     async fn a_valid_session_passes_the_gate() {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
-        let res = app
-            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
-            .await
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/me")
+            .header("cookie", format!("recipes_session={token}"))
+            .body(Body::empty())
             .unwrap();
+        let res = app.oneshot(req).await.unwrap();
         assert_eq!(
             res.status(),
-            StatusCode::BAD_REQUEST,
-            "a live session must reach ingest, which then refuses the host"
+            StatusCode::OK,
+            "a live session must pass the gate and reach the handler"
         );
     }
 

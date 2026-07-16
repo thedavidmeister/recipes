@@ -33,6 +33,13 @@ pub fn handles(host: &str) -> bool {
         .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
 }
 
+/// Nothing to pull. A generic schema.org page is ingested when a client points
+/// at it (once its host is allowlisted), never enumerated — there is no catalog
+/// of "the whole web". See [`crate::adapters::Adapter::catalog`].
+pub fn catalog() -> Vec<String> {
+    Vec::new()
+}
+
 /// Normalize a page into recipes, for [`crate::adapters`]. A page carries at
 /// most one recipe, so its raw payload is simply the page — no slicing to do.
 pub fn normalize_document(url: &Url, body: &str) -> Vec<Ingested> {
