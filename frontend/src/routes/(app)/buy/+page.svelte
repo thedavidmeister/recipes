@@ -7,4 +7,4 @@
    */
 </script>
 
-<p class="mt-8 text-neutral-500">Nothing to buy yet — pick something first.</p>
+<p class="mt-8 text-stone-500">Nothing to buy yet — pick something first.</p>

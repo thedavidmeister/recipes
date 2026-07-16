@@ -65,11 +65,11 @@
   <div class="mx-auto max-w-2xl px-4 pb-16">
     <div class="flex justify-end gap-3 py-2 text-sm">
       {#if session.data?.username}
-        <span class="text-neutral-500">@{session.data.username}</span>
+        <span class="text-stone-500">@{session.data.username}</span>
       {/if}
       <button
         onclick={signOut}
-        class="text-neutral-500 underline hover:text-neutral-900"
+        class="text-stone-500 underline hover:text-stone-900"
       >
         Sign out
       </button>

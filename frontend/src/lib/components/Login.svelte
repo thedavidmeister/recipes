@@ -25,32 +25,32 @@
 </script>
 
 <div class="mx-auto flex max-w-md flex-col items-center px-4 py-16 text-center">
-  <h1 class="text-3xl font-bold tracking-tight">recipes</h1>
+  <h1 class="font-display text-4xl font-medium tracking-tight text-stone-900">recipes</h1>
 
   {#if status === "checking"}
-    <p class="mt-6 text-neutral-500">Checking your session…</p>
+    <p class="mt-6 text-stone-500">Checking your session…</p>
   {:else if status === "error"}
-    <p class="mt-6 text-red-700">{error ?? "Something went wrong."}</p>
-    <p class="mt-2 text-sm text-neutral-500">
+    <p class="mt-6 text-tomato-500">{error ?? "Something went wrong."}</p>
+    <p class="mt-2 text-sm text-stone-500">
       The site can't reach its backend. Try again in a moment.
     </p>
   {:else}
-    <p class="mt-2 text-neutral-500">Sign in with Telegram to continue.</p>
+    <p class="mt-2 text-stone-500">Sign in with Telegram to continue.</p>
 
     <a
       href={link}
       target="_blank"
       rel="noopener noreferrer"
-      class="mt-6 w-full rounded-lg bg-sky-600 px-4 py-3 font-medium text-white hover:bg-sky-500"
+      class="mt-6 w-full rounded-full bg-tomato-500 px-4 py-3 font-display font-semibold text-cream-50 transition hover:brightness-105"
     >
       Sign in with Telegram
     </a>
 
-    <p class="mt-4 text-sm text-neutral-500">
+    <p class="mt-4 text-sm text-stone-500">
       Press <span class="font-medium">Start</span> in Telegram and the bot will send
       you a link back. Open it and you're in.
     </p>
-    <p class="mt-3 text-xs text-neutral-400">
+    <p class="mt-3 text-xs text-stone-400">
       Open the bot's link on this device — it signs in the browser you open it
       in. A Telegram account is required to use this site.
     </p>

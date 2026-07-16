@@ -43,18 +43,18 @@
 
 <nav
   aria-label="Sections"
-  class="sticky top-0 z-10 border-b border-neutral-200 bg-white/95 pt-4 pb-3 backdrop-blur"
+  class="sticky top-0 z-10 border-b border-stone-200 bg-cream-50/95 pt-4 pb-3 font-display backdrop-blur"
 >
   <ol class="relative mx-auto flex max-w-md">
     <!-- The line ahead. -->
     <div
-      class="absolute top-[7px] h-0.5 bg-neutral-200"
+      class="absolute top-[7px] h-0.5 bg-stone-200"
       style="left: {TRACK_LEFT}%; width: {TRACK_WIDTH}%"
       aria-hidden="true"
     ></div>
     <!-- The line behind, drawn over it. -->
     <div
-      class="absolute top-[7px] h-0.5 bg-neutral-900 transition-[width] duration-300"
+      class="absolute top-[7px] h-0.5 bg-stone-900 transition-[width] duration-300"
       style="left: {TRACK_LEFT}%; width: {travelled}%"
       aria-hidden="true"
     ></div>
@@ -70,18 +70,18 @@
         >
           <span
             class="size-4 rounded-full border-2 transition-colors {here
-              ? 'border-neutral-900 bg-white ring-4 ring-neutral-900/10'
+              ? 'border-tomato-500 bg-cream-50 ring-4 ring-tomato-500/20'
               : passed
-                ? 'border-neutral-900 bg-neutral-900'
-                : 'border-neutral-300 bg-white group-hover:border-neutral-400'}"
+                ? 'border-stone-900 bg-stone-900'
+                : 'border-stone-300 bg-cream-50 group-hover:border-stone-400'}"
             aria-hidden="true"
           ></span>
           <span
             class="text-sm transition-colors {here
-              ? 'font-semibold text-neutral-900'
+              ? 'font-semibold text-stone-900'
               : passed
-                ? 'text-neutral-600'
-                : 'text-neutral-400 group-hover:text-neutral-600'}"
+                ? 'text-stone-600'
+                : 'text-stone-400 group-hover:text-stone-600'}"
           >
             {stop.label}
           </span>

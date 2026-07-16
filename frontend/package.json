@@ -11,7 +11,10 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "lint:design": "node scripts/lint-design.mjs",
+    "lint:stories": "node scripts/lint-stories.mjs",
+    "lint": "npm run lint:design && npm run lint:stories"
   },
   "devDependencies": {
     "@storybook/sveltekit": "^10.5.0",

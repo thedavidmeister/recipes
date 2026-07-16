@@ -140,14 +140,28 @@
 }
 
 @layer base {
-  /* Tokens-first (#36 redesign): this file DEFINES the system and makes the
-   * fonts + colour/type tokens available, but deliberately does NOT restyle the
-   * app. If it set a cream `body` and serif headings globally here, every
-   * un-migrated surface (Login's white cards, the sky button) would sit
-   * half-painted on top of it. Each surface adopts the tokens in its own PR,
-   * screenshot-reviewed; once they all have, the shared base can move here. The
-   * design-system page shows the full vibe already, via explicit classes. */
+  /* The shared foundation. Held back until every surface was migrated (see the
+   * #36 redesign) — now that they are, it lives here so a new page is on the
+   * system from its first line without repeating the classes. */
   :root {
     color-scheme: light;
+  }
+
+  body {
+    background-color: var(--color-cream-50);
+    color: var(--color-stone-900);
+    font-family: var(--font-sans);
+    /* Body sits on the 24px rhythm line (1.5 × 16px). */
+    line-height: 1.5;
+  }
+
+  /* Headings are the display face — Rubik, medium; calm and confident, not
+   * chunky. A surface can still override per element, but this is the default. */
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: -0.01em;
   }
 }

@@ -7,4 +7,4 @@
    */
 </script>
 
-<p class="mt-8 text-neutral-500">Nothing here yet — cook something first.</p>
+<p class="mt-8 text-stone-500">Nothing here yet — cook something first.</p>

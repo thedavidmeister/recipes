@@ -42,6 +42,11 @@ jobs:
       - run: nix develop -c npm --prefix frontend ci
       # svelte-check: types across .svelte + .ts. The whole reason for this job.
       - run: nix develop -c npm --prefix frontend run check
+      # Design-system enforcement (the ratchet): fail the build if a surface
+      # reaches past the tokens — raw hex, Tailwind's default palette, white/black,
+      # arbitrary colours, a serif — or if a component ships without a story. A
+      # system nobody enforces decays; this is the enforcement.
+      - run: nix develop -c npm --prefix frontend run lint
       # The SPA must actually build. Env vars are deliberately unset: with
       # `$env/dynamic/public` they are read at runtime from the generated
       # `_app/env.js`, so a build proves compilation without pretending to prove
