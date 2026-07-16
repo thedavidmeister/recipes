@@ -117,6 +117,21 @@
   --text-display--line-height: 1;
   --text-display--letter-spacing: -0.01em;
 
+  /* --- Vertical rhythm ------------------------------------------------- */
+  /* Vertical space is a system, not a guess. The base beat is 8px; body text
+   * sits on a 24px line (three beats), and every gap is a whole number of beats,
+   * so the page has a steady pulse instead of a pile of one-off margins.
+   *
+   * These are the named gaps — the vocabulary a surface reaches for. Each says
+   * what it is *for*, not just how big, so the choice is "these belong together"
+   * rather than "mt-2 looks right". */
+  --space-tight: 0.5rem; /*  8px · 1 beat  — a heading and its own line, within a component */
+  --space-block: 1rem; /*  16px · 2 beats — paragraph to paragraph */
+  --space-group: 1.5rem; /*  24px · 3 beats — a label to its content, card padding */
+  --space-sub: 2rem; /*  32px · 4 beats — between subsections */
+  --space-section: 3.5rem; /*  56px · 7 beats — between major sections */
+  --space-page: 3rem; /*  48px · 6 beats — page top & bottom */
+
   /* --- Shape ----------------------------------------------------------- */
   /* Generously round: big, soft, tappable. Nothing sharp — but not a sticker
    * either. */

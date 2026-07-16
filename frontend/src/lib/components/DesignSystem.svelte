@@ -51,6 +51,15 @@
     { w: 800, label: "Extrabold" },
   ];
 
+  // Vertical rhythm: named gaps, each a whole number of 8px beats.
+  const rhythm = [
+    { name: "tight", px: 8, beats: "1 beat", use: "a heading & its own line; within a component" },
+    { name: "block", px: 16, beats: "2 beats", use: "paragraph to paragraph" },
+    { name: "group", px: 24, beats: "3 beats", use: "a label to its content; card padding" },
+    { name: "sub", px: 32, beats: "4 beats", use: "between subsections" },
+    { name: "section", px: 56, beats: "7 beats", use: "between major sections" },
+  ];
+
   // Colour-code ingredients by flavour family (#40's taxonomy). Curated to
   // evoke, not spread on a wheel. roasted/nutty = the browns; dairy = the creams.
   const flavours = [
@@ -196,7 +205,7 @@
 
       <div class="mt-6 rounded-3xl border border-stone-200 bg-cream-100 p-6 sm:p-8">
         <p class="text-sm font-bold uppercase tracking-wider text-stone-500">
-          Fredoka — display, chunky &amp; round
+          Rubik — display, rounded &amp; assured
         </p>
         <p class="mt-3 font-display text-5xl font-medium leading-tight text-stone-900">
           Sticky sesame noodles
@@ -206,7 +215,7 @@
         </p>
       </div>
 
-      <div class="mt-4 rounded-3xl border-2 border-stone-200 bg-cream-100 p-6 sm:p-8">
+      <div class="mt-4 rounded-3xl border border-stone-200 bg-cream-100 p-6 sm:p-8">
         <p class="text-sm font-bold uppercase tracking-wider text-stone-500">
           Nunito — body, rounded &amp; readable
         </p>
@@ -219,6 +228,62 @@
           {/each}
         </div>
       </div>
+    </section>
+
+    <!-- Vertical rhythm -->
+    <section class="mt-14">
+      <h2 class="font-display text-3xl font-medium">the rhythm</h2>
+      <p class="mt-1 text-stone-600">
+        Vertical space is a system, not a guess. An 8px beat; body sits on a 24px
+        line (three beats), and every gap is a whole number of beats.
+      </p>
+
+      <!-- The beat scale -->
+      <div class="mt-6 space-y-2">
+        {#each rhythm as r (r.name)}
+          <div class="flex items-center gap-4">
+            <div class="w-24 shrink-0 text-right">
+              <p class="font-semibold text-stone-900">{r.name}</p>
+              <p class="text-xs text-stone-500">{r.px}px · {r.beats}</p>
+            </div>
+            <div class="h-3 rounded-full bg-tomato-500" style="width: {r.px}px"></div>
+            <p class="text-sm text-stone-500">{r.use}</p>
+          </div>
+        {/each}
+      </div>
+
+      <!-- Baseline demo: text sitting on the 24px grid -->
+      <p class="mt-8 text-sm font-semibold uppercase tracking-wider text-stone-500">
+        On the grid — every line &amp; gap lands on a 24px beat
+      </p>
+      <div
+        class="mt-3 overflow-hidden rounded-3xl border border-stone-200 p-6 sm:p-8"
+        style="background-image: repeating-linear-gradient(to bottom, var(--color-cream-100) 0, var(--color-cream-100) 23px, var(--color-stone-200) 23px, var(--color-stone-200) 24px);"
+      >
+        <h3
+          class="font-display font-medium text-stone-900"
+          style="font-size: 24px; line-height: 24px; margin: 0;"
+        >
+          Sticky sesame noodles
+        </h3>
+        <p class="text-stone-600" style="font-size: 16px; line-height: 24px; margin-top: 8px;">
+          The heading and its line are one unit, eight pixels apart. This
+          paragraph sits on the grid at sixteen-pixel leading rounded to the beat,
+          so each line lands on a rule.
+        </p>
+        <p class="text-stone-600" style="font-size: 16px; line-height: 24px; margin-top: 16px;">
+          A second paragraph, two beats down — the gap between blocks is bigger
+          than the gap inside one, and both are whole beats, so nothing drifts.
+        </p>
+      </div>
+
+      <p class="mt-4 text-sm text-stone-500">
+        heading → its line <span class="text-stone-700">8</span> · paragraph →
+        paragraph <span class="text-stone-700">16</span> · label → content
+        <span class="text-stone-700">24</span> · section → section
+        <span class="text-stone-700">56</span>. Half-beats (4px) exist for
+        icon-to-label only.
+      </p>
     </section>
 
     <!-- Components -->
