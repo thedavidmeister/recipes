@@ -1,1 +1,153 @@
-@import 'tailwindcss';
+@import "tailwindcss";
+
+/* Self-hosted, not a CDN. The screenshot harness serves Storybook from a local
+ * http.server, so a CDN font would silently render as a fallback in every
+ * screenshot — and the site would depend on a third party for its own
+ * typography. Fontsource ships them as npm packages, so they are just files. */
+@import "@fontsource-variable/rubik";
+@import "@fontsource-variable/nunito";
+
+/* The vibe: a game, not a cookbook. Warm, cozy, delicious — cream paper and
+ * warm-grey ink carrying bright, food-named colour. Big simple shapes, lots of
+ * whitespace, calm and confident.
+ *
+ * The rule that keeps it from getting noisy: **the room is calm, the food is
+ * bright.** Surfaces and words are warm neutrals; colour is reserved for the
+ * things you act on and the things you made. And it says it once — confident,
+ * not performing. The play is the fun; the chrome stays out of the way. */
+@theme {
+  /* --- The room: cream paper + warm-grey ink --------------------------- */
+  /* Cream, never white. #FFFFFF next to these reads blue and clinical — the
+   * whole palette is warm, so the "paper" has to be too. */
+  --color-cream-50: #fffcf7;
+  --color-cream-100: #fdf6ec;
+  --color-cream-200: #f7ecdc;
+  --color-cream-300: #efe0cb;
+
+  /* Warm greige — the actual neutral. This is the ink and the borders: text,
+   * secondary text, hairlines. It carries warmth (there's a little brown in it)
+   * without BEING brown — which is the fix for "too brown": stop using saturated
+   * coffee-colour as the colour of every word on the page. Low chroma, so it
+   * reads as a warm grey, not a latte. */
+  --color-stone-100: #f2ede4;
+  --color-stone-200: #e5ddd0;
+  --color-stone-300: #d0c6b6;
+  --color-stone-400: #ab9f8c;
+  --color-stone-500: #85796a; /* secondary text */
+  --color-stone-600: #63594d; /* body */
+  --color-stone-700: #453e35;
+  --color-stone-800: #2c2823;
+  --color-stone-900: #211d19; /* headings, strong text — warm near-black */
+
+  /* True browns — now an ACCENT, not the neutral. Reserved for warmth (the odd
+   * filled surface) and for the roasted/nutty/earthy flavour family (coffee,
+   * caramel, toast, walnut). Kept off the everyday text so the room feels like
+   * warm paper, not a coffee stain. */
+  --color-oat-200: #e8d5ba;
+  --color-latte-300: #d3b18c;
+  --color-caramel-400: #b9834f;
+  --color-cocoa-500: #96603a;
+  --color-coffee-600: #74472c;
+  --color-bean-700: #563523;
+  --color-espresso-800: #3a241a;
+  --color-espresso-900: #241610;
+
+  /* --- The food: bright secondaries ------------------------------------ */
+  /* Named after things you would eat — memorable, appetising, and enough range
+   * to give each of pick/buy/cook/joy its own colour. Each has a soft tint for
+   * fills and a saturated tone for marks. */
+  --color-tomato-500: #ef5f3c;
+  --color-tomato-100: #ffe4d9;
+  --color-matcha-500: #7fa650;
+  --color-matcha-100: #e8f2da;
+  --color-honey-500: #f0a825;
+  --color-honey-100: #fdeecd;
+  --color-plum-500: #b4527d;
+  --color-plum-100: #f9e2ec;
+
+  /* --- Flavours: colour-coding ingredients by taste ------------------- */
+  /* The app is taste-centric, so ingredients are coloured by their *flavour
+   * family* (the same taxonomy #40's pairing graph walks) — the colour tells you
+   * what a thing tastes like at a glance. Curated to *evoke*: lemon-zest gold,
+   * fresh-chilli red, bramble-stain purple, beetroot pink — not spaced evenly on
+   * a wheel, which looks like a chart. Each family has a `-tint` (the chip
+   * background) and a base (the dot / accent); chip *text* stays espresso, so the
+   * colour never has to carry legibility.
+   *
+   * These are deliberately NOT colourblind-safe: a private app for a known group,
+   * so the palette is spent on delight, not on CVD separation (a call made with
+   * the numbers in hand — a warm food palette only holds ~5 CVD-distinct hues, so
+   * richness costs that, knowingly). Ingredient names are always shown regardless.
+   *
+   * `roasted`/`nutty`/`earthy` are not here: that flavour zone *is* the browns
+   * above (coffee, caramel, toast, walnut), and dairy/cream is the creams. */
+  --color-chilli-500: #e03b24; /* chilli, pepper, ginger, mustard heat */
+  --color-chilli-100: #fbe0d9;
+  --color-citrus-500: #e0a012; /* lemon, lime, orange, grapefruit */
+  --color-citrus-100: #fbefc9;
+  --color-orchard-500: #e87b33; /* apple, pear, peach, apricot, tropical */
+  --color-orchard-100: #fce6d4;
+  --color-allium-500: #99ab3c; /* garlic, onion, leek, chive */
+  --color-allium-100: #eef1d5;
+  --color-herb-500: #4ca23d; /* basil, mint, parsley, leafy greens */
+  --color-herb-100: #dcefd5;
+  --color-sea-500: #1f9095; /* fish, shellfish, seaweed, samphire */
+  --color-sea-100: #d4ecec;
+  --color-berry-500: #7a3f8e; /* blackberry, currant, blueberry, grape */
+  --color-berry-100: #ebdcef;
+  --color-floral-500: #d473a6; /* rose, elderflower, saffron, vanilla */
+  --color-floral-100: #f8e2ed;
+  --color-beet-500: #be3f66; /* beetroot, radicchio, rhubarb, pomegranate */
+  --color-beet-100: #f7d9e1;
+  --color-spice-500: #b8720f; /* cumin, coriander seed, paprika, curry */
+  --color-spice-100: #f3e4cb;
+
+  /* --- Type ------------------------------------------------------------ */
+  /* Rubik for display: geometric with rounded corners — friendly, but modern and
+   * assured rather than cute. A serif (even a wonky one) reads "reference cookbook
+   * from decades ago", and this is a game; Rubik says "well-made app" without
+   * begging to be liked. Used at medium/semibold — confident, not chunky. Nunito
+   * for body: rounded terminals, plain enough to read a method through with floury
+   * hands. */
+  --font-display: "Rubik Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Large but calm — the type carries the design without shouting. */
+  --text-display: 3.5rem;
+  --text-display--line-height: 1;
+  --text-display--letter-spacing: -0.01em;
+
+  /* --- Vertical rhythm ------------------------------------------------- */
+  /* Vertical space is a system, not a guess. The base beat is 8px; body text
+   * sits on a 24px line (three beats), and every gap is a whole number of beats,
+   * so the page has a steady pulse instead of a pile of one-off margins.
+   *
+   * These are the named gaps — the vocabulary a surface reaches for. Each says
+   * what it is *for*, not just how big, so the choice is "these belong together"
+   * rather than "mt-2 looks right". */
+  --space-tight: 0.5rem; /*  8px · 1 beat  — a heading and its own line, within a component */
+  --space-block: 1rem; /*  16px · 2 beats — paragraph to paragraph */
+  --space-group: 1.5rem; /*  24px · 3 beats — a label to its content, card padding */
+  --space-sub: 2rem; /*  32px · 4 beats — between subsections */
+  --space-section: 3.5rem; /*  56px · 7 beats — between major sections */
+  --space-page: 3rem; /*  48px · 6 beats — page top & bottom */
+
+  /* --- Shape ----------------------------------------------------------- */
+  /* Generously round: big, soft, tappable. Nothing sharp — but not a sticker
+   * either. */
+  --radius-card: 1.75rem;
+  --radius-pill: 999px;
+}
+
+@layer base {
+  /* Tokens-first (#36 redesign): this file DEFINES the system and makes the
+   * fonts + colour/type tokens available, but deliberately does NOT restyle the
+   * app. If it set a cream `body` and serif headings globally here, every
+   * un-migrated surface (Login's white cards, the sky button) would sit
+   * half-painted on top of it. Each surface adopts the tokens in its own PR,
+   * screenshot-reviewed; once they all have, the shared base can move here. The
+   * design-system page shows the full vibe already, via explicit classes. */
+  :root {
+    color-scheme: light;
+  }
+}
