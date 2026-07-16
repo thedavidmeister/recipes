@@ -46,22 +46,22 @@
       role: "action · pick",
     },
     {
+      name: "plum",
+      tone: "--color-plum-500",
+      tint: "--color-plum-100",
+      role: "ripe · buy",
+    },
+    {
       name: "paprika",
       tone: "--color-paprika-500",
       tint: "--color-paprika-100",
-      role: "spend · buy",
+      role: "heat · cook",
     },
     {
       name: "honey",
       tone: "--color-honey-500",
       tint: "--color-honey-100",
-      role: "warm · cook",
-    },
-    {
-      name: "plum",
-      tone: "--color-plum-500",
-      tint: "--color-plum-100",
-      role: "treat · joy",
+      role: "sweet · joy",
     },
   ];
 
