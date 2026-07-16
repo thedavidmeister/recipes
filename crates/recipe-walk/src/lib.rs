@@ -226,9 +226,15 @@ mod tests {
             vec![IngredientId(2), IngredientId(0)],
         ]);
         let strat = UniformWalk;
-        let a: Vec<_> = seeded_walk(&g, &strat, 42, RecipeId(0), 3).take(30).collect();
-        let b: Vec<_> = seeded_walk(&g, &strat, 42, RecipeId(0), 3).take(30).collect();
-        let c: Vec<_> = seeded_walk(&g, &strat, 7, RecipeId(0), 3).take(30).collect();
+        let a: Vec<_> = seeded_walk(&g, &strat, 42, RecipeId(0), 3)
+            .take(30)
+            .collect();
+        let b: Vec<_> = seeded_walk(&g, &strat, 42, RecipeId(0), 3)
+            .take(30)
+            .collect();
+        let c: Vec<_> = seeded_walk(&g, &strat, 7, RecipeId(0), 3)
+            .take(30)
+            .collect();
         assert_eq!(a, b, "same seed must reproduce the walk");
         assert_ne!(a, c, "a different seed should (almost surely) differ");
     }

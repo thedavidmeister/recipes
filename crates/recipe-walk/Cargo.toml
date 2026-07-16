@@ -8,12 +8,4 @@ license = "MIT"
 [dependencies]
 # The walk is pure graph traversal + weighted choice — the only dependency is an
 # RNG, pinned to the workspace version (the backend already uses rand 0.8).
-#
-# default-features = false drops `getrandom`: walks are always seeded
-# (`seed_from_u64`, never OS entropy), so it is dead weight — and it is what makes
-# this crate fail to compile for wasm32 (getrandom errors there without the `js`
-# feature). `std_rng` gives StdRng, `alloc` gives WeightedIndex/SliceRandom.
-rand = { version = "0.8", default-features = false, features = [
-  "std_rng",
-  "alloc",
-] }
+rand = "0.8"
