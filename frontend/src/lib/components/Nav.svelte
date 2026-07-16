@@ -12,6 +12,11 @@
    *
    * Behind you is solid, ahead is faint. You can still jump to any stop — the
    * line describes the journey, it does not police it.
+   *
+   * The stop you are on wears its section's colour (pick·pesto, buy·plum,
+   * cook·paprika, joy·honey) — colour marks where you are, the way it marks what
+   * you can act on everywhere else. Ring classes are spelled out per stop, not
+   * built from the id, so Tailwind actually generates them.
    */
   interface Props {
     current: Section;
@@ -19,11 +24,11 @@
 
   let { current }: Props = $props();
 
-  const stops: { id: Section; label: string }[] = [
-    { id: "pick", label: "pick" },
-    { id: "buy", label: "buy" },
-    { id: "cook", label: "cook" },
-    { id: "joy", label: "joy" },
+  const stops: { id: Section; label: string; ring: string }[] = [
+    { id: "pick", label: "pick", ring: "border-pesto-500 ring-pesto-500/20" },
+    { id: "buy", label: "buy", ring: "border-plum-500 ring-plum-500/20" },
+    { id: "cook", label: "cook", ring: "border-paprika-500 ring-paprika-500/20" },
+    { id: "joy", label: "joy", ring: "border-honey-500 ring-honey-500/20" },
   ];
 
   const index = $derived(
@@ -70,7 +75,7 @@
         >
           <span
             class="size-4 rounded-full border-2 transition-colors {here
-              ? 'border-pesto-500 bg-cream-50 ring-pesto-500/20 ring-4'
+              ? 'bg-cream-50 ring-4 ' + stop.ring
               : passed
                 ? 'border-stone-900 bg-stone-900'
                 : 'bg-cream-50 border-stone-300 group-hover:border-stone-400'}"
