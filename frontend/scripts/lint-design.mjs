@@ -61,7 +61,9 @@ const RULES = [
     re: new RegExp(
       String
         .raw`\b(?:bg|text|border|ring|from|via|to|fill|stroke|decoration|outline|divide|accent|caret|shadow)-(?:${
-        DEFAULT_FAMILIES.join("|")
+        DEFAULT_FAMILIES.join(
+          "|",
+        )
       })-\d{2,3}\b`,
       "g",
     ),
@@ -88,6 +90,23 @@ const RULES = [
     why:
       "serif — the display face is Rubik (font-display); a serif reads cookbook, not game",
   },
+  {
+    // An external font URL breaks two decisions at once: self-hosting (the
+    // screenshot harness serves locally, so a CDN font renders as a fallback in
+    // every shot) and not leaking to a third party. Fonts come from Fontsource.
+    re:
+      /fonts\.(?:googleapis|gstatic)\.com|@import\s+(?:url\()?["']?https?:\/\//gi,
+    why:
+      "external font/URL — fonts are self-hosted via Fontsource; a CDN font renders as a fallback in screenshots",
+  },
+  {
+    // Off-beat spacing bypasses the rhythm. Margin/padding/gap must come from the
+    // scale (multiples of the 8px beat), never an arbitrary pixel value. Position,
+    // tracking, radius and font-size arbitraries are fine — they are not rhythm.
+    re: /\b(?:m|p)[trblxye]?-\[|(?:gap|space-[xy])-\[/g,
+    why:
+      "arbitrary spacing — use the rhythm scale (multiples of the 8px beat), not a one-off pixel gap",
+  },
 ];
 
 function walk(dir) {
@@ -110,9 +129,12 @@ for (const file of walk(SRC)) {
       // Skip comment lines — a token name mentioned in prose is not a use.
       const trimmed = line.trim();
       if (
-        trimmed.startsWith("//") || trimmed.startsWith("*") ||
+        trimmed.startsWith("//") ||
+        trimmed.startsWith("*") ||
         trimmed.startsWith("/*")
-      ) return;
+      ) {
+        return;
+      }
       for (const m of line.matchAll(re)) {
         violations.push({
           file: relative(ROOT, file),

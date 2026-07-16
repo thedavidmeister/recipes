@@ -139,8 +139,11 @@ verdicts on the vendors.
 crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers
 backend/             Axum: ingest · derive · corpus store · SSRF-guarded fetching (deploys to Render)
 frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind (parses nothing)
+frontend/src/app.css design tokens — the one place raw colour/spacing values live
 frontend/.storybook  Storybook — every UI state declared as a story (see below)
-flake.nix            rainix dev shell (Rust + Node) + storybook-shot
+frontend/scripts/    the fences — lint-design · lint-stories · visual-shoot · visual-diff
+frontend/tests/visual/baselines/  committed per-story baseline PNGs the visual fence diffs against
+flake.nix            rainix dev shell (Rust + Node) + storybook-shot + visual-shoot
 ```
 
 ## Getting started
@@ -191,6 +194,61 @@ serif.
 Shots are uploaded to a Cloudflare R2 public bucket and embedded in the PR by
 URL (GitHub has no image-upload API). See `.env.example`; run it by hand — it is
 deliberately not in CI.
+
+### The design system and its fence
+
+There is one visual language — warm cream paper, warm-grey ink, brown as an
+accent, four section colours (tomato/matcha/honey/plum) and twelve flavour
+families, Rubik for display and Nunito for body, spacing on an 8px beat. It is
+**declared** as a Storybook story (`recipes/Design System`) so it can be viewed
+and shot, and defined once as tokens in `frontend/src/app.css` — that file is
+the only place raw colour and spacing values are allowed to live.
+
+Three CI gates keep every surface on that language, each catching what the one
+before it can't (`npm run lint` runs the first two):
+
+1. **`lint:design`** reads source. It fails the build on the escape hatches —
+   raw hex, Tailwind's default palette, `white`/`black`, arbitrary colour or
+   spacing values, a serif, an external font URL. Each ban carries its reason,
+   so the failure teaches.
+2. **`lint:stories`** requires every component to ship a story, so nothing new
+   escapes the fence by never being declared.
+3. **The visual fence** (`visual:diff`) is the one the source lint can't build.
+   A source lint proves a surface _uses_ the tokens; it cannot prove the render
+   still _looks_ right — a heading colliding with a button, a card overflowing,
+   a font silently falling back all pass it and wreck the pixels. So every story
+   has a committed baseline PNG (`frontend/tests/visual/baselines/`); CI
+   re-renders and pixel-diffs; **any** change fails the build.
+
+```sh
+(cd frontend && npm run build-storybook)
+nix run .#visual-shoot          # full-page, deterministic re-render of every story
+npm --prefix frontend run visual:diff     # fail on any drift from the baselines
+npm --prefix frontend run visual:update   # re-bless: adopt current/ as the new baselines
+```
+
+**A failing diff is feedback to read, not a wall — the same as failing-test
+output.** So a change doesn't just emit a magenta diff (which shows _where_
+pixels moved, not whether the new look is right); it emits a
+`baseline | current
+| diff` triptych — before, after, and delta side by side in
+one PNG, colour-bar coded (green/tomato/magenta). Open that one image and the
+change is judgeable at a glance: intended and right → `visual:update` re-blesses
+it; unexpected → it's a regression, fix the surface. CI uploads the triptychs as
+the `visual-diff` artifact on failure, so the reviewer — person or agent — looks
+at the actual pixels. The whole point is that **no visual change lands
+unlooked-at**, and that matters more under high churn, not less.
+
+This works only because the render is deterministic: the pinned nix `chromium`,
+self-hosted fonts pinned through `FONTCONFIG_FILE`, a fixed viewport width and
+device scale, animations disabled, and a wait on `document.fonts.ready`. Two
+independent runs diff by **exactly 0px** — measured — so the diff budget is a
+few pixels of slack for a theoretical cross-machine AA fringe, not a noise
+allowance, and even a colour tweak on a tiny element (a nav "you are here" ring)
+is caught. `visual-shoot` drives puppeteer for a **full-page** capture rather
+than `storybook-shot`'s fixed viewport, because a cropped page would let a
+change below the fold land unreviewed — exactly what the fence exists to
+prevent.
 
 ## Deploying
 

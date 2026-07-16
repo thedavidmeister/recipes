@@ -24,3 +24,8 @@ vite.config.ts.timestamp-*
 
 # storybook build output
 storybook-static/
+
+# Visual fence: baselines are the committed source of truth; the re-render and
+# the diff triptychs are regenerated every run, so they are never committed.
+tests/visual/current/
+tests/visual/__diff__/
