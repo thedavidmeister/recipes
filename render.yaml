@@ -66,7 +66,9 @@ services:
   - name: recipes-web
     type: web
     runtime: static
-    plan: free
+    # No `plan` — Render's validator rejects one on a static site ("no such plan
+    # free for service type web"). Static sites have no instance to size; they
+    # are free by nature, not by plan.
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: ./build
