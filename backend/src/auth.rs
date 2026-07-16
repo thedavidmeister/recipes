@@ -134,21 +134,32 @@ pub struct CookieConfig {
 }
 
 impl CookieConfig {
+    /// Reads the environment; [`CookieConfig::parse`] holds the rules.
+    ///
+    /// Env is touched only here so the rules stay testable without mutating
+    /// process-global state: `std::env::set_var` is unsound under a threaded
+    /// test runner (it is `unsafe` in edition 2024), and two tests racing on one
+    /// variable surfaces as an unrelated crash rather than a failed assert.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::parse(
+            std::env::var("COOKIE_SECURE").ok().as_deref(),
+            std::env::var("COOKIE_DOMAIN").ok().as_deref(),
+        )
+    }
+
     /// Fails closed: `COOKIE_SECURE` must be stated, and the only route to a
     /// non-`Secure` cookie is asking for one.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let secure = match std::env::var("COOKIE_SECURE").as_deref() {
-            Ok("true") => true,
-            Ok("false") => false,
-            Ok(other) => anyhow::bail!("COOKIE_SECURE must be `true` or `false`, got `{other}`"),
-            Err(_) => anyhow::bail!(
+    fn parse(secure: Option<&str>, domain: Option<&str>) -> anyhow::Result<Self> {
+        let secure = match secure {
+            Some("true") => true,
+            Some("false") => false,
+            Some(other) => anyhow::bail!("COOKIE_SECURE must be `true` or `false`, got `{other}`"),
+            None => anyhow::bail!(
                 "COOKIE_SECURE is required: `true` anywhere reachable, `false` only for local http"
             ),
         };
         Ok(Self {
-            domain: std::env::var("COOKIE_DOMAIN")
-                .ok()
-                .filter(|d| !d.trim().is_empty()),
+            domain: domain.filter(|d| !d.trim().is_empty()).map(str::to_owned),
             secure,
         })
     }
@@ -800,22 +811,40 @@ mod tests {
     /// silently puts a session on plain http is not a failure anyone notices.
     #[test]
     fn cookie_config_fails_closed_on_missing_secure() {
-        // A stray ambient value would make this pass for the wrong reason.
-        std::env::remove_var("COOKIE_SECURE");
         assert!(
-            CookieConfig::from_env().is_err(),
+            CookieConfig::parse(None, None).is_err(),
             "unset COOKIE_SECURE must refuse to start"
         );
-        std::env::set_var("COOKIE_SECURE", "yes");
-        assert!(
-            CookieConfig::from_env().is_err(),
-            "a non-boolean must refuse to start rather than read as false"
+        for bad in ["yes", "1", "TRUE", "", "  "] {
+            assert!(
+                CookieConfig::parse(Some(bad), None).is_err(),
+                "{bad:?} must refuse to start rather than read as false"
+            );
+        }
+        assert!(CookieConfig::parse(Some("true"), None).unwrap().secure);
+        assert!(!CookieConfig::parse(Some("false"), None).unwrap().secure);
+    }
+
+    /// A blank `COOKIE_DOMAIN` means unset, not a cookie scoped to "".
+    #[test]
+    fn a_blank_cookie_domain_is_no_domain() {
+        assert_eq!(
+            CookieConfig::parse(Some("true"), Some("  "))
+                .unwrap()
+                .domain,
+            None
         );
-        std::env::set_var("COOKIE_SECURE", "true");
-        assert!(CookieConfig::from_env().unwrap().secure);
-        std::env::set_var("COOKIE_SECURE", "false");
-        assert!(!CookieConfig::from_env().unwrap().secure);
-        std::env::remove_var("COOKIE_SECURE");
+        assert_eq!(
+            CookieConfig::parse(Some("true"), None).unwrap().domain,
+            None
+        );
+        assert_eq!(
+            CookieConfig::parse(Some("true"), Some("lehlehleh.com"))
+                .unwrap()
+                .domain
+                .as_deref(),
+            Some("lehlehleh.com")
+        );
     }
 
     /// Identity is the numeric id: a user who renames stays one account.

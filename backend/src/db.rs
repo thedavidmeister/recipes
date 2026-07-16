@@ -36,28 +36,60 @@ const MIGRATIONS: &[(i64, &str)] = &[
 /// Anything else is an error, **including a bare path**. There is no default and
 /// no fallback: see the module docs for what a silent fallback cost.
 pub async fn open() -> anyhow::Result<Database> {
-    let url = std::env::var("DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required (`libsql://…` or `file:…`)"))?;
-    let url = url.trim();
+    // Env is read here and nowhere else: `resolve` is pure, so the rules can be
+    // tested without mutating process-global state. `std::env::set_var` is
+    // unsound under a threaded test runner — it is `unsafe` in edition 2024 —
+    // and two tests racing on the same variable is the kind of failure that
+    // shows up as an unrelated segfault.
+    match resolve(
+        std::env::var("DATABASE_URL").ok().as_deref(),
+        std::env::var("TURSO_AUTH_TOKEN").ok().as_deref(),
+    )? {
+        Target::Remote { url, token } => Ok(Builder::new_remote(url, token).build().await?),
+        Target::Local { path } => Ok(Builder::new_local(path).build().await?),
+    }
+}
+
+/// Where [`open`] was told to connect.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    Remote { url: String, token: String },
+    Local { path: String },
+}
+
+/// Decide what `DATABASE_URL` means, or refuse.
+///
+/// Pure: takes the values rather than reading them, so the rules below are
+/// testable without touching the environment.
+fn resolve(url: Option<&str>, token: Option<&str>) -> anyhow::Result<Target> {
+    let url = url
+        .ok_or_else(|| anyhow::anyhow!("DATABASE_URL is required (`libsql://…` or `file:…`)"))?
+        .trim();
 
     if url.is_empty() {
         anyhow::bail!("DATABASE_URL is set but empty");
     }
 
     if url.starts_with("libsql://") || url.starts_with("https://") {
-        let token = std::env::var("TURSO_AUTH_TOKEN")
-            .map_err(|_| anyhow::anyhow!("TURSO_AUTH_TOKEN is required for a remote libsql URL"))?;
+        let token = token.ok_or_else(|| {
+            anyhow::anyhow!("TURSO_AUTH_TOKEN is required for a remote libsql URL")
+        })?;
         if token.trim().is_empty() {
             anyhow::bail!("TURSO_AUTH_TOKEN is set but empty");
         }
-        return Ok(Builder::new_remote(url.to_owned(), token).build().await?);
+        return Ok(Target::Remote {
+            url: url.to_owned(),
+            token: token.to_owned(),
+        });
     }
 
     if let Some(path) = url.strip_prefix("file:") {
         if path.is_empty() {
             anyhow::bail!("DATABASE_URL is `file:` with no path");
         }
-        return Ok(Builder::new_local(path).build().await?);
+        return Ok(Target::Local {
+            path: path.to_owned(),
+        });
     }
 
     // The case that mattered: a placeholder, a typo, or a bare path. Previously
@@ -117,15 +149,10 @@ mod tests {
     /// `/api/health` 200 while writing to a file inside its own container, which
     /// dies with the instance. Pointing at the wrong database must be a startup
     /// failure, not a healthy-looking lie.
-    ///
-    /// Serialised onto one test because they share process-wide env.
-    #[tokio::test]
-    async fn database_url_fails_loud_rather_than_falling_back() {
-        let restore = std::env::var("DATABASE_URL").ok();
-
-        std::env::remove_var("DATABASE_URL");
+    #[test]
+    fn database_url_fails_loud_rather_than_falling_back() {
         assert!(
-            open().await.is_err(),
+            resolve(None, None).is_err(),
             "unset must not default to a local file"
         );
 
@@ -137,40 +164,46 @@ mod tests {
             "postgres://x/y", // a real URL, wrong scheme
             "libsql:/typo",   // one slash short
             "   ",
+            "",
+            "file:", // no path
         ] {
-            std::env::set_var("DATABASE_URL", hostile);
             assert!(
-                open().await.is_err(),
+                resolve(Some(hostile), Some("tok")).is_err(),
                 "{hostile:?} must be refused, not opened as a local file"
             );
         }
 
-        std::env::set_var("DATABASE_URL", "file:");
-        assert!(
-            open().await.is_err(),
-            "`file:` with no path must be refused"
+        // A remote URL must not fall through to anything local when the token is
+        // missing or blank.
+        assert!(resolve(Some("libsql://x.turso.io"), None).is_err());
+        assert!(resolve(Some("libsql://x.turso.io"), Some("  ")).is_err());
+    }
+
+    /// The two accepted forms, and that the scheme picks the right one.
+    #[test]
+    fn recognized_schemes_resolve() {
+        assert_eq!(
+            resolve(Some("libsql://x.turso.io"), Some("tok")).unwrap(),
+            Target::Remote {
+                url: "libsql://x.turso.io".into(),
+                token: "tok".into()
+            }
         );
-
-        // A remote URL without a token must not fall through to anything local.
-        let token = std::env::var("TURSO_AUTH_TOKEN").ok();
-        std::env::remove_var("TURSO_AUTH_TOKEN");
-        std::env::set_var("DATABASE_URL", "libsql://example.turso.io");
-        assert!(
-            open().await.is_err(),
-            "remote without a token must be refused"
+        assert_eq!(
+            resolve(Some("https://x.turso.io"), Some("tok")).unwrap(),
+            Target::Remote {
+                url: "https://x.turso.io".into(),
+                token: "tok".into()
+            }
         );
-        if let Some(t) = token {
-            std::env::set_var("TURSO_AUTH_TOKEN", t);
-        }
-
-        // The one accepted local form still works.
-        std::env::set_var("DATABASE_URL", "file::memory:");
-        assert!(open().await.is_ok(), "`file:` is the way to ask for local");
-
-        match restore {
-            Some(v) => std::env::set_var("DATABASE_URL", v),
-            None => std::env::remove_var("DATABASE_URL"),
-        }
+        assert_eq!(
+            resolve(Some("file:recipes.db"), None).unwrap(),
+            Target::Local {
+                path: "recipes.db".into()
+            }
+        );
+        // Local needs no token — asking for one would be theatre.
+        assert!(resolve(Some("file::memory:"), None).is_ok());
     }
 
     #[tokio::test]
