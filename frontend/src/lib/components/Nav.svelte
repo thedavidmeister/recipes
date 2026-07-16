@@ -40,10 +40,10 @@
 
   // The line runs between the first and last dot, not edge to edge: with four
   // equal columns the outer dots sit an eighth in from each side, so the track
-  // spans 12.5% → 87.5%. One leg (the gap between two dots) is a third of that.
+  // spans 12.5% → 87.5% and the travelled part is a fraction of that 75%.
   const TRACK_LEFT = 12.5;
   const TRACK_WIDTH = 75;
-  const LEG = TRACK_WIDTH / (stops.length - 1);
+  const travelled = $derived((index / (stops.length - 1)) * TRACK_WIDTH);
 </script>
 
 <nav
@@ -57,18 +57,15 @@
       style="left: {TRACK_LEFT}%; width: {TRACK_WIDTH}%"
       aria-hidden="true"
     ></div>
-    <!-- The line behind: one coloured segment per leg you have walked, each in
-         the colour of the stop it arrives at, so the trail flows into the
-         current dot's colour. -->
-    {#each stops as stop, i (stop.id)}
-      {#if i > 0 && i <= index}
-        <div
-          class="absolute top-[7px] h-0.5 {stop.line}"
-          style="left: {TRACK_LEFT + (i - 1) * LEG}%; width: {LEG}%"
-          aria-hidden="true"
-        ></div>
-      {/if}
-    {/each}
+    <!-- The line behind: a single bar up to the current stop, in that stop's
+         colour, so the whole trail matches the dot you are on. -->
+    {#if index > 0}
+      <div
+        class="absolute top-[7px] h-0.5 transition-[width] duration-300 {stops[index].line}"
+        style="left: {TRACK_LEFT}%; width: {travelled}%"
+        aria-hidden="true"
+      ></div>
+    {/if}
 
     {#each stops as stop, i (stop.id)}
       {@const passed = i < index}
