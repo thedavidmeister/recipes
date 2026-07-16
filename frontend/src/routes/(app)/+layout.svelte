@@ -55,24 +55,26 @@
     error={session.error instanceof Error ? session.error.message : undefined}
   />
 {:else}
-  <div class="mx-auto max-w-2xl px-4 pb-24 pt-6">
-    <header class="flex items-baseline justify-between gap-4">
-      <h1 class="text-2xl font-bold tracking-tight lowercase">{current}</h1>
-      <div class="flex shrink-0 items-baseline gap-3 text-sm">
-        {#if session.data?.username}
-          <span class="text-neutral-500">@{session.data.username}</span>
-        {/if}
-        <button
-          onclick={signOut}
-          class="text-neutral-500 underline hover:text-neutral-900"
-        >
-          Sign out
-        </button>
-      </div>
-    </header>
+  <!--
+    The nav is the heading: `pick · buy · cook · joy` names where you are more
+    clearly than an <h1> repeating the same word underneath it would. So the
+    line goes first and the page starts below it.
+  -->
+  <Nav {current} />
+
+  <div class="mx-auto max-w-2xl px-4 pb-16">
+    <div class="flex justify-end gap-3 py-2 text-sm">
+      {#if session.data?.username}
+        <span class="text-neutral-500">@{session.data.username}</span>
+      {/if}
+      <button
+        onclick={signOut}
+        class="text-neutral-500 underline hover:text-neutral-900"
+      >
+        Sign out
+      </button>
+    </div>
 
     {@render children()}
   </div>
-
-  <Nav {current} />
 {/if}

@@ -3,10 +3,15 @@
 
   /**
    * The whole app in four words: **pick · buy · cook · joy** — the arc of a
-   * meal, so the nav answers "what am I doing right now" rather than listing
-   * features.
+   * meal, drawn as stops on a line to a destination.
    *
-   * A bottom bar because this is used in a kitchen, on a phone, one-thumbed.
+   * It is a route, not a tab bar, and that is the point: the four are *ordered*,
+   * and they go somewhere. `joy` is the destination, so the line always shows how
+   * far along you are and what is still ahead. A tab bar would say these are four
+   * equal places you might visit; this says you are on your way to dinner.
+   *
+   * Behind you is solid, ahead is faint. You can still jump to any stop — the
+   * line describes the journey, it does not police it.
    */
   interface Props {
     current: Section;
@@ -14,37 +19,74 @@
 
   let { current }: Props = $props();
 
-  const sections: { id: Section; label: string }[] = [
+  const stops: { id: Section; label: string }[] = [
     { id: "pick", label: "pick" },
     { id: "buy", label: "buy" },
     { id: "cook", label: "cook" },
     { id: "joy", label: "joy" },
   ];
+
+  const index = $derived(
+    Math.max(
+      0,
+      stops.findIndex((s) => s.id === current),
+    ),
+  );
+
+  // The line runs between the first and last dot, not edge to edge: with four
+  // equal columns the outer dots sit an eighth in from each side, so the track
+  // spans 12.5% → 87.5% and the travelled part is a fraction of that 75%.
+  const TRACK_LEFT = 12.5;
+  const TRACK_WIDTH = 75;
+  const travelled = $derived((index / (stops.length - 1)) * TRACK_WIDTH);
 </script>
 
 <nav
   aria-label="Sections"
-  class="fixed inset-x-0 bottom-0 z-10 border-t border-neutral-200 bg-white/95 backdrop-blur"
+  class="sticky top-0 z-10 border-b border-neutral-200 bg-white/95 pt-4 pb-3 backdrop-blur"
 >
-  <ul class="mx-auto flex max-w-2xl">
-    {#each sections as section (section.id)}
-      <li class="flex-1">
+  <ol class="relative mx-auto flex max-w-md">
+    <!-- The line ahead. -->
+    <div
+      class="absolute top-[7px] h-0.5 bg-neutral-200"
+      style="left: {TRACK_LEFT}%; width: {TRACK_WIDTH}%"
+      aria-hidden="true"
+    ></div>
+    <!-- The line behind, drawn over it. -->
+    <div
+      class="absolute top-[7px] h-0.5 bg-neutral-900 transition-[width] duration-300"
+      style="left: {TRACK_LEFT}%; width: {travelled}%"
+      aria-hidden="true"
+    ></div>
+
+    {#each stops as stop, i (stop.id)}
+      {@const passed = i < index}
+      {@const here = i === index}
+      <li class="relative flex-1">
         <a
-          href="/{section.id}"
-          aria-current={current === section.id ? "page" : undefined}
-          class="flex flex-col items-center gap-1 py-3 text-sm font-medium transition-colors
-            {current === section.id
-            ? 'text-neutral-900'
-            : 'text-neutral-400 hover:text-neutral-600'}"
+          href="/{stop.id}"
+          aria-current={here ? "page" : undefined}
+          class="group flex flex-col items-center gap-2"
         >
           <span
-            class="h-1 w-6 rounded-full {current === section.id
-              ? 'bg-neutral-900'
-              : 'bg-transparent'}"
+            class="size-4 rounded-full border-2 transition-colors {here
+              ? 'border-neutral-900 bg-white ring-4 ring-neutral-900/10'
+              : passed
+                ? 'border-neutral-900 bg-neutral-900'
+                : 'border-neutral-300 bg-white group-hover:border-neutral-400'}"
+            aria-hidden="true"
           ></span>
-          {section.label}
+          <span
+            class="text-sm transition-colors {here
+              ? 'font-semibold text-neutral-900'
+              : passed
+                ? 'text-neutral-600'
+                : 'text-neutral-400 group-hover:text-neutral-600'}"
+          >
+            {stop.label}
+          </span>
         </a>
       </li>
     {/each}
-  </ul>
+  </ol>
 </nav>
