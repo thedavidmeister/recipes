@@ -3,14 +3,8 @@
 /* Self-hosted, not a CDN. The screenshot harness serves Storybook from a local
  * http.server, so a CDN font would silently render as a fallback in every
  * screenshot — and the site would depend on a third party for its own
- * typography. Fontsource ships them as npm packages, so they are just files.
- *
- * `/full.css`, NOT the bare import: the default only carries the `wght` axis, so
- * `SOFT`/`WONK`/`opsz` are silently ignored and Fraunces renders as a plain
- * editorial serif — which is the entire opposite of why it was chosen. The full
- * file is a larger download for the four axes; worth it, since the softness is
- * the point. */
-@import "@fontsource-variable/fraunces/full.css";
+ * typography. Fontsource ships them as npm packages, so they are just files. */
+@import "@fontsource-variable/fredoka";
 @import "@fontsource-variable/nunito";
 
 /* The vibe: fun and playful, but utilitarian. Warm, cozy, delicious — browns
@@ -93,22 +87,23 @@
   --color-spice-100: #f3e4cb;
 
   /* --- Type ------------------------------------------------------------ */
-  /* Fraunces for display: a soft serif with a real `SOFT` axis, drawn to feel
-   * warm and old-bakery rather than newspaper — the playful half. Nunito for
-   * everything else: rounded terminals, but plain enough to read a method
-   * through with floury hands — the utilitarian half. The fun lives in the
-   * headings; the work happens in the body. */
-  --font-display: "Fraunces Variable", ui-serif, Georgia, serif;
+  /* Fredoka for display: chunky, round, bouncy — a game/app face, NOT a serif.
+   * This is deliberate: a serif (even a wonky one) reads "reference cookbook from
+   * decades ago", and this is a game, so the display face has to be fun. Used
+   * heavy — the chunk is the point. Nunito for body: rounded terminals, plain
+   * enough to read a method through with floury hands. */
+  --font-display: "Fredoka Variable", ui-rounded, system-ui, sans-serif;
   --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
 
-  /* Big: the type is the design, so the scale needs somewhere to go. */
-  --text-display: 3.5rem;
-  --text-display--line-height: 1;
-  --text-display--letter-spacing: -0.02em;
+  /* Big and chunky: the type is the design, and it should feel loud. */
+  --text-display: 4rem;
+  --text-display--line-height: 0.95;
+  --text-display--letter-spacing: -0.01em;
 
   /* --- Shape ----------------------------------------------------------- */
-  /* Generously round: large simple components, nothing sharp. */
-  --radius-card: 1.5rem;
+  /* Very round: big, chunky, tappable, sticker-like. Nothing sharp lives in a
+   * game. */
+  --radius-card: 1.75rem;
   --radius-pill: 999px;
 }
 

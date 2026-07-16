@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "^5.2.9",
+    "@fontsource-variable/fredoka": "^5.2.10",
     "@fontsource-variable/nunito": "^5.2.7",
     "@libsql/client": "^0.17.4",
     "@tanstack/svelte-query": "^6.1.36",

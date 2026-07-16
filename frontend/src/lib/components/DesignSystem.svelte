@@ -61,26 +61,26 @@
 <div class="min-h-screen bg-cream-50 px-6 py-12 text-espresso-900 sm:px-10">
   <div class="mx-auto max-w-3xl">
     <!-- Masthead -->
-    <header class="border-b-2 border-oat-200 pb-8">
-      <p class="font-semibold uppercase tracking-[0.2em] text-caramel-400">
-        Design system
-      </p>
-      <h1
-        class="mt-2 font-display text-6xl font-semibold leading-none tracking-tight"
-        style="font-variation-settings: 'SOFT' 100, 'WONK' 1, 'opsz' 144;"
+    <header class="pb-8">
+      <span
+        class="inline-block -rotate-2 rounded-full bg-tomato-500 px-3 py-1 text-sm font-bold uppercase tracking-wide text-cream-50"
       >
-        warm, cozy, delicious
+        Design system
+      </span>
+      <h1
+        class="mt-3 font-display text-7xl font-bold leading-[0.9] tracking-tight text-espresso-900"
+      >
+        warm, cozy,<br /><span class="text-tomato-500">delicious</span>
       </h1>
-      <p class="mt-4 max-w-xl text-lg text-coffee-600">
-        Fun and playful, but utilitarian. Brown is the room, bright is the food —
-        surfaces and words stay warm and neutral, and colour is spent only on
-        what you act on and what you made.
+      <p class="mt-5 max-w-xl text-lg text-coffee-600">
+        A game, not a cookbook. Brown is the room, bright is the food — the base
+        stays warm and calm so the colour and the chunk can be loud.
       </p>
     </header>
 
     <!-- Colour: the room -->
     <section class="mt-14">
-      <h2 class="font-display text-3xl font-semibold">the room</h2>
+      <h2 class="font-display text-4xl font-bold">the room</h2>
       <p class="mt-1 text-coffee-600">Creams and browns. Every surface, border and word.</p>
 
       <p class="mt-6 text-sm font-semibold uppercase tracking-wider text-caramel-400">
@@ -117,7 +117,7 @@
 
     <!-- Colour: the food -->
     <section class="mt-14">
-      <h2 class="font-display text-3xl font-semibold">the food</h2>
+      <h2 class="font-display text-4xl font-bold">the food</h2>
       <p class="mt-1 text-coffee-600">
         Bright secondaries, named after what you'd eat. One per section, used as a
         spice.
@@ -139,7 +139,7 @@
 
     <!-- Flavours -->
     <section class="mt-14">
-      <h2 class="font-display text-3xl font-semibold">the flavours</h2>
+      <h2 class="font-display text-4xl font-bold">the flavours</h2>
       <p class="mt-1 text-coffee-600">
         Ingredients coloured by what they taste like (#40). Curated to evoke, not
         spread on a wheel — the chip is the flavour, the text stays espresso.
@@ -168,28 +168,26 @@
 
     <!-- Type -->
     <section class="mt-14">
-      <h2 class="font-display text-3xl font-semibold">the type</h2>
+      <h2 class="font-display text-4xl font-bold">the type</h2>
       <p class="mt-1 text-coffee-600">
-        Fraunces for the fun, Nunito for the work.
+        Fredoka for the fun, Nunito for the work. No serif — a serif is a
+        cookbook, this is a game.
       </p>
 
-      <div class="mt-6 rounded-3xl border border-oat-200 bg-cream-100 p-6 sm:p-8">
-        <p class="text-sm font-semibold uppercase tracking-wider text-caramel-400">
-          Fraunces — display, soft &amp; a little wonky
+      <div class="mt-6 rounded-3xl bg-honey-100 p-6 sm:p-8">
+        <p class="text-sm font-bold uppercase tracking-wider text-caramel-400">
+          Fredoka — display, chunky &amp; round
         </p>
-        <p
-          class="mt-3 font-display text-5xl font-semibold leading-tight"
-          style="font-variation-settings: 'SOFT' 100, 'WONK' 1, 'opsz' 144;"
-        >
+        <p class="mt-3 font-display text-6xl font-bold leading-none text-espresso-900">
           Sticky sesame noodles
         </p>
-        <p class="mt-2 font-display text-2xl text-coffee-600" style="font-variation-settings: 'SOFT' 100, 'opsz' 40;">
-          the good serif, old-bakery not newspaper
+        <p class="mt-3 font-display text-3xl font-medium text-coffee-600">
+          bouncy, friendly, loud — an app you play with
         </p>
       </div>
 
-      <div class="mt-4 rounded-3xl border border-oat-200 bg-cream-100 p-6 sm:p-8">
-        <p class="text-sm font-semibold uppercase tracking-wider text-caramel-400">
+      <div class="mt-4 rounded-3xl border-2 border-oat-200 bg-cream-100 p-6 sm:p-8">
+        <p class="text-sm font-bold uppercase tracking-wider text-caramel-400">
           Nunito — body, rounded &amp; readable
         </p>
         <div class="mt-3 space-y-1">
@@ -205,41 +203,44 @@
 
     <!-- Components -->
     <section class="mt-14">
-      <h2 class="font-display text-3xl font-semibold">the pieces</h2>
+      <h2 class="font-display text-4xl font-bold">the pieces</h2>
       <p class="mt-1 text-coffee-600">Big, round, generous. Colour only where you act.</p>
 
       <!-- Buttons -->
       <div class="mt-6 flex flex-wrap items-center gap-3">
         <button
-          class="rounded-full bg-tomato-500 px-6 py-3 text-lg font-bold text-cream-50 shadow-sm transition hover:brightness-105"
+          class="rounded-full bg-tomato-500 px-8 py-4 text-xl font-bold text-cream-50 shadow-[0_4px_0_0_var(--color-cocoa-500)] transition active:translate-y-0.5 active:shadow-[0_2px_0_0_var(--color-cocoa-500)]"
         >
-          Cook this
+          Cook this!
         </button>
         <button
-          class="rounded-full border-2 border-oat-200 bg-cream-100 px-6 py-3 text-lg font-bold text-bean-700 transition hover:border-latte-300"
+          class="rounded-full border-2 border-oat-200 bg-cream-100 px-8 py-4 text-xl font-bold text-bean-700 transition hover:border-latte-300"
         >
           Maybe later
         </button>
-        <button class="rounded-full px-4 py-3 text-lg font-semibold text-cocoa-500 underline-offset-4 hover:underline">
+        <button class="rounded-full px-5 py-4 text-xl font-bold text-cocoa-500 hover:text-espresso-900">
           skip
         </button>
       </div>
 
       <!-- A card -->
-      <div class="mt-6 overflow-hidden rounded-3xl border border-oat-200 bg-cream-100 shadow-sm">
-        <div class="flex h-40 items-center justify-center bg-honey-100">
-          <span class="font-display text-2xl text-honey-500">photo</span>
+      <div class="mt-6 overflow-hidden rounded-[1.75rem] border-2 border-oat-200 bg-cream-100">
+        <div class="flex h-44 items-center justify-center bg-herb-100">
+          <span class="font-display text-3xl font-bold text-herb-500">photo</span>
         </div>
-        <div class="p-5">
-          <div class="flex items-center gap-2">
-            <span class="rounded-full bg-matcha-100 px-3 py-1 text-sm font-bold text-matcha-500">
+        <div class="p-6">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded-full bg-herb-100 px-3 py-1 text-sm font-bold text-herb-500">
               15 min
             </span>
-            <span class="rounded-full bg-cream-200 px-3 py-1 text-sm font-medium text-coffee-600">
-              vegetarian
+            <span class="rounded-full bg-chilli-100 px-3 py-1 text-sm font-bold text-chilli-500">
+              spicy
+            </span>
+            <span class="rounded-full bg-allium-100 px-3 py-1 text-sm font-bold text-allium-500">
+              garlicky
             </span>
           </div>
-          <h3 class="mt-3 font-display text-2xl font-semibold">Miso butter greens</h3>
+          <h3 class="mt-3 font-display text-3xl font-bold leading-tight">Miso butter greens</h3>
           <p class="mt-1 text-coffee-600">
             The kind of thing you make on a Tuesday and feel unreasonably pleased
             about.
