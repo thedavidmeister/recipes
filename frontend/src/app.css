@@ -1,1 +1,89 @@
-@import 'tailwindcss';
+@import "tailwindcss";
+
+/* Self-hosted, not a CDN. The screenshot harness serves Storybook from a local
+ * http.server, so a CDN font would silently render as a fallback in every
+ * screenshot — and the site would depend on a third party for its own
+ * typography. Fontsource ships them as npm packages, so they are just files.
+ *
+ * `/full.css`, NOT the bare import: the default only carries the `wght` axis, so
+ * `SOFT`/`WONK`/`opsz` are silently ignored and Fraunces renders as a plain
+ * editorial serif — which is the entire opposite of why it was chosen. The full
+ * file is a larger download for the four axes; worth it, since the softness is
+ * the point. */
+@import "@fontsource-variable/fraunces/full.css";
+@import "@fontsource-variable/nunito";
+
+/* The vibe: fun and playful, but utilitarian. Warm, cozy, delicious — browns
+ * and creamy off-whites carrying bright secondaries. Big simple shapes, lots of
+ * whitespace, and the type doing most of the work.
+ *
+ * The rule that keeps it from getting noisy: **brown is the room, bright is the
+ * food.** Every surface, border and word is a warm neutral; colour is reserved
+ * for the things you act on and the things you made. If everything is bright,
+ * nothing is — so colour is a spice, and the fun comes from the type and the
+ * shapes. */
+@theme {
+  /* --- The room: creams and browns ------------------------------------- */
+  /* Cream, never white. #FFFFFF next to these reads blue and clinical — the
+   * whole palette is warm, so the "paper" has to be too. */
+  --color-cream-50: #fffcf7;
+  --color-cream-100: #fdf6ec;
+  --color-cream-200: #f7ecdc;
+  --color-cream-300: #efe0cb;
+
+  /* Browns, walked from a latte to an espresso. These are the greys of this
+   * app: surfaces, borders, secondary text, and body copy. */
+  --color-oat-200: #e8d5ba;
+  --color-latte-300: #d3b18c;
+  --color-caramel-400: #b9834f;
+  --color-cocoa-500: #96603a;
+  --color-coffee-600: #74472c;
+  --color-bean-700: #563523;
+  --color-espresso-800: #3a241a;
+  --color-espresso-900: #241610;
+
+  /* --- The food: bright secondaries ------------------------------------ */
+  /* Named after things you would eat — memorable, appetising, and enough range
+   * to give each of pick/buy/cook/joy its own colour. Each has a soft tint for
+   * fills and a saturated tone for marks. */
+  --color-tomato-500: #ef5f3c;
+  --color-tomato-100: #ffe4d9;
+  --color-matcha-500: #7fa650;
+  --color-matcha-100: #e8f2da;
+  --color-honey-500: #f0a825;
+  --color-honey-100: #fdeecd;
+  --color-plum-500: #b4527d;
+  --color-plum-100: #f9e2ec;
+
+  /* --- Type ------------------------------------------------------------ */
+  /* Fraunces for display: a soft serif with a real `SOFT` axis, drawn to feel
+   * warm and old-bakery rather than newspaper — the playful half. Nunito for
+   * everything else: rounded terminals, but plain enough to read a method
+   * through with floury hands — the utilitarian half. The fun lives in the
+   * headings; the work happens in the body. */
+  --font-display: "Fraunces Variable", ui-serif, Georgia, serif;
+  --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Big: the type is the design, so the scale needs somewhere to go. */
+  --text-display: 3.5rem;
+  --text-display--line-height: 1;
+  --text-display--letter-spacing: -0.02em;
+
+  /* --- Shape ----------------------------------------------------------- */
+  /* Generously round: large simple components, nothing sharp. */
+  --radius-card: 1.5rem;
+  --radius-pill: 999px;
+}
+
+@layer base {
+  /* Tokens-first (#36 redesign): this file DEFINES the system and makes the
+   * fonts + colour/type tokens available, but deliberately does NOT restyle the
+   * app. If it set a cream `body` and serif headings globally here, every
+   * un-migrated surface (Login's white cards, the sky button) would sit
+   * half-painted on top of it. Each surface adopts the tokens in its own PR,
+   * screenshot-reviewed; once they all have, the shared base can move here. The
+   * design-system page shows the full vibe already, via explicit classes. */
+  :root {
+    color-scheme: light;
+  }
+}
