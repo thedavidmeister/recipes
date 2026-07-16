@@ -39,6 +39,23 @@
     { w: 600, label: "Semibold" },
     { w: 800, label: "Extrabold" },
   ];
+
+  // Colour-code ingredients by flavour family (#40's taxonomy). Curated to
+  // evoke, not spread on a wheel. roasted/nutty = the browns; dairy = the creams.
+  const flavours = [
+    { name: "chilli", base: "--color-chilli-500", tint: "--color-chilli-100", eg: "chilli · pepper · ginger" },
+    { name: "citrus", base: "--color-citrus-500", tint: "--color-citrus-100", eg: "lemon · lime · orange" },
+    { name: "orchard", base: "--color-orchard-500", tint: "--color-orchard-100", eg: "apple · peach · pear" },
+    { name: "spice", base: "--color-spice-500", tint: "--color-spice-100", eg: "cumin · paprika · curry" },
+    { name: "allium", base: "--color-allium-500", tint: "--color-allium-100", eg: "garlic · onion · leek" },
+    { name: "herb", base: "--color-herb-500", tint: "--color-herb-100", eg: "basil · mint · parsley" },
+    { name: "sea", base: "--color-sea-500", tint: "--color-sea-100", eg: "fish · seaweed · samphire" },
+    { name: "berry", base: "--color-berry-500", tint: "--color-berry-100", eg: "blackberry · currant · grape" },
+    { name: "floral", base: "--color-floral-500", tint: "--color-floral-100", eg: "rose · saffron · vanilla" },
+    { name: "beet", base: "--color-beet-500", tint: "--color-beet-100", eg: "beetroot · rhubarb · pomegranate" },
+    { name: "roasted", base: "--color-cocoa-500", tint: "--color-cream-200", eg: "coffee · caramel · walnut" },
+    { name: "dairy", base: "--color-latte-300", tint: "--color-cream-100", eg: "milk · cheese · butter" },
+  ];
 </script>
 
 <div class="min-h-screen bg-cream-50 px-6 py-12 text-espresso-900 sm:px-10">
@@ -118,6 +135,35 @@
           </div>
         {/each}
       </div>
+    </section>
+
+    <!-- Flavours -->
+    <section class="mt-14">
+      <h2 class="font-display text-3xl font-semibold">the flavours</h2>
+      <p class="mt-1 text-coffee-600">
+        Ingredients coloured by what they taste like (#40). Curated to evoke, not
+        spread on a wheel — the chip is the flavour, the text stays espresso.
+      </p>
+      <div class="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {#each flavours as f (f.name)}
+          <div
+            class="flex items-center gap-3 rounded-2xl px-4 py-3"
+            style="background: var({f.tint})"
+          >
+            <span class="size-5 shrink-0 rounded-full" style="background: var({f.base})"></span>
+            <div class="min-w-0">
+              <p class="font-display text-lg font-semibold capitalize leading-tight text-espresso-900">
+                {f.name}
+              </p>
+              <p class="truncate text-sm text-cocoa-500">{f.eg}</p>
+            </div>
+          </div>
+        {/each}
+      </div>
+      <p class="mt-4 text-sm text-cocoa-500">
+        Roasted, nutty and earthy flavours <em>are</em> the browns; dairy is the
+        creams — so the room doubles as two more flavour families.
+      </p>
     </section>
 
     <!-- Type -->

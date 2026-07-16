@@ -55,6 +55,43 @@
   --color-plum-500: #b4527d;
   --color-plum-100: #f9e2ec;
 
+  /* --- Flavours: colour-coding ingredients by taste ------------------- */
+  /* The app is taste-centric, so ingredients are coloured by their *flavour
+   * family* (the same taxonomy #40's pairing graph walks) — the colour tells you
+   * what a thing tastes like at a glance. Curated to *evoke*: lemon-zest gold,
+   * fresh-chilli red, bramble-stain purple, beetroot pink — not spaced evenly on
+   * a wheel, which looks like a chart. Each family has a `-tint` (the chip
+   * background) and a base (the dot / accent); chip *text* stays espresso, so the
+   * colour never has to carry legibility.
+   *
+   * These are deliberately NOT colourblind-safe: a private app for a known group,
+   * so the palette is spent on delight, not on CVD separation (a call made with
+   * the numbers in hand — a warm food palette only holds ~5 CVD-distinct hues, so
+   * richness costs that, knowingly). Ingredient names are always shown regardless.
+   *
+   * `roasted`/`nutty`/`earthy` are not here: that flavour zone *is* the browns
+   * above (coffee, caramel, toast, walnut), and dairy/cream is the creams. */
+  --color-chilli-500: #e03b24; /* chilli, pepper, ginger, mustard heat */
+  --color-chilli-100: #fbe0d9;
+  --color-citrus-500: #e0a012; /* lemon, lime, orange, grapefruit */
+  --color-citrus-100: #fbefc9;
+  --color-orchard-500: #e87b33; /* apple, pear, peach, apricot, tropical */
+  --color-orchard-100: #fce6d4;
+  --color-allium-500: #99ab3c; /* garlic, onion, leek, chive */
+  --color-allium-100: #eef1d5;
+  --color-herb-500: #4ca23d; /* basil, mint, parsley, leafy greens */
+  --color-herb-100: #dcefd5;
+  --color-sea-500: #1f9095; /* fish, shellfish, seaweed, samphire */
+  --color-sea-100: #d4ecec;
+  --color-berry-500: #7a3f8e; /* blackberry, currant, blueberry, grape */
+  --color-berry-100: #ebdcef;
+  --color-floral-500: #d473a6; /* rose, elderflower, saffron, vanilla */
+  --color-floral-100: #f8e2ed;
+  --color-beet-500: #be3f66; /* beetroot, radicchio, rhubarb, pomegranate */
+  --color-beet-100: #f7d9e1;
+  --color-spice-500: #b8720f; /* cumin, coriander seed, paprika, curry */
+  --color-spice-100: #f3e4cb;
+
   /* --- Type ------------------------------------------------------------ */
   /* Fraunces for display: a soft serif with a real `SOFT` axis, drawn to feel
    * warm and old-bakery rather than newspaper — the playful half. Nunito for
