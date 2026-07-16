@@ -72,26 +72,24 @@
 <div class="min-h-screen bg-cream-50 px-6 py-12 text-stone-900 sm:px-10">
   <div class="mx-auto max-w-3xl">
     <!-- Masthead -->
-    <header class="pb-8">
-      <span
-        class="inline-block -rotate-2 rounded-full bg-tomato-500 px-3 py-1 text-sm font-bold uppercase tracking-wide text-cream-50"
-      >
+    <header class="pb-10">
+      <p class="text-sm font-semibold uppercase tracking-[0.15em] text-stone-400">
         Design system
-      </span>
+      </p>
       <h1
-        class="mt-3 font-display text-7xl font-bold leading-[0.9] tracking-tight text-stone-900"
+        class="mt-4 font-display text-5xl font-medium leading-tight tracking-tight text-stone-900"
       >
-        warm, cozy,<br /><span class="text-tomato-500">delicious</span>
+        warm, cozy, delicious
       </h1>
-      <p class="mt-5 max-w-xl text-lg text-stone-600">
-        A game, not a cookbook. Cream paper, warm-grey ink, and bright food —
-        the base stays calm so the colour and the chunk can be loud.
+      <p class="mt-4 max-w-xl text-lg text-stone-600">
+        A game, not a cookbook. Cream paper, warm-grey ink, bright food. Calm and
+        confident — the play is the fun, not the chrome.
       </p>
     </header>
 
     <!-- Colour: the room -->
     <section class="mt-14">
-      <h2 class="font-display text-4xl font-bold">the room</h2>
+      <h2 class="font-display text-3xl font-medium">the room</h2>
       <p class="mt-1 text-stone-600">Cream paper, warm-grey ink. Brown is an accent, not the default.</p>
 
       <p class="mt-6 text-sm font-semibold uppercase tracking-wider text-stone-500">
@@ -139,7 +137,7 @@
 
     <!-- Colour: the food -->
     <section class="mt-14">
-      <h2 class="font-display text-4xl font-bold">the food</h2>
+      <h2 class="font-display text-3xl font-medium">the food</h2>
       <p class="mt-1 text-stone-600">
         Bright secondaries, named after what you'd eat. One per section, used as a
         spice.
@@ -161,7 +159,7 @@
 
     <!-- Flavours -->
     <section class="mt-14">
-      <h2 class="font-display text-4xl font-bold">the flavours</h2>
+      <h2 class="font-display text-3xl font-medium">the flavours</h2>
       <p class="mt-1 text-stone-600">
         Ingredients coloured by what they taste like (#40). Curated to evoke, not
         spread on a wheel — the chip is the flavour, the text stays espresso.
@@ -190,21 +188,21 @@
 
     <!-- Type -->
     <section class="mt-14">
-      <h2 class="font-display text-4xl font-bold">the type</h2>
+      <h2 class="font-display text-3xl font-medium">the type</h2>
       <p class="mt-1 text-stone-600">
         Fredoka for the fun, Nunito for the work. No serif — a serif is a
         cookbook, this is a game.
       </p>
 
-      <div class="mt-6 rounded-3xl bg-honey-100 p-6 sm:p-8">
+      <div class="mt-6 rounded-3xl border border-stone-200 bg-cream-100 p-6 sm:p-8">
         <p class="text-sm font-bold uppercase tracking-wider text-stone-500">
           Fredoka — display, chunky &amp; round
         </p>
-        <p class="mt-3 font-display text-6xl font-bold leading-none text-stone-900">
+        <p class="mt-3 font-display text-5xl font-medium leading-tight text-stone-900">
           Sticky sesame noodles
         </p>
-        <p class="mt-3 font-display text-3xl font-medium text-stone-600">
-          bouncy, friendly, loud — an app you play with
+        <p class="mt-2 font-display text-2xl font-normal text-stone-600">
+          rounded and friendly, said quietly
         </p>
       </div>
 
@@ -225,44 +223,44 @@
 
     <!-- Components -->
     <section class="mt-14">
-      <h2 class="font-display text-4xl font-bold">the pieces</h2>
+      <h2 class="font-display text-3xl font-medium">the pieces</h2>
       <p class="mt-1 text-stone-600">Big, round, generous. Colour only where you act.</p>
 
       <!-- Buttons -->
       <div class="mt-6 flex flex-wrap items-center gap-3">
         <button
-          class="rounded-full bg-tomato-500 px-8 py-4 text-xl font-bold text-cream-50 shadow-[0_4px_0_0_var(--color-cocoa-500)] transition active:translate-y-0.5 active:shadow-[0_2px_0_0_var(--color-cocoa-500)]"
+          class="rounded-full bg-tomato-500 px-7 py-3 text-lg font-semibold text-cream-50 transition hover:brightness-105"
         >
-          Cook this!
+          Cook this
         </button>
         <button
-          class="rounded-full border-2 border-stone-200 bg-cream-100 px-8 py-4 text-xl font-bold text-bean-700 transition hover:border-latte-300"
+          class="rounded-full border border-stone-300 bg-cream-100 px-7 py-3 text-lg font-semibold text-stone-700 transition hover:border-stone-400"
         >
           Maybe later
         </button>
-        <button class="rounded-full px-5 py-4 text-xl font-bold text-stone-500 hover:text-stone-900">
+        <button class="rounded-full px-4 py-3 text-lg font-medium text-stone-500 hover:text-stone-900">
           skip
         </button>
       </div>
 
       <!-- A card -->
-      <div class="mt-6 overflow-hidden rounded-[1.75rem] border-2 border-stone-200 bg-cream-100">
-        <div class="flex h-44 items-center justify-center bg-herb-100">
-          <span class="font-display text-3xl font-bold text-herb-500">photo</span>
+      <div class="mt-6 overflow-hidden rounded-[1.75rem] border border-stone-200 bg-cream-100">
+        <div class="flex h-44 items-center justify-center bg-stone-100">
+          <span class="font-display text-lg font-medium text-stone-400">photo</span>
         </div>
         <div class="p-6">
           <div class="flex flex-wrap items-center gap-2">
-            <span class="rounded-full bg-herb-100 px-3 py-1 text-sm font-bold text-herb-500">
+            <span class="rounded-full bg-herb-100 px-3 py-1 text-sm font-semibold text-herb-500">
               15 min
             </span>
-            <span class="rounded-full bg-chilli-100 px-3 py-1 text-sm font-bold text-chilli-500">
+            <span class="rounded-full bg-chilli-100 px-3 py-1 text-sm font-semibold text-chilli-500">
               spicy
             </span>
-            <span class="rounded-full bg-allium-100 px-3 py-1 text-sm font-bold text-allium-500">
+            <span class="rounded-full bg-allium-100 px-3 py-1 text-sm font-semibold text-allium-500">
               garlicky
             </span>
           </div>
-          <h3 class="mt-3 font-display text-3xl font-bold leading-tight">Miso butter greens</h3>
+          <h3 class="mt-3 font-display text-2xl font-medium leading-tight text-stone-900">Miso butter greens</h3>
           <p class="mt-1 text-stone-600">
             The kind of thing you make on a Tuesday and feel unreasonably pleased
             about.
