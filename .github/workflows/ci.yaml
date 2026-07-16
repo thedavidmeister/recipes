@@ -10,18 +10,17 @@ permissions:
   contents: read
 jobs:
   # rainix reusable workflows, pinned to @main so toolchain/CI updates
-  # auto-propagate (the rainix convention). wasm-test is intentionally omitted:
-  # it runs `cargo test --target wasm32 --workspace` (no --lib), which would try
-  # to compile the native-only `backend` crate (tokio/reqwest) to wasm. rs-wasm
-  # builds with --lib, so it covers recipe-core and skips backend.
+  # auto-propagate (the rainix convention). No wasm job: this app has no WASM,
+  # deliberately (the client parses nothing — see README/CLAUDE.md). A `rs-wasm`
+  # job used to guard recipe-core's wasm-compatibility for a client-side
+  # normalizer, but that normalizer was removed, so the guard only checked a
+  # target nothing ships — and it forced server-only crates (recipe-walk's rand →
+  # getrandom) to contort for wasm32 they never run on. Dropped.
   rs-static:
     uses: rainlanguage/rainix/.github/workflows/rainix-rs-static.yaml@main
     secrets: inherit
   rs-test:
     uses: rainlanguage/rainix/.github/workflows/rainix-rs-test.yaml@main
-    secrets: inherit
-  rs-wasm:
-    uses: rainlanguage/rainix/.github/workflows/rainix-rs-wasm.yaml@main
     secrets: inherit
   # The frontend, which nothing else here covers: the rs-* jobs are Rust only, so
   # until this existed `svelte-check` ran exactly when someone remembered to run

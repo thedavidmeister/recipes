@@ -1,0 +1,11 @@
+[package]
+name = "recipe-walk"
+version = "0.1.0"
+edition = "2021"
+description = "A variety-first walk over the recipe↔ingredient graph (the `pick` engine)"
+license = "MIT"
+
+[dependencies]
+# The walk is pure graph traversal + weighted choice — the only dependency is an
+# RNG, pinned to the workspace version (the backend already uses rand 0.8).
+rand = "0.8"
