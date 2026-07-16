@@ -4,18 +4,17 @@
  * http.server, so a CDN font would silently render as a fallback in every
  * screenshot — and the site would depend on a third party for its own
  * typography. Fontsource ships them as npm packages, so they are just files. */
-@import "@fontsource-variable/fredoka";
+@import "@fontsource-variable/rubik";
 @import "@fontsource-variable/nunito";
 
-/* The vibe: fun and playful, but utilitarian. Warm, cozy, delicious — browns
- * and creamy off-whites carrying bright secondaries. Big simple shapes, lots of
- * whitespace, and the type doing most of the work.
+/* The vibe: a game, not a cookbook. Warm, cozy, delicious — cream paper and
+ * warm-grey ink carrying bright, food-named colour. Big simple shapes, lots of
+ * whitespace, calm and confident.
  *
- * The rule that keeps it from getting noisy: **brown is the room, bright is the
- * food.** Every surface, border and word is a warm neutral; colour is reserved
- * for the things you act on and the things you made. If everything is bright,
- * nothing is — so colour is a spice, and the fun comes from the type and the
- * shapes. */
+ * The rule that keeps it from getting noisy: **the room is calm, the food is
+ * bright.** Surfaces and words are warm neutrals; colour is reserved for the
+ * things you act on and the things you made. And it says it once — confident,
+ * not performing. The play is the fun; the chrome stays out of the way. */
 @theme {
   /* --- The room: cream paper + warm-grey ink --------------------------- */
   /* Cream, never white. #FFFFFF next to these reads blue and clinical — the
@@ -104,22 +103,23 @@
   --color-spice-100: #f3e4cb;
 
   /* --- Type ------------------------------------------------------------ */
-  /* Fredoka for display: chunky, round, bouncy — a game/app face, NOT a serif.
-   * This is deliberate: a serif (even a wonky one) reads "reference cookbook from
-   * decades ago", and this is a game, so the display face has to be fun. Used
-   * heavy — the chunk is the point. Nunito for body: rounded terminals, plain
-   * enough to read a method through with floury hands. */
-  --font-display: "Fredoka Variable", ui-rounded, system-ui, sans-serif;
+  /* Rubik for display: geometric with rounded corners — friendly, but modern and
+   * assured rather than cute. A serif (even a wonky one) reads "reference cookbook
+   * from decades ago", and this is a game; Rubik says "well-made app" without
+   * begging to be liked. Used at medium/semibold — confident, not chunky. Nunito
+   * for body: rounded terminals, plain enough to read a method through with floury
+   * hands. */
+  --font-display: "Rubik Variable", ui-sans-serif, system-ui, sans-serif;
   --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
 
-  /* Big and chunky: the type is the design, and it should feel loud. */
-  --text-display: 4rem;
-  --text-display--line-height: 0.95;
+  /* Large but calm — the type carries the design without shouting. */
+  --text-display: 3.5rem;
+  --text-display--line-height: 1;
   --text-display--letter-spacing: -0.01em;
 
   /* --- Shape ----------------------------------------------------------- */
-  /* Very round: big, chunky, tappable, sticker-like. Nothing sharp lives in a
-   * game. */
+  /* Generously round: big, soft, tappable. Nothing sharp — but not a sticker
+   * either. */
   --radius-card: 1.75rem;
   --radius-pill: 999px;
 }

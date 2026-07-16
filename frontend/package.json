@@ -28,9 +28,8 @@
     "vite": "^8.0.16"
   },
   "dependencies": {
-    "@fontsource-variable/fraunces": "^5.2.9",
-    "@fontsource-variable/fredoka": "^5.2.10",
     "@fontsource-variable/nunito": "^5.2.7",
+    "@fontsource-variable/rubik": "^5.2.8",
     "@libsql/client": "^0.17.4",
     "@tanstack/svelte-query": "^6.1.36",
     "bits-ui": "^2.18.1"
