@@ -241,14 +241,17 @@ unlooked-at**, and that matters more under high churn, not less.
 
 This works only because the render is deterministic: the pinned nix `chromium`,
 self-hosted fonts pinned through `FONTCONFIG_FILE`, a fixed viewport width and
-device scale, animations disabled, and a wait on `document.fonts.ready`. Two
-independent runs diff by **exactly 0px** — measured — so the diff budget is a
-few pixels of slack for a theoretical cross-machine AA fringe, not a noise
-allowance, and even a colour tweak on a tiny element (a nav "you are here" ring)
-is caught. `visual-shoot` drives puppeteer for a **full-page** capture rather
-than `storybook-shot`'s fixed viewport, because a cropped page would let a
-change below the fold land unreviewed — exactly what the fence exists to
-prevent.
+device scale, animations disabled, a wait on `document.fonts.ready`, and every
+external image fixture (the cards point at real `themealdb.com` photos) stubbed
+with a fixed local placeholder so nothing touches the network — an unstubbed
+photo would make the shot go red whenever a source rotates an image, which is
+noise, not a UI change. Two independent runs diff by **exactly 0px** — measured
+— so the diff budget is a few pixels of slack for a theoretical cross-machine AA
+fringe, not a noise allowance, and even a colour tweak on a tiny element (a nav
+"you are here" ring) is caught. `visual-shoot` drives puppeteer for a
+**full-page** capture rather than `storybook-shot`'s fixed viewport, because a
+cropped page would let a change below the fold land unreviewed — exactly what
+the fence exists to prevent.
 
 ## Deploying
 
