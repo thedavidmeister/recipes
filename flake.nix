@@ -131,10 +131,35 @@
             done
           '';
         };
+
+        # Full-page deterministic shots for visual regression. Unlike
+        # storybook-shot (fixed viewport, for ad-hoc manual shots), this drives
+        # puppeteer so every story is captured whole — a cropped page would let a
+        # change below the fold land unreviewed, which is the whole thing the
+        # visual fence exists to catch. Same pinned chromium + fonts, so a
+        # baseline made here reproduces in CI.
+        visual-shoot = mkTask {
+          name = "visual-shoot";
+          additionalBuildInputs = [
+            pkgs.chromium
+            pkgs.nodejs_22
+          ];
+          body = ''
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [ ! -f frontend/storybook-static/index.json ]; then
+              echo "no storybook build — (cd frontend && npm run build-storybook) first" >&2
+              exit 1
+            fi
+            export CHROMIUM_BIN="${pkgs.chromium}/bin/chromium"
+            export FONTCONFIG_FILE=${fontsConf}
+            node frontend/scripts/visual-shoot.mjs
+          '';
+        };
       in
       {
         packages = {
-          inherit storybook-shot;
+          inherit storybook-shot visual-shoot;
         };
 
         devShells.default = rainix.devShells.${system}.rust-node-shell.overrideAttrs (old: {

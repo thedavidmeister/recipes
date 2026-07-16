@@ -53,6 +53,21 @@ jobs:
       # configuration.
       - run: nix develop -c npm --prefix frontend run build
       # Every UI state is a story (see README), so a story that no longer
-      # compiles is a broken contract, not a broken extra. Screenshots stay
-      # manual — this only proves the stories build.
+      # compiles is a broken contract, not a broken extra.
       - run: nix develop -c npm --prefix frontend run build-storybook
+      # The visual fence. The design lint proves a surface *uses* the tokens; it
+      # cannot prove the render still *looks* right (a collision, an overflow, a
+      # silent font fallback all pass it). So re-render every story full-page with
+      # the pinned chromium + fonts (two runs diff by 0px — deterministic), and
+      # pixel-diff against the committed baselines. Any change fails the build.
+      - run: nix run .#visual-shoot
+      - run: nix develop -c npm --prefix frontend run visual:diff
+      # A failure is feedback to *read*, not a wall: publish the triptychs
+      # (baseline | current | diff, one PNG per changed story) so the reviewer —
+      # human or agent — looks at the actual pixels and decides intended-or-not.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diff
+          path: frontend/tests/visual/__diff__/
+          if-no-files-found: ignore

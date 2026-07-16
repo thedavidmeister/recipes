@@ -203,3 +203,52 @@ Hard-won details — don't rediscover these:
   `no-consumer-prettier` pre-commit hook forbids it; the curated bundle
   (exported via `RAINIX_PRETTIER_BUNDLE_DIR` in the dev shell) is the only
   prettier in play.
+
+## The design system is fenced (visual regression) — see #42, README
+
+One visual language, defined **once** as tokens in `frontend/src/app.css` (the
+_only_ file where raw colour/spacing values may live) and declared as the
+`recipes/Design System` story. Three CI gates keep every surface on it, each
+catching what the last can't:
+
+1. **`lint:design`** (source) — fails on escape hatches: raw hex, Tailwind
+   default palette, `white`/`black`, arbitrary colour/spacing, serif, external
+   font URL. Reach the tokens, never past them; a new colour goes _in the
+   palette_, not inline.
+2. **`lint:stories`** (coverage) — every component must ship a story, so nothing
+   dodges the fence by never being declared.
+3. **The visual fence** (`visual:diff`) — the render check the source lint can't
+   be. Every story has a committed baseline PNG in
+   `frontend/tests/visual/baselines/`; CI re-renders full-page
+   (`nix run
+   .#visual-shoot`) and pixel-diffs; **any** change fails.
+
+`npm run lint` runs the first two; the visual fence is its own CI steps.
+
+**A failing visual diff is feedback to READ, exactly like failing-test output —
+never a wall to route around.** On failure, _look_ at the
+`baseline | current |
+diff` triptych in `tests/visual/__diff__/<story>.png` (CI
+uploads them as the `visual-diff` artifact; a Read of the PNG shows
+before/after/delta at a glance, colour-bar coded green/tomato/magenta). Then
+decide, and only then:
+
+- **intended and right** → `npm run visual:update` re-blesses the baselines, and
+  you **commit them in the same PR** (a purposeful UI change with stale
+  baselines is a red build — same discipline as updating a snapshot test).
+- **unexpected or wrong** → it is a **regression**. Fix the surface. **Never
+  `visual:update` a change you did not mean** — re-blessing is the one way to
+  defeat the fence, so it is a conscious act, not a reflex to make CI green.
+
+Why it can be this strict: the render is deterministic — pinned nix `chromium`,
+self-hosted fonts via `FONTCONFIG_FILE`, fixed viewport + scale, animations off,
+a wait on `document.fonts.ready`, and external images stubbed with a local
+placeholder (`visual-shoot` intercepts them; fixtures point at real
+`themealdb.com` photos, and an unstubbed one makes the shot depend on the
+network and go red on a photo rotation). **Two independent runs diff by exactly
+0px** (measured), so the tiny changed-pixel budget (`MAX_CHANGED`) is slack for
+a theoretical cross-machine AA fringe, not a noise allowance — even a colour
+tweak on a nav "you are here" ring (~248px) is caught. `visual-shoot` drives
+puppeteer for a **full-page** capture, not `storybook-shot`'s fixed viewport,
+because a cropped page hides below-fold changes — the one thing the fence exists
+to catch.
