@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["crates/recipe-core", "backend"]
+members = ["crates/recipe-core", "crates/recipe-walk", "backend"]
