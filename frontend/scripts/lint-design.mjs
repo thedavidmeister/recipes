@@ -68,7 +68,7 @@ const RULES = [
       "g",
     ),
     why:
-      "Tailwind default palette — use a design token (cream/stone/tomato/matcha/honey/plum/chilli/citrus/… )",
+      "Tailwind default palette — use a design token (cream/stone/pesto/paprika/honey/plum/chilli/citrus/… )",
   },
   {
     re: /\b(?:bg|text|border|ring|fill|stroke)-white\b/g,

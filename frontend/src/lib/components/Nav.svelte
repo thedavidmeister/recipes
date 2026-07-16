@@ -43,7 +43,7 @@
 
 <nav
   aria-label="Sections"
-  class="sticky top-0 z-10 border-b border-stone-200 bg-cream-50/95 pt-4 pb-3 font-display backdrop-blur"
+  class="bg-cream-50/95 font-display sticky top-0 z-10 border-b border-stone-200 pt-4 pb-3 backdrop-blur"
 >
   <ol class="relative mx-auto flex max-w-md">
     <!-- The line ahead. -->
@@ -70,10 +70,10 @@
         >
           <span
             class="size-4 rounded-full border-2 transition-colors {here
-              ? 'border-tomato-500 bg-cream-50 ring-4 ring-tomato-500/20'
+              ? 'border-pesto-500 bg-cream-50 ring-pesto-500/20 ring-4'
               : passed
                 ? 'border-stone-900 bg-stone-900'
-                : 'border-stone-300 bg-cream-50 group-hover:border-stone-400'}"
+                : 'bg-cream-50 border-stone-300 group-hover:border-stone-400'}"
             aria-hidden="true"
           ></span>
           <span

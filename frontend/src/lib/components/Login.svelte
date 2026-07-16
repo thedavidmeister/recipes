@@ -25,12 +25,14 @@
 </script>
 
 <div class="mx-auto flex max-w-md flex-col items-center px-4 py-16 text-center">
-  <h1 class="font-display text-4xl font-medium tracking-tight text-stone-900">recipes</h1>
+  <h1 class="font-display text-4xl font-medium tracking-tight text-stone-900">
+    recipes
+  </h1>
 
   {#if status === "checking"}
     <p class="mt-6 text-stone-500">Checking your session…</p>
   {:else if status === "error"}
-    <p class="mt-6 text-tomato-500">{error ?? "Something went wrong."}</p>
+    <p class="text-paprika-500 mt-6">{error ?? "Something went wrong."}</p>
     <p class="mt-2 text-sm text-stone-500">
       The site can't reach its backend. Try again in a moment.
     </p>
@@ -41,8 +43,9 @@
       href={link}
       target="_blank"
       rel="noopener noreferrer"
-      class="mt-6 w-full rounded-full bg-tomato-500 px-4 py-3 font-display font-semibold text-cream-50 transition hover:brightness-105"
+      class="bg-cream-50 font-display mt-6 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-stone-300 px-4 py-3 font-semibold text-stone-900 transition hover:border-stone-400"
     >
+      <span class="bg-pesto-500 size-2.5 rounded-full"></span>
       Sign in with Telegram
     </a>
 
