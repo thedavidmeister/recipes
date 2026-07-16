@@ -8,7 +8,7 @@
   );
 </script>
 
-<article class="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+<article class="overflow-hidden rounded-card border border-stone-200 bg-cream-100">
   {#if recipe.image}
     <img
       src={recipe.image}
@@ -18,9 +18,9 @@
     />
   {/if}
   <div class="p-4">
-    <h2 class="font-semibold">{recipe.title}</h2>
+    <h2 class="font-display text-lg font-medium text-stone-900">{recipe.title}</h2>
     {#if meta}
-      <p class="mt-1 text-sm text-neutral-500">{meta}</p>
+      <p class="mt-1 text-sm text-stone-500">{meta}</p>
     {/if}
   </div>
 </article>

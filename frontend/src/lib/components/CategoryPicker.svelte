@@ -23,14 +23,14 @@
 <Select.Root type="single" bind:value onValueChange={select}>
   <Select.Trigger
     aria-label="Browse a category"
-    class="flex w-full items-center justify-between rounded-lg border border-neutral-300 px-3 py-2 text-left hover:border-neutral-400"
+    class="flex w-full items-center justify-between rounded-full border border-stone-300 px-4 py-2.5 text-left hover:border-stone-400"
   >
-    <span class={value ? "" : "text-neutral-500"}>{label}</span>
-    <span aria-hidden="true" class="ml-2 text-neutral-400">▾</span>
+    <span class={value ? "" : "text-stone-500"}>{label}</span>
+    <span aria-hidden="true" class="ml-2 text-stone-400">▾</span>
   </Select.Trigger>
   <Select.Portal>
     <Select.Content
-      class="z-50 max-h-72 overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-lg"
+      class="z-50 max-h-72 overflow-y-auto rounded-2xl border border-stone-200 bg-cream-100 py-1 shadow-lg"
       sideOffset={4}
     >
       <Select.Viewport>
@@ -38,7 +38,7 @@
           <Select.Item
             value={category.name}
             label={category.name}
-            class="cursor-pointer px-3 py-2 data-highlighted:bg-neutral-100"
+            class="cursor-pointer px-3 py-2 data-highlighted:bg-stone-100"
           >
             {#snippet children({ selected })}
               <span class={selected ? "font-semibold" : ""}>{category.name}</span>

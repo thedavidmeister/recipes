@@ -30,16 +30,16 @@
 </script>
 
 <div class="mx-auto flex max-w-md flex-col items-center px-4 py-16 text-center">
-  <h1 class="text-3xl font-bold tracking-tight">recipes</h1>
+  <h1 class="font-display text-4xl font-medium tracking-tight text-stone-900">recipes</h1>
   {#if error}
-    <p class="mt-6 text-red-700">{error}</p>
-    <p class="mt-2 text-sm text-neutral-500">
+    <p class="mt-6 text-tomato-500">{error}</p>
+    <p class="mt-2 text-sm text-stone-500">
       Send <span class="font-medium">/start</span> to the bot again for a fresh link.
     </p>
-    <a href="/" class="mt-4 text-sm text-neutral-500 underline hover:text-neutral-900">
+    <a href="/" class="mt-4 text-sm text-stone-500 underline hover:text-stone-900">
       Back to the site
     </a>
   {:else}
-    <p class="mt-6 text-neutral-500">Signing you in…</p>
+    <p class="mt-6 text-stone-500">Signing you in…</p>
   {/if}
 </div>
