@@ -17,7 +17,7 @@
  * nothing is — so colour is a spice, and the fun comes from the type and the
  * shapes. */
 @theme {
-  /* --- The room: creams and browns ------------------------------------- */
+  /* --- The room: cream paper + warm-grey ink --------------------------- */
   /* Cream, never white. #FFFFFF next to these reads blue and clinical — the
    * whole palette is warm, so the "paper" has to be too. */
   --color-cream-50: #fffcf7;
@@ -25,8 +25,25 @@
   --color-cream-200: #f7ecdc;
   --color-cream-300: #efe0cb;
 
-  /* Browns, walked from a latte to an espresso. These are the greys of this
-   * app: surfaces, borders, secondary text, and body copy. */
+  /* Warm greige — the actual neutral. This is the ink and the borders: text,
+   * secondary text, hairlines. It carries warmth (there's a little brown in it)
+   * without BEING brown — which is the fix for "too brown": stop using saturated
+   * coffee-colour as the colour of every word on the page. Low chroma, so it
+   * reads as a warm grey, not a latte. */
+  --color-stone-100: #f2ede4;
+  --color-stone-200: #e5ddd0;
+  --color-stone-300: #d0c6b6;
+  --color-stone-400: #ab9f8c;
+  --color-stone-500: #85796a; /* secondary text */
+  --color-stone-600: #63594d; /* body */
+  --color-stone-700: #453e35;
+  --color-stone-800: #2c2823;
+  --color-stone-900: #211d19; /* headings, strong text — warm near-black */
+
+  /* True browns — now an ACCENT, not the neutral. Reserved for warmth (the odd
+   * filled surface) and for the roasted/nutty/earthy flavour family (coffee,
+   * caramel, toast, walnut). Kept off the everyday text so the room feels like
+   * warm paper, not a coffee stain. */
   --color-oat-200: #e8d5ba;
   --color-latte-300: #d3b18c;
   --color-caramel-400: #b9834f;
