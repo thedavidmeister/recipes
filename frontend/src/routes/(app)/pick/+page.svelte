@@ -1,6 +1,10 @@
 <script lang="ts">
   import { createQuery } from "@tanstack/svelte-query";
-  import { searchThemealdb, listCategories, browseCategory } from "$lib/sources";
+  import {
+    searchThemealdb,
+    listCategories,
+    browseCategory,
+  } from "$lib/sources";
   import type { SearchStatus } from "$lib/types";
   import SearchResults from "$lib/components/SearchResults.svelte";
   import CategoryPicker from "$lib/components/CategoryPicker.svelte";
@@ -63,11 +67,12 @@
     bind:value={term}
     placeholder="chicken, pasta, curry…"
     aria-label="Search recipes"
-    class="flex-1 rounded-full border border-stone-300 px-4 py-2.5 outline-hidden focus:border-stone-900"
+    class="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 outline-hidden focus:border-stone-900"
   />
   <button
-    class="rounded-full bg-stone-900 px-5 py-2.5 font-display font-semibold text-cream-50 transition hover:bg-stone-700"
+    class="bg-cream-50 font-display flex items-center gap-2 rounded-xl border-2 border-stone-300 px-5 py-2.5 font-semibold text-stone-900 transition hover:border-stone-400"
   >
+    <span class="bg-pesto-500 size-2.5 rounded-full"></span>
     Search
   </button>
 </form>

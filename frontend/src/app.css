@@ -55,11 +55,19 @@
   /* --- The food: bright secondaries ------------------------------------ */
   /* Named after things you would eat — memorable, appetising, and enough range
    * to give each of pick/buy/cook/joy its own colour. Each has a soft tint for
-   * fills and a saturated tone for marks. */
-  --color-tomato-500: #ef5f3c;
-  --color-tomato-100: #ffe4d9;
-  --color-matcha-500: #7fa650;
-  --color-matcha-100: #e8f2da;
+   * fills and a saturated tone for marks.
+   *
+   * `pesto` is the primary — the one colour the eye follows to what it can act
+   * on (a button's dot, the nav's current stop) — so it also *is* the pick
+   * section. It is the only green among the four, which is what keeps the
+   * sections telling themselves apart (the flavour greens — herb, allium — are
+   * content, not chrome). Action being green, error being red (`paprika`, below)
+   * is deliberate: go and stop should not wear the same colour, which they used
+   * to when the accent was tomato. */
+  --color-pesto-500: #3f7d4e;
+  --color-pesto-100: #dcebdd;
+  --color-paprika-500: #c1462a; /* cook (heat) — and the error/danger red */
+  --color-paprika-100: #f4ddd2;
   --color-honey-500: #f0a825;
   --color-honey-100: #fdeecd;
   --color-plum-500: #b4527d;

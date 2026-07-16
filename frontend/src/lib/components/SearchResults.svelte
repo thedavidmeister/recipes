@@ -12,7 +12,7 @@
 {#if status === "pending"}
   <p class="mt-8 text-stone-500">Searching…</p>
 {:else if status === "error"}
-  <p class="mt-8 text-tomato-500">Something went wrong. Try again.</p>
+  <p class="text-paprika-500 mt-8">Something went wrong. Try again.</p>
 {:else if status === "ready"}
   {#if recipes.length === 0}
     <p class="mt-8 text-stone-500">No recipes found for “{term}”.</p>
