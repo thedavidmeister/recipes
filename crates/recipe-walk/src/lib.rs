@@ -147,14 +147,19 @@ impl WalkState {
         &self.visited
     }
 
-    /// Jump to `to` without a hop, keeping the hard-visited set (so the new leg
-    /// still avoids everywhere the journey has been) but clearing the soft window
-    /// (a teleport is a new thread, not a continuation).
-    pub fn teleport(&mut self, to: RecipeId) {
+    /// Jump to `to` without a hop, and mark it visited — a teleport is a
+    /// deliberate move to a *fresh* place, so the destination is always recorded
+    /// (whatever the walk's mode), which is what lets [`Walk::teleport_to_fresh`]
+    /// exhaust its candidates rather than pick the same one forever. The hard
+    /// visited set persists (the new leg avoids everywhere the journey has been);
+    /// the soft window is cleared (a teleport is a new thread, not a continuation).
+    ///
+    /// Private on purpose: teleporting is only exposed as `teleport_to_fresh`,
+    /// which picks an *unvisited* destination — so a journey can never land on a
+    /// recipe it already holds.
+    fn teleport(&mut self, to: RecipeId) {
         self.current = to;
-        if self.self_avoiding {
-            self.visited.insert(to);
-        }
+        self.visited.insert(to);
         self.recent_recipes.clear();
         self.recent_ingredients.clear();
     }
@@ -230,23 +235,21 @@ impl<'a, R: RngCore> Walk<'a, R> {
         &self.state
     }
 
-    /// Recipes visited so far (self-avoiding mode) — read to choose a fresh
-    /// teleport target.
+    /// Recipes the walk has landed on — hops in self-avoiding mode, plus every
+    /// teleport destination. `teleport_to_fresh` reads this to stay fresh.
     pub fn visited(&self) -> &HashSet<RecipeId> {
         self.state.visited()
     }
 
-    /// Resume the walk at `to` without a hop, keeping the visited set. The caller
-    /// picks `to` (typically a fresh recipe from [`visited`](Walk::visited)); the
-    /// walk carries on from there.
-    pub fn teleport(&mut self, to: RecipeId) {
-        self.state.teleport(to);
-    }
-
-    /// Teleport to a random *unvisited* recipe drawn from `candidates`, using the
-    /// walk's own rng, and return it. `None` (and no teleport) if every candidate
-    /// is already visited. This keeps the caller from needing a second rng — the
-    /// walk owns the one stream, so a whole journey stays deterministic in one seed.
+    /// Teleport to a random *unvisited* recipe drawn from `candidates`, mark it
+    /// visited, and return it — the only way to teleport, so a journey can never
+    /// resume on a recipe it already holds. `None` (and no move) if every candidate
+    /// is already visited, which is how a journey knows the corpus is exhausted.
+    ///
+    /// Because it both filters by and records into the visited set, repeated calls
+    /// walk *through* the candidates without repeats and terminate. It uses the
+    /// walk's own rng, so the caller needs no second stream and a whole journey
+    /// stays deterministic in one seed.
     pub fn teleport_to_fresh(&mut self, candidates: &[RecipeId]) -> Option<RecipeId> {
         let fresh: Vec<RecipeId> = candidates
             .iter()
@@ -322,6 +325,30 @@ mod tests {
             walk.teleport_to_fresh(&[RecipeId(0), RecipeId(3), RecipeId(5)]),
             None
         );
+    }
+
+    #[test]
+    fn teleport_to_fresh_exhausts_its_candidates() {
+        // The only public teleport records each destination, so repeated calls
+        // return distinct recipes and then `None` — never the same one forever.
+        // Shown on a *plain* walk (the case that previously never recorded), so the
+        // guarantee does not depend on self-avoiding mode.
+        let g = FixtureGraph::new(vec![
+            vec![IngredientId(0)],
+            vec![IngredientId(0)],
+            vec![IngredientId(0)],
+        ]);
+        let strat = UniformWalk;
+        let mut walk = Walk::new(&g, &strat, StdRng::seed_from_u64(4), RecipeId(0), 4);
+        let candidates = [RecipeId(0), RecipeId(1), RecipeId(2)];
+        let mut got = std::collections::HashSet::new();
+        while let Some(r) = walk.teleport_to_fresh(&candidates) {
+            assert!(
+                got.insert(r),
+                "teleport_to_fresh must never repeat a destination"
+            );
+        }
+        assert_eq!(got.len(), 3, "it walks through every candidate, then stops");
     }
 
     #[test]
