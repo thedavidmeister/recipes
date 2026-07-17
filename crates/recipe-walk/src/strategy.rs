@@ -15,6 +15,16 @@
 //!   categories while staying flavour-coherent.
 //! - [`TabuWeighted`] — distinctiveness plus the recent-memory penalties: don't
 //!   re-cross an ingredient you just used, don't land back on a recent recipe.
+//!
+//! ## Dead ends
+//!
+//! Every strategy hops only by a *viable* ingredient — one another recipe also
+//! lists (see [`viable_ingredients`]). An ingredient unique to the current recipe
+//! leads nowhere, and since a distinctiveness bias actively favours the rarest
+//! ingredients — a unique one most of all — choosing without this filter would
+//! keep stranding the walk one hop in. Filtering first means a strategy only
+//! returns `None` when the recipe has *no* onward ingredient at all — a true dead
+//! end — not because it happened to pick the one ingredient that goes nowhere.
 
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::seq::SliceRandom;
@@ -50,8 +60,8 @@ impl NextStep for UniformWalk {
         graph: &dyn RecipeGraph,
         rng: &mut dyn RngCore,
     ) -> Option<Step> {
-        let ingredients = graph.ingredients_of(state.current());
-        let &via = ingredients.choose(rng)?;
+        let viable = viable_ingredients(state.current(), graph);
+        let &via = viable.choose(rng)?;
         let recipe = choose_recipe(graph, via, state.current(), &|_| false, rng)?;
         Some(Step { via, recipe })
     }
@@ -78,8 +88,8 @@ impl NextStep for DistinctivenessWeighted {
         graph: &dyn RecipeGraph,
         rng: &mut dyn RngCore,
     ) -> Option<Step> {
-        let ingredients = graph.ingredients_of(state.current());
-        let via = weighted_ingredient(ingredients, graph, self.strength, &|_| false, rng)?;
+        let viable = viable_ingredients(state.current(), graph);
+        let via = weighted_ingredient(&viable, graph, self.strength, &|_| false, rng)?;
         let recipe = choose_recipe(graph, via, state.current(), &|_| false, rng)?;
         Some(Step { via, recipe })
     }
@@ -107,9 +117,9 @@ impl NextStep for TabuWeighted {
         graph: &dyn RecipeGraph,
         rng: &mut dyn RngCore,
     ) -> Option<Step> {
-        let ingredients = graph.ingredients_of(state.current());
+        let viable = viable_ingredients(state.current(), graph);
         let via = weighted_ingredient(
-            ingredients,
+            &viable,
             graph,
             self.strength,
             &|i| state.recently_hopped(i),
@@ -124,6 +134,25 @@ impl NextStep for TabuWeighted {
         )?;
         Some(Step { via, recipe })
     }
+}
+
+/// The current recipe's ingredients that actually lead somewhere new — those some
+/// *other* recipe also lists. Hopping by an ingredient unique to this recipe
+/// dead-ends the walk, so every strategy chooses only from these; when this is
+/// empty the recipe is a genuine dead end and the walk stops there.
+///
+/// This is what keeps a distinctiveness bias honest. That bias favours *rare*
+/// ingredients, and the rarest of all is one unique to a single recipe — a dead
+/// end. Without this filter a strategy would keep picking exactly those and strand
+/// the walk one hop in; with it, "prefer the distinctive" means "prefer the
+/// distinctive *bridge*", which is the whole point.
+fn viable_ingredients(current: RecipeId, graph: &dyn RecipeGraph) -> Vec<IngredientId> {
+    graph
+        .ingredients_of(current)
+        .iter()
+        .copied()
+        .filter(|&i| graph.recipes_with(i).iter().any(|&r| r != current))
+        .collect()
 }
 
 /// Pick an ingredient from `ingredients`, weighted by distinctiveness, skipping
@@ -219,5 +248,39 @@ mod tests {
         let g = FixtureGraph::new(vec![vec![IngredientId(0)]]);
         let mut w = seeded_walk(&g, &UniformWalk, 1, RecipeId(0), 4);
         assert_eq!(w.next(), None);
+    }
+
+    /// The dead-end handling: a recipe pairing a rare-but-unique ingredient with a
+    /// shared one must not strand the walk. r0 has a dead end (0, unique to it) and
+    /// a shared bridge (1); r1 shares 1 and has its own dead end (2). The
+    /// distinctiveness bias *prefers* the rare 0 and 2 — precisely the ones that go
+    /// nowhere — so a strategy that did not filter would stop one hop in. It must
+    /// instead hop by the shared 1 every time and keep going.
+    #[test]
+    fn a_dead_end_ingredient_does_not_strand_the_walk() {
+        let g = FixtureGraph::new(vec![
+            vec![IngredientId(0), IngredientId(1)],
+            vec![IngredientId(1), IngredientId(2)],
+        ]);
+        let strategies: [&dyn NextStep; 3] = [
+            &UniformWalk,
+            &DistinctivenessWeighted::default(),
+            &TabuWeighted::default(),
+        ];
+        for strat in strategies {
+            let steps: Vec<_> = seeded_walk(&g, strat, 1, RecipeId(0), 4).take(10).collect();
+            assert_eq!(
+                steps.len(),
+                10,
+                "must not dead-end on a rare-but-unique ingredient"
+            );
+            for s in &steps {
+                assert_eq!(
+                    s.via,
+                    IngredientId(1),
+                    "the only viable hop is the shared ingredient"
+                );
+            }
+        }
     }
 }

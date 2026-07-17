@@ -50,11 +50,6 @@ const MAX_LEN: usize = 30;
 /// re-cross. Comfortably larger than a default walk so it does not oscillate; the
 /// strategy relaxes it rather than dead-ending if a corner is that tight.
 const TABU_WINDOW: usize = 12;
-/// How many random starts to try, keeping the longest walk. Starts are already
-/// chosen from *connected* recipes (see [`Corpus::connected_starts`]), so every
-/// attempt journeys; the retries are only to avoid returning a short cul-de-sac
-/// when a different start would have wandered further.
-const START_ATTEMPTS: usize = 8;
 
 /// Query string for `GET /api/walk`.
 #[derive(Debug, Deserialize)]
@@ -167,50 +162,43 @@ impl Corpus {
 /// Produce a walk of up to `len` stops over `corpus`, using the caller's `rng` for
 /// both the starting recipe and every hop.
 ///
-/// Pure over `(corpus, rng)` so a seeded rng makes it deterministic to test.
-/// Starts from a *connected* recipe (one with a shared ingredient) and tries a few
-/// of them, returning the longest walk found. Empty corpus → no stops.
+/// Pure over `(corpus, rng)` so a seeded rng makes it deterministic to test. Begins
+/// on a *connected* recipe and lets the strategy hop only by viable ingredients (it
+/// handles dead ends, see `recipe_walk::strategy`), so the walk reaches full `len`
+/// from any connected start — no retries needed. It falls short of `len` only in a
+/// corpus with no edges at all, where a single stop is the honest answer. Empty
+/// corpus → no stops.
 fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     if corpus.len() == 0 {
         return Vec::new();
     }
-    let strategy = TabuWeighted::default();
 
-    // Begin only where a hop is possible. If the corpus is so sparse that no
-    // recipe shares an ingredient, fall back to any recipe — the walk will be a
-    // single lonely stop, which is the honest answer for a corpus with no edges.
+    // Begin only where a hop is possible. If the corpus is so sparse that no recipe
+    // shares an ingredient, fall back to any recipe — the walk is then a single
+    // lonely stop, the honest answer for a corpus with no edges.
     let starts = corpus.connected_starts();
     let pool: Vec<RecipeId> = if starts.is_empty() {
         (0..corpus.len() as u32).map(RecipeId).collect()
     } else {
         starts
     };
+    let start = pool[rng.gen_range(0..pool.len())];
 
-    let mut best: Vec<Stop> = Vec::new();
-    for _ in 0..START_ATTEMPTS {
-        let start = pool[rng.gen_range(0..pool.len())];
-        let mut stops = vec![Stop {
-            via: None,
-            recipe: corpus.cards[start.0 as usize].clone(),
-        }];
-        // `Walk` needs an owned rng; reborrow the shared one through a thin adapter
-        // so the same stream drives start selection and hops.
-        let walk = Walk::new(&corpus.graph, &strategy, &mut *rng, start, TABU_WINDOW);
-        for step in walk.take(len.saturating_sub(1)) {
-            stops.push(Stop {
-                via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
-                recipe: corpus.cards[step.recipe.0 as usize].clone(),
-            });
-        }
-        if stops.len() > best.len() {
-            best = stops;
-        }
-        // A full-length walk is as good as it gets — stop early.
-        if best.len() >= len {
-            break;
-        }
+    let strategy = TabuWeighted::default();
+    let mut stops = vec![Stop {
+        via: None,
+        recipe: corpus.cards[start.0 as usize].clone(),
+    }];
+    // `Walk` takes an owned rng; reborrow the shared one so the same stream drives
+    // start selection and every hop.
+    let walk = Walk::new(&corpus.graph, &strategy, &mut *rng, start, TABU_WINDOW);
+    for step in walk.take(len.saturating_sub(1)) {
+        stops.push(Stop {
+            via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
+            recipe: corpus.cards[step.recipe.0 as usize].clone(),
+        });
     }
-    best
+    stops
 }
 
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
@@ -410,28 +398,24 @@ mod tests {
     }
 
     #[test]
-    fn an_island_is_never_the_start_of_a_journey() {
-        // For every seed, the walk begins in the connected trio, never on the
-        // lonely recipe — exactly what `connected_starts` guarantees.
-        //
-        // It does NOT guarantee a *long* walk here: TabuWeighted favours
-        // distinctive (rare) ingredients, and in this tiny fixture the rare ones
-        // (a/b/c) are dead ends while the connective `shared` is disfavoured, so a
-        // start can still dead-end at one stop. That is a fine "up to N" outcome
-        // and a non-issue on a real corpus where recipes share many ingredients.
-        // The guarantee here is only about *where a walk starts*; that a dense
-        // corpus actually journeys is covered by `every_stop_is_reachable_by_its_via`.
+    fn a_walk_journeys_full_length_and_never_touches_an_island() {
+        // The two dead-end defences together: connected starts (never begin on the
+        // island) and dead-end-aware hops (never *pick* the rare-but-unique
+        // ingredient and stop). So over this corpus a walk always reaches full
+        // length by cycling the connected trio, and the lonely recipe 0 — start or
+        // step — is never reached, for every seed.
         let corpus = island_and_trio();
         for seed in 0..16 {
             let mut rng = StdRng::seed_from_u64(seed);
             let stops = wander(&corpus, 6, &mut rng);
-            assert!(
-                !stops.is_empty(),
-                "a non-empty corpus yields a stop (seed {seed})"
+            assert_eq!(
+                stops.len(),
+                6,
+                "a connected corpus walks the full length (seed {seed})"
             );
-            assert_ne!(
-                stops[0].recipe.id, "0",
-                "the island is never a start (seed {seed})"
+            assert!(
+                stops.iter().all(|s| s.recipe.id != "0"),
+                "the island is never visited (seed {seed})"
             );
         }
     }
