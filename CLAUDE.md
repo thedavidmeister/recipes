@@ -39,6 +39,17 @@ against `INGEST_API_KEY`. A browser session does **not** open it — that is the
 point, and there is a test pinning it. Do not give the frontend a sync button:
 putting ingestion back in the browser's hands is what this undid.
 
+`INGEST_API_KEY` is the **one optional** secret — a missing one must not kill
+the app. The Telegram/auth secrets are fatal at startup because without them
+nobody can log in, so the process has nothing to serve; this key gates a single
+scheduled endpoint, so exiting over it would escalate a stale corpus into a
+total outage. Unset ⇒ boot with a warning and answer `/api/ingest` **503** (not
+401: the fault is the deployment's, not the caller's credential). It is an
+`Option<String>`, never a `String` defaulting to empty, so the unset case cannot
+reach a comparison — an empty expected key would _match_ a bearer header with
+nothing after the scheme, so forgetting the config would **open** ingestion
+rather than close it.
+
 **There is no WASM, deliberately.** An in-browser normalizer only ever existed
 to parse arbitrary pages the browser fetched itself, and the corpus no longer
 ingests arbitrary pages. The server fetches, so it already holds the bytes: one

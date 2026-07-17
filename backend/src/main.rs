@@ -43,7 +43,12 @@ pub struct AppState {
     pub cookie: auth::CookieConfig,
     /// Authenticates the machine that triggers `/api/ingest` (#49) — a schedule,
     /// not a person. Never a user, and never a session.
-    pub ingest_key: String,
+    ///
+    /// `None` disables ingest rather than the app: the rest of the service does
+    /// not need this key, so a deployment missing it still serves. It is an
+    /// `Option` so the unset case cannot be compared against — see
+    /// [`auth::ingest_key_from_env`].
+    pub ingest_key: Option<String>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -192,12 +197,20 @@ async fn main() -> anyhow::Result<()> {
     // Auth is mandatory, so missing Telegram config is a startup error: a
     // backend that cannot mint a login can serve nothing, and failing here beats
     // discovering it on the first request.
+    //
+    // The ingest key is the exception — it gates one scheduled endpoint, so
+    // missing it costs a sync, not the service. Warn and serve; ingest itself
+    // refuses while it is unset.
+    let ingest_key = auth::ingest_key_from_env();
+    if ingest_key.is_none() {
+        tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
+    }
     let state = AppState {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
-        ingest_key: auth::ingest_key_from_env()?,
+        ingest_key,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -229,6 +242,14 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_app() -> (Router, libsql::Connection) {
+        test_app_with_ingest_key(Some("test-ingest-key".into())).await
+    }
+
+    /// The router with ingest configured, or not. `None` is a real deployment
+    /// state rather than a hypothetical — the key is optional (a backend without
+    /// one still serves everything else), so the tests reach that state the same
+    /// way the process does.
+    async fn test_app_with_ingest_key(ingest_key: Option<String>) -> (Router, libsql::Connection) {
         let db = libsql::Builder::new_local(":memory:")
             .build()
             .await
@@ -247,7 +268,7 @@ mod tests {
                 domain: None,
                 secure: false,
             },
-            ingest_key: "test-ingest-key".into(),
+            ingest_key,
         };
         (app(state), conn)
     }
@@ -316,6 +337,54 @@ mod tests {
         let (app, _conn) = test_app().await;
         let res = app.oneshot(ingest_req(None, None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A missing `INGEST_API_KEY` must cost a *sync*, not the service. The key
+    /// guards one scheduled endpoint, so exiting over it would turn a stale
+    /// corpus into an outage: no login, no reads, and no `/health` for the
+    /// prober that would report it.
+    #[tokio::test]
+    async fn a_missing_ingest_key_does_not_take_the_app_down() {
+        let (app, _conn) = test_app_with_ingest_key(None).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// The other half of that trade, and the one worth pinning: an unconfigured
+    /// ingest is **closed**, never open.
+    ///
+    /// `Bearer ` is the case with teeth. Were the key a `String` defaulting to
+    /// empty, an unset variable would compare equal to a bearer with nothing
+    /// after the scheme — so forgetting the config would *unlock* ingestion to
+    /// anyone. It answers 503 rather than 401 because no credential exists to be
+    /// wrong about: the fault is the deployment's, and an operator reading 401
+    /// would go hunting for a bad key instead.
+    #[tokio::test]
+    async fn without_a_key_configured_ingest_is_closed_not_open() {
+        let (app, _conn) = test_app_with_ingest_key(None).await;
+        for header in [
+            None,
+            Some("Bearer "),
+            Some("Bearer"),
+            Some(""),
+            // Nor does the key some *other* deployment holds open this one.
+            Some("Bearer test-ingest-key"),
+        ] {
+            let res = app.clone().oneshot(ingest_req(header, None)).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{header:?} must not reach an unconfigured ingest"
+            );
+        }
     }
 
     /// A wrong key — or the right key under the wrong scheme, or none at all — is

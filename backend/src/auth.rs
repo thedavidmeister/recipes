@@ -115,7 +115,7 @@ fn req_env(key: &str) -> anyhow::Result<String> {
     Ok(v)
 }
 
-/// The key that guards `/api/ingest`.
+/// The key that guards `/api/ingest`, or `None` where this deployment has none.
 ///
 /// Ingest is a server-driven corpus sync (#49) triggered by a schedule, not a
 /// person — so it authenticates a **machine**, not a session. Like the webhook
@@ -123,8 +123,27 @@ fn req_env(key: &str) -> anyhow::Result<String> {
 /// the convention is ours, so we use the standard `Authorization: Bearer` rather
 /// than a bespoke `X-` header (the `X-` prefix is deprecated for new headers, and
 /// proxies and log pipelines redact `Authorization` by convention).
-pub fn ingest_key_from_env() -> anyhow::Result<String> {
-    req_env("INGEST_API_KEY")
+///
+/// **Optional, unlike the secrets above — this one must not be fatal.** Those are
+/// startup errors because without them nobody can log in at all, so the process
+/// has nothing to serve. This one guards a single background endpoint: lose it
+/// and a scheduled sync stops, which leaves the corpus stale, not unreadable.
+/// Exiting over it would escalate one paused feature into a total outage — login,
+/// reads and `/health` gone with it — so the app boots without it, says so
+/// loudly, and keeps serving.
+///
+/// **Absent means closed, never open.** This is an `Option` rather than a
+/// `String` that defaults to empty precisely so the unconfigured case cannot be
+/// compared against: an empty expected key makes `Authorization: Bearer ` — the
+/// scheme with nothing after it — a *matching* credential, so a missing config
+/// would silently open the endpoint instead of closing it. [`require_api_key`]
+/// rejects on `None` before any comparison exists to get wrong. For the same
+/// reason set-but-empty reads as `None`: `INGEST_API_KEY=""` is a missing key,
+/// not a secret that happens to be the empty string.
+pub fn ingest_key_from_env() -> Option<String> {
+    std::env::var("INGEST_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// How the session cookie is scoped.
@@ -545,7 +564,17 @@ pub async fn require_api_key(
     req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    if !verify_bearer(req.headers(), &state.ingest_key) {
+    // No key here means ingest is *off*, not open: refuse before a comparison
+    // exists. Falling through to `verify_bearer` with an empty expected key would
+    // make `Authorization: Bearer ` match it — an unset variable would unlock the
+    // endpoint rather than lock it. See [`ingest_key_from_env`].
+    let Some(expected) = state.ingest_key.as_deref() else {
+        tracing::warn!("ingest was called but INGEST_API_KEY is not set — refusing");
+        return Err(AppError::Unavailable(
+            "ingest is not configured on this server".into(),
+        ));
+    };
+    if !verify_bearer(req.headers(), expected) {
         tracing::warn!("rejected an ingest call with a missing or bad api key");
         return Err(AppError::Unauthorized("a valid api key is required".into()));
     }
