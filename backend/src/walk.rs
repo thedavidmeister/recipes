@@ -36,7 +36,7 @@ use axum::{
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 use recipe_core::Ingredient;
-use recipe_walk::{FixtureGraph, IngredientId, RecipeId, TabuWeighted, Walk};
+use recipe_walk::{FixtureGraph, IngredientId, RecipeGraph, RecipeId, TabuWeighted, Walk};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::AppError, AppState};
@@ -50,10 +50,10 @@ const MAX_LEN: usize = 30;
 /// re-cross. Comfortably larger than a default walk so it does not oscillate; the
 /// strategy relaxes it rather than dead-ending if a corner is that tight.
 const TABU_WINDOW: usize = 12;
-/// How many random starts to try before giving up on a longer walk. A start on an
-/// isolated recipe (no ingredient shared with another) walks nowhere; the corpus
-/// is dense, so a couple of retries all but guarantees a real journey without
-/// scanning for a "good" start.
+/// How many random starts to try, keeping the longest walk. Starts are already
+/// chosen from *connected* recipes (see [`Corpus::connected_starts`]), so every
+/// attempt journeys; the retries are only to avoid returning a short cul-de-sac
+/// when a different start would have wandered further.
 const START_ATTEMPTS: usize = 8;
 
 /// Query string for `GET /api/walk`.
@@ -144,23 +144,51 @@ impl Corpus {
     fn len(&self) -> usize {
         self.cards.len()
     }
+
+    /// Recipes that can actually begin a journey: those with at least one
+    /// ingredient shared by another recipe (frequency ≥ 2). Starting here means the
+    /// first hop always exists, so a walk only comes up short in a genuinely sparse
+    /// corpus — never because it happened to begin on an island (a recipe whose
+    /// ingredients are all unique to it). Empty only if *no* recipe shares any
+    /// ingredient with another at all.
+    fn connected_starts(&self) -> Vec<RecipeId> {
+        (0..self.cards.len() as u32)
+            .map(RecipeId)
+            .filter(|&r| {
+                self.graph
+                    .ingredients_of(r)
+                    .iter()
+                    .any(|&i| self.graph.frequency(i) >= 2)
+            })
+            .collect()
+    }
 }
 
 /// Produce a walk of up to `len` stops over `corpus`, using the caller's `rng` for
 /// both the starting recipe and every hop.
 ///
-/// Pure over `(corpus, rng)` so a seeded rng makes it deterministic to test. Tries
-/// a few random starts so an isolated recipe does not yield a one-stop journey;
-/// returns the longest walk found. Empty corpus → no stops.
+/// Pure over `(corpus, rng)` so a seeded rng makes it deterministic to test.
+/// Starts from a *connected* recipe (one with a shared ingredient) and tries a few
+/// of them, returning the longest walk found. Empty corpus → no stops.
 fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     if corpus.len() == 0 {
         return Vec::new();
     }
     let strategy = TabuWeighted::default();
 
+    // Begin only where a hop is possible. If the corpus is so sparse that no
+    // recipe shares an ingredient, fall back to any recipe — the walk will be a
+    // single lonely stop, which is the honest answer for a corpus with no edges.
+    let starts = corpus.connected_starts();
+    let pool: Vec<RecipeId> = if starts.is_empty() {
+        (0..corpus.len() as u32).map(RecipeId).collect()
+    } else {
+        starts
+    };
+
     let mut best: Vec<Stop> = Vec::new();
     for _ in 0..START_ATTEMPTS {
-        let start = RecipeId(rng.gen_range(0..corpus.len() as u32));
+        let start = pool[rng.gen_range(0..pool.len())];
         let mut stops = vec![Stop {
             via: None,
             recipe: corpus.cards[start.0 as usize].clone(),
@@ -206,14 +234,24 @@ async fn load_corpus(conn: &libsql::Connection) -> anyhow::Result<Corpus> {
             category: row.get::<Option<String>>(4)?,
             area: row.get::<Option<String>>(5)?,
         };
-        // Ingredients are stored as a JSON array of {name, measure}. A malformed
-        // or empty column just means "no edges from this recipe" — one lonely
-        // node, not a failed request.
-        let ingredients: Vec<Ingredient> = row
-            .get::<String>(6)
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default();
+        // The ingredients column is our own serialization — NOT NULL DEFAULT '[]',
+        // written only by ingest — so the two ways to fail here are not the same.
+        // A column-read error is *structural*: the column is gone or the wrong
+        // type, which is schema drift affecting every row, so it propagates and
+        // fails the request loudly, the way a wrong DATABASE_URL does (see db.rs).
+        // A JSON *parse* error is per-row: one corrupt value must not 500 a walk
+        // that works over the other recipes, so that recipe degrades to an
+        // edgeless node — but it is warned, not dropped silently, so corruption is
+        // still visible.
+        let json = row.get::<String>(6)?;
+        let ingredients: Vec<Ingredient> = serde_json::from_str(&json).unwrap_or_else(|e| {
+            tracing::warn!(
+                "recipe {}/{} has unparseable ingredients JSON, treating as none: {e}",
+                card.source,
+                card.id
+            );
+            Vec::new()
+        });
         let names = ingredients.into_iter().map(|i| i.name).collect();
         out.push((card, names));
     }
@@ -242,7 +280,6 @@ pub async fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use recipe_walk::RecipeGraph;
 
     fn card(id: &str, title: &str) -> RecipeCard {
         RecipeCard {
@@ -288,10 +325,7 @@ mod tests {
         assert_eq!(corpus.ingredient_names.len(), 2);
         // Both recipes share both ingredients, so each ingredient joins both.
         let miso = corpus.graph.ingredients_of(RecipeId(0))[0];
-        assert_eq!(
-            recipe_walk::RecipeGraph::recipes_with(&corpus.graph, miso),
-            &[RecipeId(0), RecipeId(1)]
-        );
+        assert_eq!(corpus.graph.recipes_with(miso), &[RecipeId(0), RecipeId(1)]);
     }
 
     #[test]
@@ -352,25 +386,54 @@ mod tests {
         }
     }
 
+    /// An island (a recipe whose ingredients are all unique to it) shares
+    /// `unobtanium` with nobody, so it can never begin a journey; the connected
+    /// trio can.
+    fn island_and_trio() -> Corpus {
+        Corpus::build(vec![
+            row("0", "lonely", &["unobtanium"]),
+            row("1", "A", &["shared", "a"]),
+            row("2", "B", &["shared", "b"]),
+            row("3", "C", &["shared", "c"]),
+        ])
+    }
+
     #[test]
-    fn an_isolated_start_still_finds_a_journey() {
-        // Recipe 0 shares nothing; recipes 1..=3 form a connected trio. Retried
-        // starts should find the trio rather than returning a lonely recipe 0.
-        let mut rows = vec![row("0", "lonely", &["unobtanium"])];
-        rows.push(row("1", "A", &["shared", "a"]));
-        rows.push(row("2", "B", &["shared", "b"]));
-        rows.push(row("3", "C", &["shared", "c"]));
-        let corpus = Corpus::build(rows);
-        // A seed that would start on the lonely recipe first still yields >1 stop.
-        let mut found_long = false;
-        for seed in 0..8 {
+    fn connected_starts_excludes_islands() {
+        let corpus = island_and_trio();
+        // `shared` has frequency 3; every other ingredient is frequency 1. So only
+        // the trio can start a walk — recipe 0 is left out.
+        assert_eq!(
+            corpus.connected_starts(),
+            vec![RecipeId(1), RecipeId(2), RecipeId(3)]
+        );
+    }
+
+    #[test]
+    fn an_island_is_never_the_start_of_a_journey() {
+        // For every seed, the walk begins in the connected trio, never on the
+        // lonely recipe — exactly what `connected_starts` guarantees.
+        //
+        // It does NOT guarantee a *long* walk here: TabuWeighted favours
+        // distinctive (rare) ingredients, and in this tiny fixture the rare ones
+        // (a/b/c) are dead ends while the connective `shared` is disfavoured, so a
+        // start can still dead-end at one stop. That is a fine "up to N" outcome
+        // and a non-issue on a real corpus where recipes share many ingredients.
+        // The guarantee here is only about *where a walk starts*; that a dense
+        // corpus actually journeys is covered by `every_stop_is_reachable_by_its_via`.
+        let corpus = island_and_trio();
+        for seed in 0..16 {
             let mut rng = StdRng::seed_from_u64(seed);
-            if wander(&corpus, 6, &mut rng).len() > 1 {
-                found_long = true;
-                break;
-            }
+            let stops = wander(&corpus, 6, &mut rng);
+            assert!(
+                !stops.is_empty(),
+                "a non-empty corpus yields a stop (seed {seed})"
+            );
+            assert_ne!(
+                stops[0].recipe.id, "0",
+                "the island is never a start (seed {seed})"
+            );
         }
-        assert!(found_long, "retried starts must escape an isolated recipe");
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { getWalk } from "$lib/walk";
+  import { ApiError } from "$lib/client";
   import type { WalkStatus } from "$lib/types";
   import Walk from "$lib/components/Walk.svelte";
 
@@ -30,6 +31,16 @@
   const status = $derived<WalkStatus>(
     walk.isError ? "error" : walk.isPending ? "pending" : "ready",
   );
+
+  // A lapsed session 401s the walk. The layout stopped polling `/api/me` once it
+  // had a session, so without this the page would sit on an error whose "try
+  // again" just 401s forever. Re-asking the session drops the whole app back to
+  // Login, the only real recovery.
+  $effect(() => {
+    if (walk.error instanceof ApiError && walk.error.status === 401) {
+      queryClient.invalidateQueries({ queryKey: ["session"] });
+    }
+  });
 
   function again() {
     queryClient.invalidateQueries({ queryKey: ["walk"] });

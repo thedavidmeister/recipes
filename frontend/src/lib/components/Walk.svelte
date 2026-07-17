@@ -102,7 +102,7 @@
       no connector; it is where the wander began.
     -->
     <ol>
-      {#each stops as stop, i (stop.recipe.source + stop.recipe.id + i)}
+      {#each stops as stop, i (`${stop.recipe.source}:${stop.recipe.id}:${i}`)}
         {@const meta = [stop.recipe.category, stop.recipe.area]
           .filter(Boolean)
           .join(" · ")}

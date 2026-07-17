@@ -12,6 +12,21 @@ import { env } from "$env/dynamic/public";
  * the cookie needs including at all.
  */
 
+/**
+ * A backend call that failed, carrying the HTTP status so callers can branch on
+ * the *kind* of failure (a 401 means the session lapsed) rather than matching on a
+ * message.
+ */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 /** The backend origin, from `PUBLIC_BACKEND_URL` (e.g. `https://api.recipes.…`). */
 export function backendUrl(): string {
   const url = env.PUBLIC_BACKEND_URL;
