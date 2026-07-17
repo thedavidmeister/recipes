@@ -14,4 +14,4 @@
    */
 </script>
 
-<p class="mt-8 text-stone-500">Nothing to pick yet — the corpus is still filling.</p>
+<p class="mt-8 text-stone-500">Picking isn't built yet.</p>

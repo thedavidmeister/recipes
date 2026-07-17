@@ -9,9 +9,10 @@
 //! [`sync::Sink`] so it can be tested against a fixture adapter. Here we just wire
 //! the production effects — SSRF-guarded HTTP and the Turso store — and run it.
 //!
-//! Still session-gated: it is under the auth-required routes. A sync spends
-//! fetches against sources, so who may trigger it is worth revisiting (#49), but
-//! "any signed-in member" is the current answer.
+//! **Machine-gated, not session-gated**: `Authorization: Bearer <INGEST_API_KEY>`
+//! (see [`crate::auth::require_api_key`]). A browser session does not authorize
+//! this endpoint — the client has no access to ingestion at all, which is the
+//! point of #49. A schedule holds the key; nobody presses a button.
 
 use axum::{extract::State, Json};
 use recipe_core::adapters;

@@ -68,14 +68,32 @@ pub struct Failure {
 
 /// Pull every adapter's catalog through `fetcher` into `sink`.
 ///
-/// The adapter that *listed* a URL is the one that normalizes its response — no
-/// host lookup, because the sync already knows the source. One bad fetch or store
-/// is recorded and the run continues; the corpus is best-effort-complete, not
-/// all-or-nothing.
+/// The adapter that *listed* a URL is the one that normalizes its response. That
+/// does not make the host trustworthy, so it is checked twice against
+/// [`Adapter::handles`], failing closed both times:
+///
+/// - **before fetching**, because an adapter's catalog must only name hosts it
+///   claims — a catalog that wandered off-source should not spend a request;
+/// - **after fetching**, because the fetch follows redirects: the body may have
+///   come from somewhere else entirely, and normalizing it as this adapter would
+///   attribute a stranger's data to this source. The gate has to read the host off
+///   the same URL the adapter is handed.
+///
+/// One bad fetch or store is recorded and the run continues; the corpus is
+/// best-effort-complete, not all-or-nothing.
+///
+/// [`Adapter::handles`]: recipe_core::adapters::Adapter::handles
 pub async fn sync<F: Fetcher, S: Sink>(adapters: &[Adapter], fetcher: &F, sink: &S) -> SyncReport {
     let mut report = SyncReport::default();
     for adapter in adapters {
         for url in (adapter.catalog)() {
+            if !claims(adapter, &url) {
+                report.failures.push(Failure {
+                    error: format!("catalog url is not a host {} claims", adapter.id),
+                    url,
+                });
+                continue;
+            }
             let doc = match fetcher.fetch(&url).await {
                 Ok(doc) => doc,
                 Err(e) => {
@@ -93,6 +111,16 @@ pub async fn sync<F: Fetcher, S: Sink>(adapters: &[Adapter], fetcher: &F, sink: 
                 });
                 continue;
             };
+            if !claims(adapter, &doc.final_url) {
+                report.failures.push(Failure {
+                    error: format!(
+                        "redirected off-source to {} — not a host {} claims",
+                        doc.final_url, adapter.id
+                    ),
+                    url,
+                });
+                continue;
+            }
             report.fetched += 1;
             for item in (adapter.normalize)(&parsed, &doc.body) {
                 // Only complete recipes are worth storing: a header-only listing
@@ -112,6 +140,17 @@ pub async fn sync<F: Fetcher, S: Sink>(adapters: &[Adapter], fetcher: &F, sink: 
         }
     }
     report
+}
+
+/// Does `adapter` claim the host of `url`?
+///
+/// Fails closed on anything it cannot read as a claimed host — an unparseable
+/// URL, or one with no host at all.
+fn claims(adapter: &Adapter, url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|host| (adapter.handles)(host)))
+        .unwrap_or(false)
 }
 
 /// A recipe carries what a corpus is for. TheMealDB's `filter.php` returns header
@@ -195,8 +234,11 @@ mod tests {
         }]
     }
 
-    fn fixture_handles(_: &str) -> bool {
-        false
+    /// The hosts of the fixture catalog (`fix://soup` parses to host `soup`). A
+    /// real adapter claims its source's hosts; this one has to too, because the
+    /// sync gates on `handles` both before fetching and after redirects.
+    fn fixture_handles(host: &str) -> bool {
+        matches!(host, "soup" | "stew" | "blank" | "gone")
     }
 
     const FIXTURE: Adapter = Adapter {
@@ -270,6 +312,68 @@ mod tests {
             .map(|r| r.title.clone())
             .collect();
         assert_eq!(titles, ["Soup", "Stew"]);
+    }
+
+    /// A fetch that lands somewhere the adapter does not claim must not be
+    /// normalized as that adapter — the body here would parse perfectly well, and
+    /// that is precisely the danger: it would enter the corpus attributed to a
+    /// source it never came from.
+    #[tokio::test]
+    async fn a_redirect_off_source_is_refused() {
+        struct RedirectingFetcher;
+        impl Fetcher for RedirectingFetcher {
+            async fn fetch(&self, _url: &str) -> anyhow::Result<Fetched> {
+                Ok(Fetched {
+                    final_url: "https://evil.example/x".to_string(),
+                    content_type: Some("application/json".to_string()),
+                    body: "Soup".to_string(), // would normalize fine — that is the point
+                })
+            }
+        }
+        let sink = MemorySink::default();
+        let report = sync(&[FIXTURE], &RedirectingFetcher, &sink).await;
+
+        assert_eq!(report.stored, 0, "a stranger's body must not be stored");
+        assert_eq!(
+            report.fetched, 0,
+            "an off-source response is not a fetch we keep"
+        );
+        assert_eq!(
+            report.failures.len(),
+            4,
+            "every catalog url redirected away"
+        );
+        assert!(report
+            .failures
+            .iter()
+            .all(|f| f.error.contains("evil.example")));
+        assert!(sink.stored.lock().unwrap().is_empty());
+    }
+
+    /// A catalog that names a host its own adapter does not claim is refused
+    /// *before* a request is spent — the fetcher here panics if it is ever called.
+    #[tokio::test]
+    async fn an_unclaimed_catalog_url_is_refused_before_fetching() {
+        fn rogue_catalog() -> Vec<String> {
+            vec!["https://evil.example/x".to_string()]
+        }
+        const ROGUE: Adapter = Adapter {
+            id: "rogue",
+            handles: fixture_handles,
+            normalize: fixture_normalize,
+            catalog: rogue_catalog,
+        };
+        struct NeverFetcher;
+        impl Fetcher for NeverFetcher {
+            async fn fetch(&self, url: &str) -> anyhow::Result<Fetched> {
+                panic!("the gate must answer before fetching, but it fetched {url}")
+            }
+        }
+        let report = sync(&[ROGUE], &NeverFetcher, &MemorySink::default()).await;
+        assert_eq!(report.fetched, 0);
+        assert_eq!(report.stored, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].error.contains("not a host rogue claims"));
     }
 
     #[tokio::test]
