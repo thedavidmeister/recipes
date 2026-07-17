@@ -27,7 +27,7 @@
 //! today; #11 (structured ingredients) sharpens this for free-text sources and
 //! near-duplicate names, but the walk does not wait on it for the corpus we hold.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use axum::{
     extract::{Query, State},
@@ -95,8 +95,11 @@ struct Corpus {
 impl Corpus {
     /// Build from `(card, ingredient names)` rows. Ingredient nodes are interned
     /// by a normalized key (trimmed, lowercased) so `"Miso"` and `"miso"` are one
-    /// node; the first spelling seen is kept for display. Blank names are dropped —
-    /// they are not ingredients and would fuse unrelated recipes into one hub.
+    /// node; the first spelling seen is kept for display. Names with no letter or
+    /// digit are dropped — they are not ingredients and would fuse unrelated recipes
+    /// into one hub. That is a stronger test than "blank after trim": `trim` only
+    /// removes Unicode *whitespace*, so a zero-width space (U+200B), a word joiner,
+    /// or a BOM would otherwise slip through as a real (invisible) node.
     fn build(rows: Vec<(RecipeCard, Vec<String>)>) -> Self {
         let mut ids: HashMap<String, IngredientId> = HashMap::new();
         let mut ingredient_names: Vec<String> = Vec::new();
@@ -107,7 +110,10 @@ impl Corpus {
             let mut list = Vec::new();
             for name in names {
                 let key = name.trim().to_lowercase();
-                if key.is_empty() {
+                // A real ingredient name has at least one letter or digit; anything
+                // else (blank, punctuation, invisible formatting characters) is not a
+                // node.
+                if !key.chars().any(char::is_alphanumeric) {
                     continue;
                 }
                 let id = *ids.entry(key).or_insert_with(|| {
@@ -157,19 +163,19 @@ impl Corpus {
 
 /// Compose a walk of up to `len` **distinct** recipes over `corpus`.
 ///
-/// This is the journey-assembly layer above the per-step strategy. The strategy
-/// (`recipe_walk`) wanders one connected region, hopping only by viable ingredients
-/// so it never dead-ends on a bad pick. But a region is finite: keep going and a
-/// walk would either exhaust it and start repeating, or hit a true dead end. Either
-/// is the same failure the walk exists to avoid — a journey stuck in one small
-/// place. So when a leg can only repeat or stops, we **teleport**: jump to a fresh
-/// unvisited recipe (preferring a connected one, so the new leg can wander) and
-/// carry on. A teleport stop has no `via` — it is a new thread, like the very first
-/// stop.
+/// This is the journey-assembly layer above the per-step strategy. A *self-avoiding*
+/// [`Walk`] wanders one connected region, hopping only by an ingredient that leads
+/// somewhere unvisited — so it never repeats, and it reports a dead end only when
+/// the region's whole reachable frontier is spent (not one hop early because it
+/// happened to pick a via whose landings were all seen). When that frontier is
+/// spent and more stops are wanted, we **teleport**: jump to a fresh recipe
+/// (preferring a connected one, so the new leg can wander) and carry on. A teleport
+/// stop has no `via` — it is a new thread, like the very first stop.
 ///
 /// The result is `len` distinct recipes, or every recipe in a corpus that holds
-/// fewer than `len` — never a repeat, never trapped. Pure over `(corpus, rng)` so a
-/// seeded rng makes it deterministic to test. Empty corpus → no stops.
+/// fewer than `len` — never a repeat, never trapped, and teleporting only when it
+/// genuinely must. Pure over `(corpus, rng)` so a seeded rng makes it deterministic
+/// to test. Empty corpus → no stops.
 fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     if corpus.len() == 0 {
         return Vec::new();
@@ -181,62 +187,49 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     // still yields stops rather than nothing.
     let connected = corpus.connected_starts();
     let all: Vec<RecipeId> = (0..corpus.len() as u32).map(RecipeId).collect();
-    let start_pool = if connected.is_empty() {
+    let start_pool: &[RecipeId] = if connected.is_empty() {
         &all
     } else {
         &connected
     };
 
-    let mut visited: HashSet<RecipeId> = HashSet::new();
-    let mut stops: Vec<Stop> = Vec::new();
+    // The first start, then a self-avoiding walk that owns the visited set. `&mut
+    // *rng` reborrows the caller's stream so the start, every hop, and every
+    // teleport all draw from the one sequence — a whole journey deterministic in one
+    // seed.
+    let start = start_pool[rng.gen_range(0..start_pool.len())];
+    let mut stops = vec![Stop {
+        via: None,
+        recipe: corpus.cards[start.0 as usize].clone(),
+    }];
+    let mut walk = Walk::self_avoiding(&corpus.graph, &strategy, &mut *rng, start, len);
 
     while stops.len() < len {
-        // Teleport to a fresh start: an unvisited connected recipe, or any unvisited
-        // recipe if the connected ones are used up. None left → the corpus is
-        // exhausted (it holds fewer than `len` recipes), which is the honest answer.
-        let Some(start) =
-            fresh_from(start_pool, &visited, rng).or_else(|| fresh_from(&all, &visited, rng))
-        else {
-            break;
-        };
-        visited.insert(start);
-        stops.push(Stop {
-            via: None,
-            recipe: corpus.cards[start.0 as usize].clone(),
-        });
-
-        // Wander this leg, taking only fresh recipes. A tabu window of `len` keeps
-        // the leg from revisiting within the journey, so the strategy relaxing to an
-        // already-visited recipe means the region really is spent — break and let
-        // the outer loop teleport. `Walk` takes an owned rng; reborrow the shared
-        // one so the same stream drives every choice.
-        let walk = Walk::new(&corpus.graph, &strategy, &mut *rng, start, len);
-        for step in walk {
-            if stops.len() >= len || !visited.insert(step.recipe) {
-                break;
-            }
+        // Wander until this region's frontier is spent (the walk yields `None`).
+        while stops.len() < len {
+            let Some(step) = walk.next() else { break };
             stops.push(Stop {
                 via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
                 recipe: corpus.cards[step.recipe.0 as usize].clone(),
             });
         }
+        if stops.len() >= len {
+            break;
+        }
+        // Frontier spent → teleport to a fresh recipe (connected if any remain),
+        // starting a new thread. None left → the corpus is exhausted (fewer than
+        // `len` recipes), which is the honest answer.
+        let fresh = match walk.teleport_to_fresh(start_pool) {
+            Some(r) => Some(r),
+            None => walk.teleport_to_fresh(&all),
+        };
+        let Some(fresh) = fresh else { break };
+        stops.push(Stop {
+            via: None,
+            recipe: corpus.cards[fresh.0 as usize].clone(),
+        });
     }
     stops
-}
-
-/// A random recipe from `candidates` not already `visited`, or `None` if they are
-/// all used. The teleport primitive — a fresh place to resume a journey.
-fn fresh_from<R: RngCore>(
-    candidates: &[RecipeId],
-    visited: &HashSet<RecipeId>,
-    rng: &mut R,
-) -> Option<RecipeId> {
-    let fresh: Vec<RecipeId> = candidates
-        .iter()
-        .copied()
-        .filter(|r| !visited.contains(r))
-        .collect();
-    (!fresh.is_empty()).then(|| fresh[rng.gen_range(0..fresh.len())])
 }
 
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
@@ -306,6 +299,7 @@ pub async fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn card(id: &str, title: &str) -> RecipeCard {
         RecipeCard {
@@ -497,10 +491,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_star_corpus_still_gives_distinct_variety() {
+        // Every recipe shares one hub ingredient (like salt in the real corpus),
+        // plus a unique one. Distinctiveness *disfavours* the hub, but it is the
+        // only bridge — so the walk must still hop by it and reach distinct
+        // recipes rather than stall on the rare-but-dead-end unique ingredients.
+        let rows: Vec<_> = (0..10)
+            .map(|r| {
+                (
+                    card(&r.to_string(), &format!("r{r}")),
+                    vec!["hub".to_string(), format!("u{r}")],
+                )
+            })
+            .collect();
+        let corpus = Corpus::build(rows);
+        for seed in 0..16 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let stops = wander(&corpus, 8, &mut rng);
+            assert_eq!(stops.len(), 8, "eight of ten reachable (seed {seed})");
+            let distinct: HashSet<_> = stops.iter().map(|s| &s.recipe.id).collect();
+            assert_eq!(distinct.len(), 8, "distinct despite the hub (seed {seed})");
+            // The hub reaches every recipe, so the walk threads all eight by hops:
+            // only the start lacks a via, and it never teleports spuriously.
+            let teleports = stops.iter().filter(|s| s.via.is_none()).count();
+            assert_eq!(
+                teleports, 1,
+                "a connected corpus needs no teleport (seed {seed})"
+            );
+        }
+    }
+
+    /// The adversarial net: build many random corpora and assert every walk
+    /// invariant over many seeds and lengths. If any invariant is breakable, this
+    /// finds the (graph, walk, len) that breaks it — a fuzz test in test's
+    /// clothing.
+    #[test]
+    fn wander_invariants_hold_over_random_corpora() {
+        for graph_seed in 0..80u64 {
+            let mut g = StdRng::seed_from_u64(graph_seed);
+            let n_recipes = g.gen_range(0..25usize);
+            let n_ingredients = g.gen_range(1..12usize);
+            let rows: Vec<_> = (0..n_recipes)
+                .map(|r| {
+                    // 0..5 ingredients each, drawn from a small shared pool so
+                    // components, hubs, islands and dead ends all arise by chance.
+                    let k = g.gen_range(0..5usize);
+                    let names: Vec<String> = (0..k)
+                        .map(|_| format!("ing{}", g.gen_range(0..n_ingredients)))
+                        .collect();
+                    (card(&r.to_string(), &format!("r{r}")), names)
+                })
+                .collect();
+            let corpus = Corpus::build(rows);
+
+            for walk_seed in 0..12u64 {
+                for &len in &[1usize, 2, 5, 12, 30] {
+                    let mut rng = StdRng::seed_from_u64(walk_seed.wrapping_mul(31).wrapping_add(1));
+                    let stops = wander(&corpus, len, &mut rng);
+                    let ctx =
+                        format!("graph={graph_seed} walk={walk_seed} len={len} n={n_recipes}");
+
+                    // Deterministic: the same seed reproduces the walk exactly.
+                    let mut rng2 =
+                        StdRng::seed_from_u64(walk_seed.wrapping_mul(31).wrapping_add(1));
+                    assert_eq!(
+                        stops,
+                        wander(&corpus, len, &mut rng2),
+                        "determinism | {ctx}"
+                    );
+
+                    // Exactly min(len, corpus size) — no shortfall while fresh
+                    // recipes remain, no overshoot.
+                    assert_eq!(stops.len(), len.min(corpus.len()), "length | {ctx}");
+
+                    // Every stop is a distinct recipe (ids are unique here).
+                    let distinct: HashSet<_> = stops.iter().map(|s| &s.recipe.id).collect();
+                    assert_eq!(distinct.len(), stops.len(), "distinct | {ctx}");
+
+                    // The first stop is always a teleport (no via).
+                    if let Some(first) = stops.first() {
+                        assert!(first.via.is_none(), "first via none | {ctx}");
+                    }
+
+                    // Every Some(via) belongs to both adjacent recipes; a None via
+                    // is a teleport (a fresh leg, not a hop) and is not checked.
+                    for pair in stops.windows(2) {
+                        if let Some(via) = pair[1].via.as_ref() {
+                            assert!(!via.is_empty(), "via is a real name | {ctx}");
+                            assert!(
+                                recipe_has(&corpus, &pair[0].recipe, via),
+                                "left has via | {ctx}"
+                            );
+                            assert!(
+                                recipe_has(&corpus, &pair[1].recipe, via),
+                                "right has via | {ctx}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?
     fn recipe_has(corpus: &Corpus, target: &RecipeCard, via: &str) -> bool {
         let key = via.trim().to_lowercase();
-        let Some(idx) = corpus.cards.iter().position(|c| c.id == target.id) else {
+        // Match on the full identity (source, id): two sources can share an id
+        // string, and resolving by id alone could check the wrong recipe's row.
+        let Some(idx) = corpus
+            .cards
+            .iter()
+            .position(|c| c.source == target.source && c.id == target.id)
+        else {
             return false;
         };
         corpus

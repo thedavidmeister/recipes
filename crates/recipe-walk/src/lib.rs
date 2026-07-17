@@ -33,10 +33,10 @@
 //! decoupled. Whoever builds the [`RecipeGraph`] (the Turso reader, a fixture)
 //! owns the mapping from real recipe/ingredient identifiers to these handles.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, RngCore, SeedableRng};
 
 pub mod eval;
 pub mod graph;
@@ -68,21 +68,54 @@ pub struct Step {
 ///
 /// `window` is the tabu horizon — how many recent recipes and ingredients count
 /// as "just used". A window of 0 disables the memory (every step is amnesiac).
+///
+/// **Self-avoiding mode** ([`WalkState::self_avoiding`]) adds a *hard* rule on top
+/// of the soft window: a recipe once visited is never landed on again (see
+/// [`blocked`](WalkState::blocked)). The soft window prefers-not; the hard set
+/// forbids. Plain [`new`](WalkState::new) leaves the hard set empty, so offline
+/// scoring (which measures how much a strategy *does* revisit) is unaffected.
 pub struct WalkState {
     current: RecipeId,
     recent_recipes: VecDeque<RecipeId>,
     recent_ingredients: VecDeque<IngredientId>,
     window: usize,
+    /// Recipes the walk must never land on again. Empty (and never grown) unless
+    /// `self_avoiding`. Persists across [`teleport`](WalkState::teleport), so a
+    /// journey stays distinct even as it jumps between regions.
+    visited: HashSet<RecipeId>,
+    self_avoiding: bool,
 }
 
 impl WalkState {
-    /// A fresh state at `start` with a tabu horizon of `window` steps.
+    /// A fresh state at `start` with a tabu horizon of `window` steps. No hard
+    /// self-avoidance — this is the offline-scoring / plain-walk constructor.
     pub fn new(start: RecipeId, window: usize) -> Self {
         Self {
             current: start,
             recent_recipes: VecDeque::new(),
             recent_ingredients: VecDeque::new(),
             window,
+            visited: HashSet::new(),
+            self_avoiding: false,
+        }
+    }
+
+    /// A state that never revisits a recipe: every stop is added to the hard
+    /// [`blocked`](WalkState::blocked) set. A strategy then only hops by an
+    /// ingredient that leads somewhere *unvisited*, and reports a dead end only
+    /// when the whole reachable frontier is spent — so a journey teleports exactly
+    /// when it must, not one hop early. Used to build fixed-length distinct
+    /// journeys; the plain [`new`](WalkState::new) is left untouched for scoring.
+    pub fn self_avoiding(start: RecipeId, window: usize) -> Self {
+        let mut visited = HashSet::new();
+        visited.insert(start);
+        Self {
+            current: start,
+            recent_recipes: VecDeque::new(),
+            recent_ingredients: VecDeque::new(),
+            window,
+            visited,
+            self_avoiding: true,
         }
     }
 
@@ -91,7 +124,8 @@ impl WalkState {
         self.current
     }
 
-    /// Was this recipe one of the last `window` visited?
+    /// Was this recipe one of the last `window` visited? A *soft* signal — a
+    /// strategy deprioritises but may relax onto it.
     pub fn recently_visited(&self, recipe: RecipeId) -> bool {
         self.recent_recipes.contains(&recipe)
     }
@@ -99,6 +133,30 @@ impl WalkState {
     /// Did the walk cross this ingredient in the last `window` steps?
     pub fn recently_hopped(&self, ingredient: IngredientId) -> bool {
         self.recent_ingredients.contains(&ingredient)
+    }
+
+    /// Is this recipe permanently off-limits? A *hard* signal in self-avoiding
+    /// mode — a strategy must never land here. Always `false` for a plain walk.
+    pub fn blocked(&self, recipe: RecipeId) -> bool {
+        self.visited.contains(&recipe)
+    }
+
+    /// Every recipe the walk has landed on (in self-avoiding mode). The journey
+    /// driver reads this to pick a teleport target that is still fresh.
+    pub fn visited(&self) -> &HashSet<RecipeId> {
+        &self.visited
+    }
+
+    /// Jump to `to` without a hop, keeping the hard-visited set (so the new leg
+    /// still avoids everywhere the journey has been) but clearing the soft window
+    /// (a teleport is a new thread, not a continuation).
+    pub fn teleport(&mut self, to: RecipeId) {
+        self.current = to;
+        if self.self_avoiding {
+            self.visited.insert(to);
+        }
+        self.recent_recipes.clear();
+        self.recent_ingredients.clear();
     }
 
     /// Advance onto a step: remember where we were, then move.
@@ -112,6 +170,9 @@ impl WalkState {
             while self.recent_ingredients.len() > self.window {
                 self.recent_ingredients.pop_front();
             }
+        }
+        if self.self_avoiding {
+            self.visited.insert(step.recipe);
         }
         self.current = step.recipe;
     }
@@ -145,9 +206,59 @@ impl<'a, R: RngCore> Walk<'a, R> {
         }
     }
 
+    /// A walk that never revisits a recipe (see [`WalkState::self_avoiding`]) — the
+    /// basis for a fixed-length distinct journey. Iterating yields hops until the
+    /// reachable frontier is spent (then `None`); [`teleport`](Walk::teleport)
+    /// resumes it elsewhere.
+    pub fn self_avoiding(
+        graph: &'a dyn RecipeGraph,
+        strategy: &'a dyn NextStep,
+        rng: R,
+        start: RecipeId,
+        window: usize,
+    ) -> Self {
+        Self {
+            graph,
+            strategy,
+            rng,
+            state: WalkState::self_avoiding(start, window),
+        }
+    }
+
     /// The live walk state (current stop, tabu memory).
     pub fn state(&self) -> &WalkState {
         &self.state
+    }
+
+    /// Recipes visited so far (self-avoiding mode) — read to choose a fresh
+    /// teleport target.
+    pub fn visited(&self) -> &HashSet<RecipeId> {
+        self.state.visited()
+    }
+
+    /// Resume the walk at `to` without a hop, keeping the visited set. The caller
+    /// picks `to` (typically a fresh recipe from [`visited`](Walk::visited)); the
+    /// walk carries on from there.
+    pub fn teleport(&mut self, to: RecipeId) {
+        self.state.teleport(to);
+    }
+
+    /// Teleport to a random *unvisited* recipe drawn from `candidates`, using the
+    /// walk's own rng, and return it. `None` (and no teleport) if every candidate
+    /// is already visited. This keeps the caller from needing a second rng — the
+    /// walk owns the one stream, so a whole journey stays deterministic in one seed.
+    pub fn teleport_to_fresh(&mut self, candidates: &[RecipeId]) -> Option<RecipeId> {
+        let fresh: Vec<RecipeId> = candidates
+            .iter()
+            .copied()
+            .filter(|r| !self.state.visited().contains(r))
+            .collect();
+        if fresh.is_empty() {
+            return None;
+        }
+        let to = fresh[self.rng.gen_range(0..fresh.len())];
+        self.state.teleport(to);
+        Some(to)
     }
 }
 
@@ -178,6 +289,53 @@ pub fn seeded_walk<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-avoiding walk visits each recipe at most once, and reports a dead end
+    /// (`None`) only when the whole reachable component is spent — not one hop
+    /// early. On a ring of 6, that means exactly 6 distinct recipes then `None`.
+    #[test]
+    fn self_avoiding_walk_visits_each_recipe_once() {
+        // Ring of 6: recipe r shares ingredient r with r+1, so every recipe is
+        // reachable and nothing is a dead end until all are visited.
+        let recipes: Vec<Vec<IngredientId>> = (0..6u32)
+            .map(|r| vec![IngredientId(r), IngredientId((r + 5) % 6)])
+            .collect();
+        let g = FixtureGraph::new(recipes);
+        let strat = TabuWeighted::default();
+        let mut walk = Walk::self_avoiding(&g, &strat, StdRng::seed_from_u64(9), RecipeId(0), 6);
+
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(RecipeId(0));
+        for step in walk.by_ref() {
+            assert!(
+                seen.insert(step.recipe),
+                "a self-avoiding walk never repeats"
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            6,
+            "it visits the whole component before stopping"
+        );
+        // Frontier spent: no fresh recipe remains to teleport to.
+        assert_eq!(
+            walk.teleport_to_fresh(&[RecipeId(0), RecipeId(3), RecipeId(5)]),
+            None
+        );
+    }
+
+    #[test]
+    fn teleport_resumes_at_a_fresh_recipe() {
+        let recipes: Vec<Vec<IngredientId>> = (0..4u32).map(|_| vec![IngredientId(0)]).collect();
+        let g = FixtureGraph::new(recipes);
+        let strat = TabuWeighted::default();
+        let mut walk = Walk::self_avoiding(&g, &strat, StdRng::seed_from_u64(1), RecipeId(0), 4);
+        // Teleport target is always unvisited and gets recorded as visited.
+        let to = walk.teleport_to_fresh(&[RecipeId(1), RecipeId(2)]).unwrap();
+        assert!(to == RecipeId(1) || to == RecipeId(2));
+        assert!(walk.visited().contains(&to));
+        assert_eq!(walk.state().current(), to);
+    }
 
     #[test]
     fn walk_state_tabu_horizon() {
