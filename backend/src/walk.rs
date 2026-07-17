@@ -27,7 +27,7 @@
 //! today; #11 (structured ingredients) sharpens this for free-text sources and
 //! near-duplicate names, but the walk does not wait on it for the corpus we hold.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Query, State},
@@ -46,10 +46,6 @@ use crate::{error::AppError, AppState};
 const DEFAULT_LEN: usize = 12;
 /// A ceiling on `len`, so a caller cannot ask for an unbounded walk.
 const MAX_LEN: usize = 30;
-/// The tabu horizon: how many recent recipes/ingredients the walk refuses to
-/// re-cross. Comfortably larger than a default walk so it does not oscillate; the
-/// strategy relaxes it rather than dead-ending if a corner is that tight.
-const TABU_WINDOW: usize = 12;
 
 /// Query string for `GET /api/walk`.
 #[derive(Debug, Deserialize)]
@@ -159,46 +155,88 @@ impl Corpus {
     }
 }
 
-/// Produce a walk of up to `len` stops over `corpus`, using the caller's `rng` for
-/// both the starting recipe and every hop.
+/// Compose a walk of up to `len` **distinct** recipes over `corpus`.
 ///
-/// Pure over `(corpus, rng)` so a seeded rng makes it deterministic to test. Begins
-/// on a *connected* recipe and lets the strategy hop only by viable ingredients (it
-/// handles dead ends, see `recipe_walk::strategy`), so the walk reaches full `len`
-/// from any connected start — no retries needed. It falls short of `len` only in a
-/// corpus with no edges at all, where a single stop is the honest answer. Empty
-/// corpus → no stops.
+/// This is the journey-assembly layer above the per-step strategy. The strategy
+/// (`recipe_walk`) wanders one connected region, hopping only by viable ingredients
+/// so it never dead-ends on a bad pick. But a region is finite: keep going and a
+/// walk would either exhaust it and start repeating, or hit a true dead end. Either
+/// is the same failure the walk exists to avoid — a journey stuck in one small
+/// place. So when a leg can only repeat or stops, we **teleport**: jump to a fresh
+/// unvisited recipe (preferring a connected one, so the new leg can wander) and
+/// carry on. A teleport stop has no `via` — it is a new thread, like the very first
+/// stop.
+///
+/// The result is `len` distinct recipes, or every recipe in a corpus that holds
+/// fewer than `len` — never a repeat, never trapped. Pure over `(corpus, rng)` so a
+/// seeded rng makes it deterministic to test. Empty corpus → no stops.
 fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     if corpus.len() == 0 {
         return Vec::new();
     }
-
-    // Begin only where a hop is possible. If the corpus is so sparse that no recipe
-    // shares an ingredient, fall back to any recipe — the walk is then a single
-    // lonely stop, the honest answer for a corpus with no edges.
-    let starts = corpus.connected_starts();
-    let pool: Vec<RecipeId> = if starts.is_empty() {
-        (0..corpus.len() as u32).map(RecipeId).collect()
-    } else {
-        starts
-    };
-    let start = pool[rng.gen_range(0..pool.len())];
-
     let strategy = TabuWeighted::default();
-    let mut stops = vec![Stop {
-        via: None,
-        recipe: corpus.cards[start.0 as usize].clone(),
-    }];
-    // `Walk` takes an owned rng; reborrow the shared one so the same stream drives
-    // start selection and every hop.
-    let walk = Walk::new(&corpus.graph, &strategy, &mut *rng, start, TABU_WINDOW);
-    for step in walk.take(len.saturating_sub(1)) {
+
+    // Teleport candidates: connected recipes (a leg can actually wander from them).
+    // Fall back to every recipe only if nothing is connected, so an edgeless corpus
+    // still yields stops rather than nothing.
+    let connected = corpus.connected_starts();
+    let all: Vec<RecipeId> = (0..corpus.len() as u32).map(RecipeId).collect();
+    let start_pool = if connected.is_empty() {
+        &all
+    } else {
+        &connected
+    };
+
+    let mut visited: HashSet<RecipeId> = HashSet::new();
+    let mut stops: Vec<Stop> = Vec::new();
+
+    while stops.len() < len {
+        // Teleport to a fresh start: an unvisited connected recipe, or any unvisited
+        // recipe if the connected ones are used up. None left → the corpus is
+        // exhausted (it holds fewer than `len` recipes), which is the honest answer.
+        let Some(start) =
+            fresh_from(start_pool, &visited, rng).or_else(|| fresh_from(&all, &visited, rng))
+        else {
+            break;
+        };
+        visited.insert(start);
         stops.push(Stop {
-            via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
-            recipe: corpus.cards[step.recipe.0 as usize].clone(),
+            via: None,
+            recipe: corpus.cards[start.0 as usize].clone(),
         });
+
+        // Wander this leg, taking only fresh recipes. A tabu window of `len` keeps
+        // the leg from revisiting within the journey, so the strategy relaxing to an
+        // already-visited recipe means the region really is spent — break and let
+        // the outer loop teleport. `Walk` takes an owned rng; reborrow the shared
+        // one so the same stream drives every choice.
+        let walk = Walk::new(&corpus.graph, &strategy, &mut *rng, start, len);
+        for step in walk {
+            if stops.len() >= len || !visited.insert(step.recipe) {
+                break;
+            }
+            stops.push(Stop {
+                via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
+                recipe: corpus.cards[step.recipe.0 as usize].clone(),
+            });
+        }
     }
     stops
+}
+
+/// A random recipe from `candidates` not already `visited`, or `None` if they are
+/// all used. The teleport primitive — a fresh place to resume a journey.
+fn fresh_from<R: RngCore>(
+    candidates: &[RecipeId],
+    visited: &HashSet<RecipeId>,
+    rng: &mut R,
+) -> Option<RecipeId> {
+    let fresh: Vec<RecipeId> = candidates
+        .iter()
+        .copied()
+        .filter(|r| !visited.contains(r))
+        .collect();
+    (!fresh.is_empty()).then(|| fresh[rng.gen_range(0..fresh.len())])
 }
 
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
@@ -348,10 +386,12 @@ mod tests {
         );
 
         for pair in stops.windows(2) {
-            let via = pair[1]
-                .via
-                .as_ref()
-                .expect("only the first stop has no via");
+            // A `None` via is a teleport (a new leg), not a hop — nothing to check.
+            // A ring never exhausts within 12 of 20, so this loop sees only hops
+            // here, but the walk permits teleports in general.
+            let Some(via) = pair[1].via.as_ref() else {
+                continue;
+            };
             // The via ingredient must belong to BOTH the previous recipe (hopped
             // from) and this one (hopped to).
             let prev_has = recipe_has(&corpus, &pair[0].recipe, via);
@@ -398,24 +438,61 @@ mod tests {
     }
 
     #[test]
-    fn a_walk_journeys_full_length_and_never_touches_an_island() {
-        // The two dead-end defences together: connected starts (never begin on the
-        // island) and dead-end-aware hops (never *pick* the rare-but-unique
-        // ingredient and stop). So over this corpus a walk always reaches full
-        // length by cycling the connected trio, and the lonely recipe 0 — start or
-        // step — is never reached, for every seed.
+    fn a_walk_visits_distinct_recipes_and_only_teleports_to_an_island() {
+        // Four recipes, asked for six: the walk returns all four, each distinct, no
+        // repeats — the corpus simply holds fewer than `len`. The trio is wandered
+        // by its shared ingredient; the island (nothing shares `unobtanium`) can
+        // only be *teleported* to, never *hopped* to, so whenever it appears it has
+        // no `via`.
         let corpus = island_and_trio();
+        for seed in 0..16 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let stops = wander(&corpus, 6, &mut rng);
+            assert_eq!(stops.len(), 4, "all four recipes, no repeats (seed {seed})");
+            let distinct: HashSet<_> = stops.iter().map(|s| &s.recipe.id).collect();
+            assert_eq!(
+                distinct.len(),
+                4,
+                "every stop is a distinct recipe (seed {seed})"
+            );
+            for s in &stops {
+                if s.recipe.id == "0" {
+                    assert!(
+                        s.via.is_none(),
+                        "the island is only ever a teleport, never hopped to (seed {seed})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_walk_teleports_between_disconnected_regions_for_variety() {
+        // Two disconnected trios (each joined by its own `shared_*`). A walk cannot
+        // reach six distinct recipes without leaving the first trio, so it must
+        // teleport to the second rather than cycle three recipes forever. This is
+        // the trap the plain walk fell into; teleporting is what escapes it.
+        let corpus = Corpus::build(vec![
+            row("0", "A", &["shared_a", "a0"]),
+            row("1", "B", &["shared_a", "a1"]),
+            row("2", "C", &["shared_a", "a2"]),
+            row("3", "D", &["shared_b", "b0"]),
+            row("4", "E", &["shared_b", "b1"]),
+            row("5", "F", &["shared_b", "b2"]),
+        ]);
         for seed in 0..16 {
             let mut rng = StdRng::seed_from_u64(seed);
             let stops = wander(&corpus, 6, &mut rng);
             assert_eq!(
                 stops.len(),
                 6,
-                "a connected corpus walks the full length (seed {seed})"
+                "six stops across both regions (seed {seed})"
             );
-            assert!(
-                stops.iter().all(|s| s.recipe.id != "0"),
-                "the island is never visited (seed {seed})"
+            let distinct: HashSet<_> = stops.iter().map(|s| &s.recipe.id).collect();
+            assert_eq!(
+                distinct.len(),
+                6,
+                "no recipe repeats — teleport found fresh ones (seed {seed})"
             );
         }
     }
