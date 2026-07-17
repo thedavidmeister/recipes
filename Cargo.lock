@@ -1686,6 +1686,7 @@ dependencies = [
  "libsql",
  "rand 0.8.7",
  "recipe-core",
+ "recipe-walk",
  "reqwest",
  "serde",
  "serde_json",

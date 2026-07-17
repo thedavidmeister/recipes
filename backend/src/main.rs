@@ -21,6 +21,7 @@ mod ingest;
 mod proxy;
 mod recipes;
 mod sync;
+mod walk;
 
 use axum::{
     http::Method,
@@ -81,6 +82,9 @@ pub fn app(state: AppState) -> Router {
         // the session cookie is HttpOnly, so the SPA cannot see whether it is
         // logged in. A 401 here *is* the answer.
         .route("/me", get(auth::me))
+        // The `pick` engine (#47): a variety-first wander over the corpus. A
+        // person-facing read, so it is session-gated like the rest.
+        .route("/walk", get(walk::walk))
         .route("/auth/logout", post(auth::logout))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -451,6 +455,45 @@ mod tests {
             res.status(),
             StatusCode::OK,
             "a live session must pass the gate and reach the handler"
+        );
+    }
+
+    fn walk_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri("/api/walk?len=5");
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// The walk is a person-facing read, so it is session-gated like the rest (#25).
+    #[tokio::test]
+    async fn walk_requires_a_session() {
+        let (app, _conn) = test_app().await;
+        let res = app.oneshot(walk_req(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// With a session it reaches the handler and returns a walk. Empty here because
+    /// the test corpus has no recipes — an empty walk is a 200 with no stops, not
+    /// an error (the walk reads whatever the corpus holds, even nothing).
+    #[tokio::test]
+    async fn walk_with_a_session_returns_a_walk_over_the_corpus() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(walk_req(Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["stops"].as_array().expect("stops is an array").len(),
+            0,
+            "an empty corpus walks to nowhere"
         );
     }
 

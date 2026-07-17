@@ -42,7 +42,26 @@ pub struct FixtureGraph {
 
 impl FixtureGraph {
     /// Build from `recipes[r]` = the ingredients of recipe `r`.
+    ///
+    /// Ingredient ids are used as **dense indices** into the inverted index, so
+    /// keep them small and contiguous (a real reader interns names to `0..k`); a
+    /// sparse huge id would allocate an index that large.
     pub fn new(recipes: Vec<Vec<IngredientId>>) -> Self {
+        // A recipe listing an ingredient twice is one membership, not two. Dedup
+        // (order-preserving) so `frequency` — and the distinctiveness weighting
+        // built on it — is not inflated by a repeated line.
+        let recipes: Vec<Vec<IngredientId>> = recipes
+            .into_iter()
+            .map(|list| {
+                let mut unique: Vec<IngredientId> = Vec::with_capacity(list.len());
+                for i in list {
+                    if !unique.contains(&i) {
+                        unique.push(i);
+                    }
+                }
+                unique
+            })
+            .collect();
         let max_ingredient = recipes.iter().flatten().map(|i| i.0).max();
         let mut by_ingredient: Vec<Vec<RecipeId>> = match max_ingredient {
             Some(m) => vec![Vec::new(); m as usize + 1],
@@ -105,5 +124,18 @@ mod tests {
         assert!(g.ingredients_of(RecipeId(99)).is_empty());
         assert!(g.recipes_with(IngredientId(99)).is_empty());
         assert_eq!(g.frequency(IngredientId(99)), 0);
+    }
+
+    #[test]
+    fn a_repeated_ingredient_in_one_recipe_counts_once() {
+        // Recipe 0 lists ingredient 5 twice — one membership, not two, or its
+        // frequency (and every weighting built on it) is inflated.
+        let g = FixtureGraph::new(vec![
+            vec![IngredientId(5), IngredientId(5)],
+            vec![IngredientId(5)],
+        ]);
+        assert_eq!(g.ingredients_of(RecipeId(0)), &[IngredientId(5)]);
+        assert_eq!(g.recipes_with(IngredientId(5)), &[RecipeId(0), RecipeId(1)]);
+        assert_eq!(g.frequency(IngredientId(5)), 2);
     }
 }

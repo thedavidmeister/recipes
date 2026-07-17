@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 recipe-core = { path = "../crates/recipe-core" }
+recipe-walk = { path = "../crates/recipe-walk" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = [

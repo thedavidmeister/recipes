@@ -1,4 +1,5 @@
 import { env } from "$env/dynamic/public";
+import { apiFetch } from "./client";
 import type { User } from "./types";
 
 /**
@@ -15,32 +16,16 @@ import type { User } from "./types";
  * browser-initiated flow would hand the redeeming capability to whoever started
  * it while the identity came from whoever tapped — which is a full account
  * takeover, and was one, before this design replaced it.
+ *
+ * The cross-origin fetch (and the `credentials: "include"` that carries the
+ * cookie) lives in `./client`, shared with every other `/api` caller.
  */
-function backend(): string {
-  const url = env.PUBLIC_BACKEND_URL;
-  if (!url) throw new Error("PUBLIC_BACKEND_URL is not set");
-  return url.replace(/\/$/, "");
-}
 
 /** The bot to send people to, e.g. `lehlehlehbot`. Public by nature. */
 export function botLink(): string {
   const bot = env.PUBLIC_TELEGRAM_BOT;
   if (!bot) throw new Error("PUBLIC_TELEGRAM_BOT is not set");
   return `https://t.me/${bot}`;
-}
-
-/**
- * Every call carries cookies. Without `credentials: "include"` the browser
- * withholds the session on a cross-origin request and everything 401s — the
- * frontend and backend are different origins (`recipes.` vs `api.recipes.`) even
- * though they are the same *site*.
- */
-async function api(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${backend()}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
 }
 
 /**
@@ -52,7 +37,7 @@ async function api(path: string, init?: RequestInit): Promise<Response> {
  * someone to a login they do not need.
  */
 export async function me(): Promise<User | null> {
-  const res = await api("/api/me");
+  const res = await apiFetch("/api/me");
   if (res.status === 401) return null;
   if (!res.ok) throw new Error(`could not check session (${res.status})`);
   return (await res.json()) as User;
@@ -63,7 +48,7 @@ export async function me(): Promise<User | null> {
  * response, so there is nothing to store.
  */
 export async function completeLogin(c: string): Promise<void> {
-  const res = await api("/api/auth/complete", {
+  const res = await apiFetch("/api/auth/complete", {
     method: "POST",
     body: JSON.stringify({ c }),
   });
@@ -73,6 +58,6 @@ export async function completeLogin(c: string): Promise<void> {
 
 /** Drop the session, server-side and in the browser. */
 export async function logout(): Promise<void> {
-  const res = await api("/api/auth/logout", { method: "POST" });
+  const res = await apiFetch("/api/auth/logout", { method: "POST" });
   if (!res.ok) throw new Error(`logout failed (${res.status})`);
 }
