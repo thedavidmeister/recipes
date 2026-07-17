@@ -19,14 +19,24 @@ WORKDIR /app
 # Render's 500 build-minutes/month are shared across the workspace, and a cold
 # Rust build spends most of its time on dependencies — the frontend and every
 # other deploy pay for anything wasted here.
+#
+# The root Cargo.toml is a workspace, and cargo loads *every* member's manifest
+# before it will build any target — so each member listed there must have its
+# Cargo.toml (and a stub source) present here, even one the backend does not
+# depend on. A member added to the workspace but missed here fails only the
+# Docker build, which CI does not run, so it goes red on Render alone (this
+# happened when recipe-walk was added). Keep this list matching Cargo.toml's
+# `members`.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/recipe-core/Cargo.toml crates/recipe-core/
+COPY crates/recipe-walk/Cargo.toml crates/recipe-walk/
 COPY backend/Cargo.toml backend/
-RUN mkdir -p crates/recipe-core/src backend/src \
+RUN mkdir -p crates/recipe-core/src crates/recipe-walk/src backend/src \
     && echo 'fn main() {}' > backend/src/main.rs \
     && echo '' > crates/recipe-core/src/lib.rs \
+    && echo '' > crates/recipe-walk/src/lib.rs \
     && cargo build --release --bin recipe-backend \
-    && rm -rf backend/src crates/recipe-core/src
+    && rm -rf backend/src crates/recipe-core/src crates/recipe-walk/src
 
 COPY crates crates
 COPY backend backend
