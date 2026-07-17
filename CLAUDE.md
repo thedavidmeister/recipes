@@ -17,23 +17,35 @@ diagram in [README.md](./README.md).
   something ingest **does** — not an endpoint: there is no URL a caller can aim,
   so the backend is not a relay.
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
-  site**. It **parses nothing**: it drives ingestion (`POST /api/ingest`), reads
-  **Turso** directly (read-only token), and renders. TanStack Query · Bits UI ·
-  Tailwind. UI states are declared as **Storybook** stories.
+  site**. It **parses nothing** and **ingests nothing**: it reads **Turso**
+  directly (read-only token) and renders. TanStack Query · Bits UI · Tailwind.
+  UI states are declared as **Storybook** stories.
 - **Turso** (libSQL/SQLite) is the corpus, in two halves: **`raw_imports`**
   (each recipe's payload as its source gave it) and **`recipes`** (the derived
-  view search and browse read). Dev env + CI via **rainix** (`nix develop`).
+  view the app reads). Dev env + CI via **rainix** (`nix develop`).
 
-## The client drives ingestion; the server performs it
+## Ingestion is server-driven; the client has no access to it (#49)
 
-The client decides what to look for; the server fetches it, derives recipes, and
-stores both halves. **There is no WASM, deliberately.** An in-browser normalizer
-only ever existed to parse arbitrary pages the browser fetched itself, and the
-corpus no longer ingests arbitrary pages. Once the server fetches, it already
-holds the bytes: one normalizer instead of two, nothing to trust from a client,
-nothing for a visitor to download, and a source may require a key (which a
-public SPA could never hold). **Do not reintroduce client-side parsing** without
-undoing that reasoning first.
+**There is no search, and the client does not decide what enters the corpus.** A
+schedule (`.github/workflows/ingest.yaml`) POSTs `/api/ingest`; the server
+dispatches to every adapter's `catalog()`, fetches each URL, normalizes, and
+stores both halves. The corpus is the union of every source's whole catalog —
+the thing `pick` (the walk, #47) wanders. The engine is `backend::sync`, generic
+over a `Fetcher`/`Sink` so it runs against a fixture adapter with no network or
+DB.
+
+`/api/ingest` is **machine-authed**, not session-gated: `Authorization: Bearer`
+against `INGEST_API_KEY`. A browser session does **not** open it — that is the
+point, and there is a test pinning it. Do not give the frontend a sync button:
+putting ingestion back in the browser's hands is what this undid.
+
+**There is no WASM, deliberately.** An in-browser normalizer only ever existed
+to parse arbitrary pages the browser fetched itself, and the corpus no longer
+ingests arbitrary pages. The server fetches, so it already holds the bytes: one
+normalizer instead of two, nothing to trust from a client, nothing for a visitor
+to download, and a source may require a key (which a public SPA could never
+hold). **Do not reintroduce client-side parsing** without undoing that reasoning
+first.
 
 `recipes` is **derived** — never hand-edit it as a source of truth. Fix the
 normalizer and run `derive`; that reaches rows imported before the fix, because
@@ -87,15 +99,19 @@ re-deriving a settled decision wastes the human's time. Live design notes:
 
 ## Auth is mandatory (#25)
 
-**Every API endpoint requires a session.** The only exceptions are `/health` (a
-prober holds no session), `/auth/start` + `/auth/poll` (how you get one), and
-`/telegram/webhook` (called by Telegram, not a browser — it authenticates with
-its own secret). The static SPA shell still loads; it can do nothing until
-login.
+**Every endpoint a person reaches requires a session.** The exceptions are each
+because a session would be circular or simply the wrong credential:
 
-Since #29 `/api/ingest` **is what a search does**, so gating everything gates
-search — deliberately. This is a private cooking app for a group, not a public
-search engine.
+- `/health` — a prober holds no session.
+- `/auth/complete` — redeems the bot's link; the secret **in** the link is the
+  authentication, so demanding a session to get one would be circular.
+- `/telegram/webhook` — called by Telegram, not a browser; authenticates with
+  its own shared secret.
+- `/api/ingest` — called by a **schedule**, not a person; machine-authed with
+  `Authorization: Bearer` against `INGEST_API_KEY` (#49). A session does not
+  open it, deliberately.
+
+The static SPA shell still loads; it can do nothing until login.
 
 Auth exists for **identity** (#20 needs a headcount), _not_ to protect the
 corpus: nothing writes it from outside and ingest fails closed on an unknown

@@ -115,6 +115,18 @@ fn req_env(key: &str) -> anyhow::Result<String> {
     Ok(v)
 }
 
+/// The key that guards `/api/ingest`.
+///
+/// Ingest is a server-driven corpus sync (#49) triggered by a schedule, not a
+/// person — so it authenticates a **machine**, not a session. Like the webhook
+/// secret this is a shared secret we mint and hold in the environment; unlike it,
+/// the convention is ours, so we use the standard `Authorization: Bearer` rather
+/// than a bespoke `X-` header (the `X-` prefix is deprecated for new headers, and
+/// proxies and log pipelines redact `Authorization` by convention).
+pub fn ingest_key_from_env() -> anyhow::Result<String> {
+    req_env("INGEST_API_KEY")
+}
+
 /// How the session cookie is scoped.
 #[derive(Debug, Clone)]
 pub struct CookieConfig {
@@ -517,6 +529,43 @@ pub struct TelegramUser {
 #[derive(Debug, Deserialize)]
 pub struct Chat {
     pub id: i64,
+}
+
+/// Reject any request to ingest without the infra API key.
+///
+/// `/api/ingest` is machine-only: a schedule triggers the corpus sync, and no
+/// browser ever calls it (#49). So it is gated by a key rather than a session —
+/// deliberately a *different principal*, not a skeleton key: this authenticates
+/// "our infrastructure", never a user, and it grants nothing but the sync.
+///
+/// A session cookie does not open this door, which is the point — the frontend
+/// has no access to ingestion at all.
+pub async fn require_api_key(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    if !verify_bearer(req.headers(), &state.ingest_key) {
+        tracing::warn!("rejected an ingest call with a missing or bad api key");
+        return Err(AppError::Unauthorized("a valid api key is required".into()));
+    }
+    Ok(next.run(req).await)
+}
+
+/// Does this request carry our infra key?
+///
+/// Standard `Authorization: Bearer <key>`. Compared in constant time for the same
+/// reason as [`verify_webhook_origin`]: two secrets meet in application code here,
+/// so a byte-wise early exit would leak the prefix.
+fn verify_bearer(headers: &HeaderMap, expected: &str) -> bool {
+    let Some(got) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    got.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// Is this request really from Telegram?

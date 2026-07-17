@@ -33,13 +33,17 @@ use tower_http::{
 };
 
 /// Shared handler state: the SSRF-guarded HTTP client, a Turso/libSQL
-/// connection, and the Telegram config auth runs on.
+/// connection, the Telegram config auth runs on, and the infra key that guards
+/// the ingest sync.
 #[derive(Clone)]
 pub struct AppState {
     pub http: reqwest::Client,
     pub db: libsql::Connection,
     pub telegram: auth::TelegramConfig,
     pub cookie: auth::CookieConfig,
+    /// Authenticates the machine that triggers `/api/ingest` (#49) — a schedule,
+    /// not a person. Never a user, and never a session.
+    pub ingest_key: String,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -53,11 +57,21 @@ async fn health() -> Json<serde_json::Value> {
 /// session" is a claim about this wiring, so a test that rebuilt the wiring
 /// would prove nothing about what actually serves traffic.
 pub fn app(state: AppState) -> Router {
-    // Everything the corpus touches. Auth is mandatory (#25): since #29 the
-    // client drives ingestion and the server performs it, so `/ingest` is what a
-    // search does — gating it gates search, deliberately.
-    let guarded = Router::new()
+    // Machine-only. `/ingest` is a server-driven corpus sync (#49): a schedule
+    // triggers it, not a person, so it authenticates with an `Authorization:
+    // Bearer` key instead of a session. The frontend has no access to ingestion
+    // at all — a valid session cookie does *not* open this door, which is the
+    // point: the client no longer decides what enters the corpus.
+    let machine = Router::new()
         .route("/ingest", post(ingest::ingest))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_api_key,
+        ));
+
+    // Everything a person touches. Auth is mandatory (#25): the corpus is for a
+    // known group, and #20 needs a headcount.
+    let guarded = Router::new()
         // `/me` is guarded like everything else, which is what makes it useful:
         // the session cookie is HttpOnly, so the SPA cannot see whether it is
         // logged in. A 401 here *is* the answer.
@@ -81,7 +95,11 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/complete", post(auth::complete))
         .route("/telegram/webhook", post(auth::webhook));
 
-    let api = Router::new().merge(guarded).merge(public).with_state(state);
+    let api = Router::new()
+        .merge(machine)
+        .merge(guarded)
+        .merge(public)
+        .with_state(state);
 
     Router::new()
         .nest("/api", api)
@@ -179,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
+        ingest_key: auth::ingest_key_from_env()?,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -228,37 +247,47 @@ mod tests {
                 domain: None,
                 secure: false,
             },
+            ingest_key: "test-ingest-key".into(),
         };
         (app(state), conn)
     }
 
-    /// A `POST /api/ingest`. The endpoint takes no body now — it triggers a
-    /// server-driven sync (#49) — so these requests carry none. They exist to
-    /// prove the auth gate answers *before* the handler runs: an unauthenticated
-    /// caller is rejected at the middleware and never reaches the sync (so these
-    /// perform no network, whatever ingest would do downstream).
-    fn ingest_req(cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder().method("POST").uri("/api/ingest");
+    /// A `GET /api/me` — the session-gated route the gate tests probe. `/me` is
+    /// deliberate: it is cheap and deterministic, whereas `/api/ingest` is no
+    /// longer session-gated at all (it is machine-only now, #49).
+    fn me_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri("/api/me");
         if let Some(v) = cookie {
             b = b.header("cookie", v);
         }
         b.body(Body::empty()).unwrap()
     }
 
-    /// The headline: an anonymous caller cannot reach the corpus. Ingest is now a
-    /// server-driven sync rather than a search (#49), but the corpus stays gated
-    /// — logging in is mandatory (#25).
+    /// A `POST /api/ingest`. It takes no body — it triggers a server-driven sync
+    /// (#49). An unauthenticated caller is rejected at the middleware and never
+    /// reaches the sync, so these perform no network.
+    fn ingest_req(auth: Option<&str>, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/api/ingest");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// The headline: an anonymous caller cannot reach the corpus (#25).
     #[tokio::test]
-    async fn ingest_is_closed_without_a_session() {
+    async fn a_request_without_a_session_is_refused() {
         let (app, _conn) = test_app().await;
-        let res = app.oneshot(ingest_req(None)).await.unwrap();
+        let res = app.oneshot(me_req(None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// A guessed or malformed cookie is not a session. Note this would pass even
-    /// if the gate were absent *and* ingest happened to fail — so it is paired
-    /// with `a_valid_session_passes_the_gate`, which pins that the gate is what
-    /// answers here.
+    /// A guessed or malformed cookie is not a session. Paired with
+    /// `a_valid_session_passes_the_gate`, which pins that the gate is what answers
+    /// here rather than the route simply being broken.
     #[tokio::test]
     async fn a_bogus_cookie_is_not_a_session() {
         let (app, _conn) = test_app().await;
@@ -270,13 +299,69 @@ mod tests {
             // A name must match whole: a prefix must not satisfy the gate.
             "xrecipes_session=deadbeef",
         ] {
-            let res = app.clone().oneshot(ingest_req(Some(header))).await.unwrap();
+            let res = app.clone().oneshot(me_req(Some(header))).await.unwrap();
             assert_eq!(
                 res.status(),
                 StatusCode::UNAUTHORIZED,
                 "{header:?} must not authenticate"
             );
         }
+    }
+
+    /// Ingestion is machine-only (#49): no key, no entry. A missing gate would let
+    /// this reach the handler and run a real sync (200, and real HTTP), so a 401
+    /// here is what proves the middleware is actually wired.
+    #[tokio::test]
+    async fn ingest_requires_an_api_key() {
+        let (app, _conn) = test_app().await;
+        let res = app.oneshot(ingest_req(None, None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A wrong key — or the right key under the wrong scheme, or none at all — is
+    /// not the key.
+    #[tokio::test]
+    async fn ingest_rejects_a_bad_api_key() {
+        let (app, _conn) = test_app().await;
+        for header in [
+            "Bearer wrong",
+            "Bearer ",
+            // A prefix or an extension of the key must not satisfy it.
+            "Bearer test-ingest-ke",
+            "Bearer test-ingest-keys",
+            // The scheme is not optional, and Basic is not Bearer.
+            "test-ingest-key",
+            "Basic test-ingest-key",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(ingest_req(Some(header), None))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "{header:?} must not authenticate"
+            );
+        }
+    }
+
+    /// The property that makes "the frontend has no access to ingestion" true: a
+    /// perfectly good browser session does not open this door. Only the key does,
+    /// and the browser never holds it.
+    #[tokio::test]
+    async fn a_session_cookie_does_not_reach_ingestion() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(ingest_req(None, Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session must not authenticate a machine-only endpoint"
+        );
     }
 
     /// The other half of the proof: with a real session the request gets *past*
@@ -289,13 +374,10 @@ mod tests {
     async fn a_valid_session_passes_the_gate() {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/me")
-            .header("cookie", format!("recipes_session={token}"))
-            .body(Body::empty())
+        let res = app
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
+            .await
             .unwrap();
-        let res = app.oneshot(req).await.unwrap();
         assert_eq!(
             res.status(),
             StatusCode::OK,
@@ -312,7 +394,7 @@ mod tests {
             .await
             .unwrap();
         let res = app
-            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -325,12 +407,16 @@ mod tests {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let res = app
-            .oneshot(ingest_req(Some(&format!(
+            .oneshot(me_req(Some(&format!(
                 "theme=dark; recipes_session={token}; lang=en"
             ))))
             .await
             .unwrap();
-        assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "the session must be found among other cookies"
+        );
     }
 
     /// Health has to answer an unauthenticated prober or the host cannot tell if

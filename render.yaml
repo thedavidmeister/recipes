@@ -34,6 +34,15 @@ services:
         # POST a forged /start claiming any Telegram id — i.e. log in as anybody.
         # Generate: head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
         sync: false
+      # --- Server-driven ingest (#49) ---------------------------------------
+      - key: INGEST_API_KEY
+        # Guards POST /api/ingest, which pulls every source's catalog into the
+        # corpus. Machine auth, not a session: a schedule triggers it (see
+        # .github/workflows/ingest.yaml), no browser ever calls it. Sent as
+        # `Authorization: Bearer <key>`. The same value goes in the repo's
+        # INGEST_API_KEY GitHub Actions secret.
+        # Generate: head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+        sync: false
       - key: FRONTEND_BASE_URL
         # Where the bot's completion link points. Must be the site the user's
         # browser can open, not this service.
