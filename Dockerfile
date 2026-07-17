@@ -41,9 +41,12 @@ RUN mkdir -p crates/recipe-core/src crates/recipe-walk/src backend/src \
 COPY crates crates
 COPY backend backend
 
-# Touch the real entrypoints so cargo rebuilds them rather than trusting the
-# stub's mtime — without this the binary can silently stay the stub.
-RUN touch backend/src/main.rs crates/recipe-core/src/lib.rs \
+# Touch every real source file so cargo rebuilds from it rather than trusting a
+# stub's mtime — without this a crate can silently stay the empty stub, and the
+# backend then fails to find its symbols (or, worse, links the stub). Touching all
+# `.rs` rather than a hand-listed few means a newly added crate the backend depends
+# on cannot be forgotten here.
+RUN find crates backend -name '*.rs' -exec touch {} + \
     && cargo build --release --bin recipe-backend
 
 FROM debian:bookworm-slim AS runtime
