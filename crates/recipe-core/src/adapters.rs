@@ -55,6 +55,15 @@ pub struct Adapter {
     /// Takes the **parsed** URL: it was already parsed to find the host, so
     /// handing adapters the string would make them redo work we have done.
     pub normalize: fn(url: &Url, body: &str) -> Vec<Ingested>,
+    /// The URLs this source can be pulled from — its whole catalog, for a
+    /// server-driven sync (#49). A sync fetches each, `normalize`s it, and stores
+    /// what comes back. Empty for a source that lists nothing (schema.org, until
+    /// a domain is allowlisted into it).
+    ///
+    /// This is *self-contained* — no crawl: for TheMealDB the 26 `search.php?f=`
+    /// letter queries each already return complete recipes, so the catalog is a
+    /// flat list, not a frontier to follow.
+    pub catalog: fn() -> Vec<String>,
 }
 
 /// Every supported source, in match order.
@@ -63,11 +72,13 @@ pub const ADAPTERS: &[Adapter] = &[
         id: themealdb::SOURCE,
         handles: themealdb::handles,
         normalize: themealdb::normalize_document,
+        catalog: themealdb::catalog,
     },
     Adapter {
         id: schema_org::SOURCE,
         handles: schema_org::handles,
         normalize: schema_org::normalize_document,
+        catalog: schema_org::catalog,
     },
 ];
 
@@ -209,6 +220,29 @@ mod tests {
         assert_eq!(recipes.len(), 1);
         assert_eq!(recipes[0].recipe.title, "Toast");
         assert_eq!(recipes[0].recipe.source, "themealdb");
+    }
+
+    /// The catalog a server-driven sync (#49) pulls: TheMealDB enumerates a–z,
+    /// schema.org lists nothing, and every catalogued URL is a host the same
+    /// adapter claims — so the sync only ever fetches supported sources.
+    #[test]
+    fn catalogs_are_supported_and_bounded() {
+        assert!(schema_org::catalog().is_empty(), "schema.org lists nothing");
+
+        let themealdb = themealdb::catalog();
+        // a-z *and* 0-9: a meal really does start with a digit ("15-minute
+        // chicken & halloumi burgers"), so an a-z-only catalog drops it.
+        assert_eq!(themealdb.len(), 36, "a-z plus 0-9");
+        assert!(themealdb[0].ends_with("search.php?f=a"));
+        assert!(themealdb[25].ends_with("search.php?f=z"));
+        assert!(themealdb[26].ends_with("search.php?f=0"));
+        assert!(themealdb[35].ends_with("search.php?f=9"));
+        for url in &themealdb {
+            assert!(
+                is_supported(url),
+                "catalog url must be a supported host: {url}"
+            );
+        }
     }
 
     /// The property `derive` depends on: replaying a stored `raw` through its

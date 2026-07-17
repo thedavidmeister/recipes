@@ -10,13 +10,15 @@ input**.
 ```mermaid
 flowchart TD
     subgraph browser["Browser · SvelteKit SPA (static) — Render static site · free"]
-        ui["UI — TanStack Query · Bits UI · Tailwind<br/>drives ingestion, renders results"]
+        ui["UI — TanStack Query · Bits UI · Tailwind<br/>reads the corpus, renders. No search, no ingestion."]
     end
 
+    cron["Schedule · GitHub Actions (free)<br/>daily: POST /api/ingest"]
+
     subgraph render["Rust · Axum — Render · free, managed"]
-        gate["auth gate<br/>session required (health · complete · webhook exempt)"]
-        ingest["ingest<br/>fetch (SSRF-guarded) → derive → store both halves<br/>fails closed on an unknown source"]
-        core["recipe-core<br/>adapters: the only way in"]
+        gate["auth gate<br/>session for people · Bearer key for the sync"]
+        ingest["sync (server-driven)<br/>walk every adapter's catalog → fetch (SSRF-guarded)<br/>→ normalize → store both halves"]
+        core["recipe-core<br/>adapters: the only way in · catalog() says what to pull"]
         derivecmd["derive (command)<br/>rebuild recipes from raw · no network"]
     end
 
@@ -30,19 +32,20 @@ flowchart TD
     tg -->|"/start + telegram id (webhook · own secret, no session)"| wh["auth<br/>mints a link FOR that user"]
     wh -->|"one-time link, sent to their chat"| tg
     tg -->|"you open it -> session cookie"| ui
-    ui -->|"1 · ingest this URL · session"| gate
+    cron -->|"1 · sync · Authorization: Bearer"| gate
     gate --> ingest
-    ingest -->|"2 · fetch"| ext
+    core -->|"2 · every catalog URL"| ingest
+    ingest -->|"3 · fetch each"| ext
     ingest --> core
-    core -->|"3 · recipes + their raw"| ingest
-    ingest -->|"4 · store both"| turso
-    ingest -->|"5 · render these"| ui
+    core -->|"4 · recipes + their raw"| ingest
+    ingest -->|"5 · store both"| turso
     derivecmd -->|"replay raw → recipes"| turso
 ```
 
-**The client drives ingestion; the server performs it.** The client decides what
-to look for. The server fetches it, derives recipes, and stores both halves. The
-browser parses nothing.
+**Ingestion is server-driven, and the client has no access to it.** A schedule
+triggers the sync; the server walks every adapter's catalog, fetches, derives
+recipes, and stores both halves. There is no search and no query — the browser
+only ever reads the corpus, and parses nothing.
 
 That split is deliberate, and it is why there is **no WASM**. An in-browser copy
 of the normalizer only ever existed to parse arbitrary pages the browser had
@@ -55,12 +58,15 @@ never hold.
 
 ### Auth is mandatory
 
-**Search, browse, read and ingest all require a session.** The only endpoints
-that do not are the ones that cannot: `/api/health` (a prober holds no session),
-`/api/auth/complete` (redeeming the bot's link _is_ how you get a session, so
-requiring one would be circular — the secret in the link is the authentication),
-and `/api/telegram/webhook` (called by Telegram, not a browser; it authenticates
-with its own shared secret instead).
+**Reading the corpus requires a session.** The endpoints that do not are the
+ones where a session would be circular or simply the wrong credential:
+`/api/health` (a prober holds no session), `/api/auth/complete` (redeeming the
+bot's link _is_ how you get a session, so requiring one would be circular — the
+secret in the link is the authentication), `/api/telegram/webhook` (called by
+Telegram, not a browser; it authenticates with its own shared secret), and
+`/api/ingest` (called by a schedule, not a person — it authenticates a
+**machine** with `Authorization: Bearer`, and a session deliberately does not
+open it).
 
 **The bot logs you in; the site only points at it.** You press Start, the bot
 replies **to you** with a one-time link, and opening it sets the session cookie

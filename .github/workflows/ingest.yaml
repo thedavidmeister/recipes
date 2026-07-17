@@ -1,0 +1,48 @@
+name: ingest
+# Pull every source's catalog into the corpus (#49).
+#
+# Ingestion is server-driven: the client has no access to it, so *something* has
+# to pull the trigger. Render has a cron service type, but it bills a $1/month
+# minimum per job and this stack is deliberately $0 — so the schedule lives here,
+# where Actions is free and already runs this repo's CI.
+#
+# The endpoint is machine-authed (`Authorization: Bearer`), never a session. The
+# key is the same value as the backend's INGEST_API_KEY env var on Render.
+on:
+  schedule:
+    # 04:00 UTC daily. TheMealDB is ~26 catalog fetches and the store upserts on
+    # (source, id), so a re-run is cheap and idempotent — daily keeps the corpus
+    # current without hammering the source.
+    - cron: "0 4 * * *"
+  # So a sync can be run on demand without waiting for tomorrow.
+  workflow_dispatch:
+# Least privilege: this only calls an external URL — it touches no repo contents.
+permissions:
+  contents: read
+# The sync is idempotent, but overlapping runs would just waste fetches.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the corpus sync
+        env:
+          # Never inlined into the command, so it cannot land in a run log.
+          INGEST_API_KEY: ${{ secrets.INGEST_API_KEY }}
+        run: |
+          set -euo pipefail
+          # The free web service spins down when idle, so the first hit cold-starts
+          # it (~30-60s) before 26 sequential fetches run. Allow for that rather
+          # than failing a healthy sync on a slow wake.
+          code=$(curl -sS -o report.json -w '%{http_code}' \
+            --max-time 900 \
+            -X POST "https://api.recipes.lehlehleh.com/api/ingest" \
+            -H "Authorization: Bearer $INGEST_API_KEY")
+          echo "HTTP $code"
+          # The report says what was fetched, stored, and what failed — worth
+          # having in the run log, since a partial sync still returns 200.
+          cat report.json
+          echo
+          test "$code" = "200"

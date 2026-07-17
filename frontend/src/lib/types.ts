@@ -5,16 +5,6 @@ export interface Ingredient {
   measure: string | null;
 }
 
-/** Render state for a search: what the UI shows, independent of the query lib. */
-export type SearchStatus = "idle" | "pending" | "error" | "ready";
-
-/** Mirrors `recipe_core::themealdb::Category`. */
-export interface Category {
-  name: string;
-  thumb: string | null;
-  description: string | null;
-}
-
 export interface Recipe {
   id: string;
   source: string;

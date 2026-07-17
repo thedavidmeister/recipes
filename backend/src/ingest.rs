@@ -1,131 +1,27 @@
-//! Ingest: fetch a document from a supported source, derive recipes, store both.
+//! `POST /api/ingest` — pull every source's catalog into the corpus.
 //!
-//! The client **drives** ingestion — it decides what to look for — but the
-//! server **performs** it. That split is why there is no WASM: the browser's
-//! copy of the normalizer only ever existed to parse arbitrary pages the browser
-//! had fetched itself, and the corpus no longer ingests arbitrary pages. Once
-//! the server does the fetching, it already holds the bytes, and normalizing
-//! them here means one normalizer instead of two, no client trust, and nothing
-//! for a visitor to download.
+//! This used to take a client-supplied URL and ingest that one document —
+//! "ingest is what a search does". It no longer does: the client hits a **trigger
+//! with no target**, and the server dispatches to every adapter's catalog itself,
+//! fetches, normalizes, and stores. There is no query; search is gone (#49).
 //!
-//! It also lets a source need a credential: an API key can live in a Render env
-//! var, which a public SPA could never hold.
+//! The whole engine lives in [`crate::sync`], behind [`sync::Fetcher`] and
+//! [`sync::Sink`] so it can be tested against a fixture adapter. Here we just wire
+//! the production effects — SSRF-guarded HTTP and the Turso store — and run it.
 //!
-//! Both halves are stored from one place: `raw_imports` (what the source said)
-//! and `recipes` (what we derived). A recipe can never arrive without its raw,
-//! so the derived view is always rebuildable — see [`crate::derive`].
+//! **Machine-gated, not session-gated**: `Authorization: Bearer <INGEST_API_KEY>`
+//! (see [`crate::auth::require_api_key`]). A browser session does not authorize
+//! this endpoint — the client has no access to ingestion at all, which is the
+//! point of #49. A schedule holds the key; nobody presses a button.
 
 use axum::{extract::State, Json};
-use recipe_core::{adapters, Recipe};
-use serde::{Deserialize, Serialize};
+use recipe_core::adapters;
 
-use crate::{error::AppError, proxy, recipes, AppState};
+use crate::{sync, AppState};
 
-#[derive(Debug, Deserialize)]
-pub struct IngestRequest {
-    /// The document to ingest. Its host must be one an adapter claims.
-    pub url: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct IngestResponse {
-    /// What the document held, for the client to render immediately.
-    pub recipes: Vec<Recipe>,
-    /// How many were complete enough to store.
-    pub stored: usize,
-}
-
-/// `POST /api/ingest` — fetch, derive, store, and return what was found.
-pub async fn ingest(
-    State(state): State<AppState>,
-    Json(req): Json<IngestRequest>,
-) -> Result<Json<IngestResponse>, AppError> {
-    // Fail closed before fetching: an unsupported host is not a source we
-    // ingest, so there is no reason to spend a request on it. This also stops
-    // the endpoint being a general-purpose fetch relay — it can only reach
-    // hosts an adapter claims.
-    if !adapters::is_supported(&req.url) {
-        return Err(AppError::BadRequest(format!(
-            "unsupported source: {}",
-            req.url
-        )));
-    }
-
-    // The SSRF guard still applies: adapters name hosts, DNS resolves them.
-    let page = proxy::fetch_url(&state.http, &req.url).await?;
-
-    let ingested = adapters::normalize(&page.final_url, &page.body)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-
-    let mut stored = 0;
-    let mut found = Vec::with_capacity(ingested.len());
-    for item in ingested {
-        // Only complete recipes are worth storing: a category listing returns
-        // header fields only, and a partial has nothing to contribute. They are
-        // still returned, because they are worth *rendering*.
-        if is_complete(&item.recipe) {
-            recipes::store(&state.db, &item, page.content_type.as_deref())
-                .await
-                .map_err(|e| AppError::Internal(format!("db write failed: {e}")))?;
-            stored += 1;
-        }
-        found.push(item.recipe);
-    }
-
-    Ok(Json(IngestResponse {
-        recipes: found,
-        stored,
-    }))
-}
-
-/// A recipe carries what a corpus is for. TheMealDB's `filter.php` returns
-/// header fields only — browsing Seafood yields 82 recipes with no ingredients
-/// or instructions, which are fine to show and pointless to store.
-fn is_complete(recipe: &Recipe) -> bool {
-    !recipe.instructions.trim().is_empty() && !recipe.ingredients.is_empty()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use recipe_core::Ingredient;
-
-    fn recipe(instructions: &str, ingredients: Vec<Ingredient>) -> Recipe {
-        Recipe {
-            id: "1".into(),
-            source: "themealdb".into(),
-            title: "Soup".into(),
-            image: None,
-            category: None,
-            area: None,
-            tags: vec![],
-            ingredients,
-            instructions: instructions.into(),
-            source_url: None,
-            video_url: None,
-        }
-    }
-
-    #[test]
-    fn completeness_gates_storage_not_display() {
-        let full = recipe(
-            "Boil.",
-            vec![Ingredient {
-                name: "water".into(),
-                measure: None,
-            }],
-        );
-        assert!(is_complete(&full));
-
-        // A category-browse shaped record: header fields only.
-        assert!(!is_complete(&recipe("", vec![])));
-        assert!(!is_complete(&recipe("Boil.", vec![])));
-        assert!(!is_complete(&recipe(
-            "   ",
-            vec![Ingredient {
-                name: "water".into(),
-                measure: None
-            }]
-        )));
-    }
+/// `POST /api/ingest` — trigger a server-driven corpus sync; report what it did.
+pub async fn ingest(State(state): State<AppState>) -> Json<sync::SyncReport> {
+    let fetcher = sync::ProxyFetcher { http: &state.http };
+    let sink = sync::TursoSink { conn: &state.db };
+    Json(sync::sync(adapters::ADAPTERS, &fetcher, &sink).await)
 }

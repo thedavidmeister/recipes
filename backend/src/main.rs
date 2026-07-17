@@ -20,6 +20,7 @@ mod error;
 mod ingest;
 mod proxy;
 mod recipes;
+mod sync;
 
 use axum::{
     http::Method,
@@ -32,13 +33,22 @@ use tower_http::{
 };
 
 /// Shared handler state: the SSRF-guarded HTTP client, a Turso/libSQL
-/// connection, and the Telegram config auth runs on.
+/// connection, the Telegram config auth runs on, and the infra key that guards
+/// the ingest sync.
 #[derive(Clone)]
 pub struct AppState {
     pub http: reqwest::Client,
     pub db: libsql::Connection,
     pub telegram: auth::TelegramConfig,
     pub cookie: auth::CookieConfig,
+    /// Authenticates the machine that triggers `/api/ingest` (#49) — a schedule,
+    /// not a person. Never a user, and never a session.
+    ///
+    /// `None` disables ingest rather than the app: the rest of the service does
+    /// not need this key, so a deployment missing it still serves. It is an
+    /// `Option` so the unset case cannot be compared against — see
+    /// [`auth::ingest_key_from_env`].
+    pub ingest_key: Option<String>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -52,11 +62,21 @@ async fn health() -> Json<serde_json::Value> {
 /// session" is a claim about this wiring, so a test that rebuilt the wiring
 /// would prove nothing about what actually serves traffic.
 pub fn app(state: AppState) -> Router {
-    // Everything the corpus touches. Auth is mandatory (#25): since #29 the
-    // client drives ingestion and the server performs it, so `/ingest` is what a
-    // search does — gating it gates search, deliberately.
-    let guarded = Router::new()
+    // Machine-only. `/ingest` is a server-driven corpus sync (#49): a schedule
+    // triggers it, not a person, so it authenticates with an `Authorization:
+    // Bearer` key instead of a session. The frontend has no access to ingestion
+    // at all — a valid session cookie does *not* open this door, which is the
+    // point: the client no longer decides what enters the corpus.
+    let machine = Router::new()
         .route("/ingest", post(ingest::ingest))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_api_key,
+        ));
+
+    // Everything a person touches. Auth is mandatory (#25): the corpus is for a
+    // known group, and #20 needs a headcount.
+    let guarded = Router::new()
         // `/me` is guarded like everything else, which is what makes it useful:
         // the session cookie is HttpOnly, so the SPA cannot see whether it is
         // logged in. A 401 here *is* the answer.
@@ -80,7 +100,11 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/complete", post(auth::complete))
         .route("/telegram/webhook", post(auth::webhook));
 
-    let api = Router::new().merge(guarded).merge(public).with_state(state);
+    let api = Router::new()
+        .merge(machine)
+        .merge(guarded)
+        .merge(public)
+        .with_state(state);
 
     Router::new()
         .nest("/api", api)
@@ -173,11 +197,20 @@ async fn main() -> anyhow::Result<()> {
     // Auth is mandatory, so missing Telegram config is a startup error: a
     // backend that cannot mint a login can serve nothing, and failing here beats
     // discovering it on the first request.
+    //
+    // The ingest key is the exception — it gates one scheduled endpoint, so
+    // missing it costs a sync, not the service. Warn and serve; ingest itself
+    // refuses while it is unset.
+    let ingest_key = auth::ingest_key_from_env();
+    if ingest_key.is_none() {
+        tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
+    }
     let state = AppState {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
+        ingest_key,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -209,6 +242,14 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_app() -> (Router, libsql::Connection) {
+        test_app_with_ingest_key(Some("test-ingest-key".into())).await
+    }
+
+    /// The router with ingest configured, or not. `None` is a real deployment
+    /// state rather than a hypothetical — the key is optional (a backend without
+    /// one still serves everything else), so the tests reach that state the same
+    /// way the process does.
+    async fn test_app_with_ingest_key(ingest_key: Option<String>) -> (Router, libsql::Connection) {
         let db = libsql::Builder::new_local(":memory:")
             .build()
             .await
@@ -227,41 +268,47 @@ mod tests {
                 domain: None,
                 secure: false,
             },
+            ingest_key,
         };
         (app(state), conn)
     }
 
-    /// An **unsupported** host on purpose. Ingest fails closed on one *before*
-    /// fetching, so a request that gets past the gate stops at the adapter check
-    /// with 400 — no network, no flake, and a specific answer that proves the
-    /// middleware let it through rather than something else failing first. A
-    /// supported URL here would make these tests perform real HTTP.
-    fn ingest_req(cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
-            .method("POST")
-            .uri("/api/ingest")
-            .header("content-type", "application/json");
+    /// A `GET /api/me` — the session-gated route the gate tests probe. `/me` is
+    /// deliberate: it is cheap and deterministic, whereas `/api/ingest` is no
+    /// longer session-gated at all (it is machine-only now, #49).
+    fn me_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri("/api/me");
         if let Some(v) = cookie {
             b = b.header("cookie", v);
         }
-        b.body(Body::from(r#"{"url":"https://example.com/not-a-source"}"#))
-            .unwrap()
+        b.body(Body::empty()).unwrap()
     }
 
-    /// The headline: an anonymous caller cannot reach the corpus. Since #29
-    /// `/ingest` is what a search does, so this is also "you cannot search
-    /// without logging in" — deliberate, per the ruling on #25.
+    /// A `POST /api/ingest`. It takes no body — it triggers a server-driven sync
+    /// (#49). An unauthenticated caller is rejected at the middleware and never
+    /// reaches the sync, so these perform no network.
+    fn ingest_req(auth: Option<&str>, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/api/ingest");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// The headline: an anonymous caller cannot reach the corpus (#25).
     #[tokio::test]
-    async fn ingest_is_closed_without_a_session() {
+    async fn a_request_without_a_session_is_refused() {
         let (app, _conn) = test_app().await;
-        let res = app.oneshot(ingest_req(None)).await.unwrap();
+        let res = app.oneshot(me_req(None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// A guessed or malformed cookie is not a session. Note this would pass even
-    /// if the gate were absent *and* ingest happened to fail — so it is paired
-    /// with `a_valid_session_passes_the_gate`, which pins that the gate is what
-    /// answers here.
+    /// A guessed or malformed cookie is not a session. Paired with
+    /// `a_valid_session_passes_the_gate`, which pins that the gate is what answers
+    /// here rather than the route simply being broken.
     #[tokio::test]
     async fn a_bogus_cookie_is_not_a_session() {
         let (app, _conn) = test_app().await;
@@ -273,7 +320,7 @@ mod tests {
             // A name must match whole: a prefix must not satisfy the gate.
             "xrecipes_session=deadbeef",
         ] {
-            let res = app.clone().oneshot(ingest_req(Some(header))).await.unwrap();
+            let res = app.clone().oneshot(me_req(Some(header))).await.unwrap();
             assert_eq!(
                 res.status(),
                 StatusCode::UNAUTHORIZED,
@@ -282,23 +329,128 @@ mod tests {
         }
     }
 
+    /// Ingestion is machine-only (#49): no key, no entry. A missing gate would let
+    /// this reach the handler and run a real sync (200, and real HTTP), so a 401
+    /// here is what proves the middleware is actually wired.
+    #[tokio::test]
+    async fn ingest_requires_an_api_key() {
+        let (app, _conn) = test_app().await;
+        let res = app.oneshot(ingest_req(None, None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A missing `INGEST_API_KEY` must cost a *sync*, not the service. The key
+    /// guards one scheduled endpoint, so exiting over it would turn a stale
+    /// corpus into an outage: no login, no reads, and no `/health` for the
+    /// prober that would report it.
+    #[tokio::test]
+    async fn a_missing_ingest_key_does_not_take_the_app_down() {
+        let (app, _conn) = test_app_with_ingest_key(None).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// The other half of that trade, and the one worth pinning: an unconfigured
+    /// ingest is **closed**, never open.
+    ///
+    /// `Bearer ` is the case with teeth. Were the key a `String` defaulting to
+    /// empty, an unset variable would compare equal to a bearer with nothing
+    /// after the scheme — so forgetting the config would *unlock* ingestion to
+    /// anyone. It answers 503 rather than 401 because no credential exists to be
+    /// wrong about: the fault is the deployment's, and an operator reading 401
+    /// would go hunting for a bad key instead.
+    #[tokio::test]
+    async fn without_a_key_configured_ingest_is_closed_not_open() {
+        let (app, _conn) = test_app_with_ingest_key(None).await;
+        for header in [
+            None,
+            Some("Bearer "),
+            Some("Bearer"),
+            Some(""),
+            // Nor does the key some *other* deployment holds open this one.
+            Some("Bearer test-ingest-key"),
+        ] {
+            let res = app.clone().oneshot(ingest_req(header, None)).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{header:?} must not reach an unconfigured ingest"
+            );
+        }
+    }
+
+    /// A wrong key — or the right key under the wrong scheme, or none at all — is
+    /// not the key.
+    #[tokio::test]
+    async fn ingest_rejects_a_bad_api_key() {
+        let (app, _conn) = test_app().await;
+        for header in [
+            "Bearer wrong",
+            "Bearer ",
+            // A prefix or an extension of the key must not satisfy it.
+            "Bearer test-ingest-ke",
+            "Bearer test-ingest-keys",
+            // The scheme is not optional, and Basic is not Bearer.
+            "test-ingest-key",
+            "Basic test-ingest-key",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(ingest_req(Some(header), None))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "{header:?} must not authenticate"
+            );
+        }
+    }
+
+    /// The property that makes "the frontend has no access to ingestion" true: a
+    /// perfectly good browser session does not open this door. Only the key does,
+    /// and the browser never holds it.
+    #[tokio::test]
+    async fn a_session_cookie_does_not_reach_ingestion() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(ingest_req(None, Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session must not authenticate a machine-only endpoint"
+        );
+    }
+
     /// The other half of the proof: with a real session the request gets *past*
-    /// the gate and lands on the adapter check, which refuses an unsupported host
-    /// with 400. Asserting that exact status — rather than merely "not 401" —
-    /// is what makes this prove the middleware ran and passed: a bare `!= 401`
-    /// would also be satisfied by a 500, or by the gate being absent entirely.
+    /// the gate and lands on a handler. We check `/api/me` — a lightweight authed
+    /// route — rather than `/api/ingest`, which now triggers a real network sync.
+    /// Asserting an exact 200 (rather than merely "not 401") is what makes this
+    /// prove the middleware ran and passed: a bare `!= 401` would also be
+    /// satisfied by a 500, or by the gate being absent entirely.
     #[tokio::test]
     async fn a_valid_session_passes_the_gate() {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let res = app
-            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
         assert_eq!(
             res.status(),
-            StatusCode::BAD_REQUEST,
-            "a live session must reach ingest, which then refuses the host"
+            StatusCode::OK,
+            "a live session must pass the gate and reach the handler"
         );
     }
 
@@ -311,7 +463,7 @@ mod tests {
             .await
             .unwrap();
         let res = app
-            .oneshot(ingest_req(Some(&format!("recipes_session={token}"))))
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -324,12 +476,16 @@ mod tests {
         let (app, conn) = test_app().await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let res = app
-            .oneshot(ingest_req(Some(&format!(
+            .oneshot(me_req(Some(&format!(
                 "theme=dark; recipes_session={token}; lang=en"
             ))))
             .await
             .unwrap();
-        assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "the session must be found among other cookies"
+        );
     }
 
     /// Health has to answer an unauthenticated prober or the host cannot tell if

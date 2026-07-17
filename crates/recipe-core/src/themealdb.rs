@@ -104,6 +104,31 @@ pub fn handles(host: &str) -> bool {
     host == "themealdb.com" || host.ends_with(".themealdb.com")
 }
 
+/// TheMealDB's whole catalog, for a server-driven sync (#49).
+///
+/// The free API has no "list everything" call, but `search.php?f=<char>` returns
+/// every meal whose name starts with that character — **complete** (ingredients
+/// and instructions, not the header-only shape `filter.php` gives), and
+/// **unpaginated**. That last part is measured, not assumed: against the live API
+/// the per-character counts run 0…118 with no repeated ceiling, so a response is
+/// the whole set for that character, not a first page.
+///
+/// So a–z **plus 0–9** enumerate the corpus flat, with no crawl. The digits are
+/// not theoretical: `f=1` returns "15-minute chicken & halloumi burgers", which an
+/// a–z-only catalog silently missed. Nine of the ten digits return nothing, which
+/// costs one cheap request each to stay correct as names change.
+pub fn catalog() -> Vec<String> {
+    (b'a'..=b'z')
+        .chain(b'0'..=b'9')
+        .map(|start| {
+            format!(
+                "https://www.themealdb.com/api/json/v1/1/search.php?f={}",
+                start as char
+            )
+        })
+        .collect()
+}
+
 /// Normalize any TheMealDB document into recipes, each paired with its own raw
 /// payload, for [`crate::adapters`].
 ///

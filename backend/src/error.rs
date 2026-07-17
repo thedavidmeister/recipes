@@ -20,6 +20,13 @@ pub enum AppError {
     Blocked,
     #[error("upstream fetch failed: {0}")]
     Upstream(String),
+    /// A feature this deployment has not been configured for. Distinct from
+    /// [`AppError::Unauthorized`] on purpose: "you presented the wrong key" and
+    /// "this server holds no key at all" send an operator to different places,
+    /// and answering 401 to the second sends them hunting a credential when the
+    /// fault is the deployment's.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("internal error")]
     Internal(String),
 }
@@ -39,6 +46,10 @@ impl IntoResponse for AppError {
             AppError::Upstream(e) => {
                 tracing::warn!("upstream error: {e}");
                 StatusCode::BAD_GATEWAY
+            }
+            AppError::Unavailable(e) => {
+                tracing::warn!("unconfigured feature called: {e}");
+                StatusCode::SERVICE_UNAVAILABLE
             }
             AppError::Internal(e) => {
                 tracing::error!("internal error: {e}");
