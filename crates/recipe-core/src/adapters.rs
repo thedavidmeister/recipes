@@ -230,9 +230,13 @@ mod tests {
         assert!(schema_org::catalog().is_empty(), "schema.org lists nothing");
 
         let themealdb = themealdb::catalog();
-        assert_eq!(themealdb.len(), 26, "one search per letter a-z");
+        // a-z *and* 0-9: a meal really does start with a digit ("15-minute
+        // chicken & halloumi burgers"), so an a-z-only catalog drops it.
+        assert_eq!(themealdb.len(), 36, "a-z plus 0-9");
         assert!(themealdb[0].ends_with("search.php?f=a"));
         assert!(themealdb[25].ends_with("search.php?f=z"));
+        assert!(themealdb[26].ends_with("search.php?f=0"));
+        assert!(themealdb[35].ends_with("search.php?f=9"));
         for url in &themealdb {
             assert!(
                 is_supported(url),
