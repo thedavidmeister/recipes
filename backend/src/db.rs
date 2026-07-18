@@ -26,7 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../migrations/0003_auth.sql")),
     (
         4,
-        include_str!("../migrations/0004_ingredient_structured.sql"),
+        include_str!("../migrations/0004_ingredient_structures.sql"),
     ),
 ];
 
@@ -224,7 +224,7 @@ mod tests {
         for table in [
             "recipes",
             "raw_imports",
-            "ingredient_structured",
+            "ingredient_structures",
             "users",
             "login_completions",
             "sessions",

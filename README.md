@@ -17,14 +17,14 @@ flowchart TD
 
     subgraph render["Rust · Axum — Render · free, managed"]
         gate["auth gate<br/>session for people · Bearer key for the sync"]
-        ingest["sync (server-driven)<br/>walk every adapter's catalog → fetch (SSRF-guarded)<br/>→ normalize → store both halves"]
+        ingest["sync → enrich → derive (server-driven)<br/>walk every adapter's catalog → fetch (SSRF-guarded) → store raw<br/>→ LLM-enrich ingredient lines → derive recipes"]
         core["recipe-core<br/>adapters: the only way in · catalog() says what to pull"]
-        derivecmd["derive (command)<br/>rebuild recipes from raw · no network"]
+        derivecmd["derive / enrich (commands)<br/>rebuild recipes from raw + readings · no network fetch"]
     end
 
     tg["Telegram<br/>you press Start; the bot links back to you"]
 
-    turso[("Turso · libSQL/SQLite<br/>raw_imports — what the source said<br/>recipes — the derived view")]
+    turso[("Turso · libSQL/SQLite<br/>raw_imports — what the source said<br/>ingredient_structures — LLM readings, per recipe<br/>recipes — the derived view")]
     ext["Supported sources<br/>TheMealDB · (adapters, one per source)"]
 
     ui -->|"read the corpus · read-only token"| turso
@@ -38,14 +38,16 @@ flowchart TD
     ingest -->|"3 · fetch each"| ext
     ingest --> core
     core -->|"4 · recipes + their raw"| ingest
-    ingest -->|"5 · store both"| turso
-    derivecmd -->|"replay raw → recipes"| turso
+    ingest -->|"5 · store raw · enrich · derive"| turso
+    ingest -->|"LLM-enrich (any OpenAI-compatible endpoint)"| llm["LLM · optional<br/>degrade-not-die if unset"]
+    derivecmd -->|"replay raw + readings → recipes"| turso
 ```
 
 **Ingestion is server-driven, and the client has no access to it.** A schedule
-triggers the sync; the server walks every adapter's catalog, fetches, derives
-recipes, and stores both halves. There is no search and no query — the browser
-only ever reads the corpus, and parses nothing.
+triggers the pipeline; the server walks every adapter's catalog, fetches and
+stores raw, LLM-enriches each recipe's ingredient lines, and derives the recipes
+view. There is no search and no query — the browser only ever reads the corpus,
+and parses nothing.
 
 That split is deliberate, and it is why there is **no WASM**. An in-browser copy
 of the normalizer only ever existed to parse arbitrary pages the browser had
@@ -100,16 +102,32 @@ sites nobody has looked at, and means normalizing pages an attacker authored. A
 generic schema.org adapter is kept but demoted: its allowlist is empty, so it
 claims nothing until a domain is deliberately allowlisted into it.
 
-### The corpus has two halves
+### The corpus is three tables, one writer each
 
-- **`raw_imports`** — each recipe's payload, exactly as its source gave it.
-- **`recipes`** — the **derived** view that search and browse read.
+- **`raw_imports`** — each recipe's payload, exactly as its source gave it
+  (written by **sync**).
+- **`ingredient_structures`** — the LLM's structured reading of a recipe's
+  ingredient lines, one row per recipe (written by **enrich**, #11).
+- **`recipes`** — the **derived** view that search and browse read (written by
+  **derive**).
 
-`recipes` is derived, so it can always be rebuilt: `recipe-backend derive`
-replays every stored payload through the current adapter, **with zero upstream
-calls**. That matters because re-fetching is not a recovery plan — sources 502
-scrapers (Serious Eats does), disappear, and paywall. A normalization fix
-therefore reaches rows imported before the fix existed.
+The pipeline is `sync → enrich → derive`, **decoupled** so each table has one
+writer. `recipes` owns no input of its own, so it stays offline:
+`recipe-backend derive` replays every stored payload through the current adapter
+— reattaching each recipe's readings — **with zero upstream calls**. That
+matters because re-fetching is not a recovery plan — sources 502 scrapers
+(Serious Eats does), disappear, and paywall. A normalization fix therefore
+reaches rows imported before the fix existed. "A recipe never exists without its
+payload" holds by construction: recipes only come from deriving raw.
+
+**Enrichment (#11)** normalizes messy measures (`"1 (14 oz) can"`,
+`"2-3 cloves"`, `"to taste"`) into a structured form the app can scale and
+convert — the LLM does the extraction, deterministic code the arithmetic. It is
+**provider-neutral** (any OpenAI-compatible endpoint, or a local model, via
+`LLM_*` env) and **degrade-not-die**: with no endpoint configured, enrich is a
+no-op, recipes keep their raw measures, and the site still serves. A reading is
+a _capture_, not a derivation — the model drifts — so it carries provenance and
+is re-snapshot only on a deliberate `enrich --refresh`.
 
 Raw is not an archive of everything downloaded — **we only want recipes**. A
 category listing is a taxonomy, and a browse returns partials we refuse to
@@ -118,15 +136,15 @@ TheMealDB would be ~1.5 MB against a 5 GB tier.
 
 ### Why these choices
 
-| Decision       | Choice                                                           | Why                                                                                                                                                                                                                                   |
-| -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching.              |
-| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                         |
-| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                            |
-| Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do.          |
-| Backend scope  | auth + ingest + derive                                           | The jobs that genuinely require a server: cross-origin fetches, holding secrets, and owning what enters the corpus. Fetching is something ingest does, not an endpoint of its own — there is no URL a caller can aim.                 |
-| Accounts       | **Telegram** bot; it links back to you                           | No email vendor to vet, no sender domain, no SPF/DKIM/DMARC, and no spam folder to lose a login in. A bot can't message a stranger, so the link goes to the bot — which also deletes the email-bombing vector. Costs: needs Telegram. |
-| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.                       |
+| Decision       | Choice                                                           | Why                                                                                                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend host   | **Render** — free, managed, runs a Rust Docker image             | Keeps Rust without a self-managed box, and is **actually free** at our size. Shuttle's free tier ended 2025‑12‑19; Fly.io removed its free allowances in 2024; a VPS (Hetzner) would mean owning host security/patching.                |
+| Database       | **Turso** — libSQL/SQLite, 5 GB free                             | Managed SQLite: our original SQLite cache design maps over almost 1:1, with no persistent-volume host to run.                                                                                                                           |
+| Frontend       | **SvelteKit** SPA (`adapter-static`) on a **Render static site** | The UI is a static bundle. Render static sites are permanently free and never spin down (unlike the free web service), and it keeps the frontend on a host we already run.                                                              |
+| Processing     | **Server-side**, in `recipe-core` (native)                       | The server fetches, so it already holds the bytes — one normalizer, no client to trust, no bundle to download, and a source may require a key. In-browser WASM existed only to parse arbitrary pages, which we no longer do.            |
+| Backend scope  | auth + sync + enrich + derive                                    | The jobs that genuinely require a server: cross-origin fetches, holding secrets (incl. the LLM key), and owning what enters the corpus. Fetching is something sync does, not an endpoint of its own — there is no URL a caller can aim. |
+| Accounts       | **Telegram** bot; it links back to you                           | No email vendor to vet, no sender domain, no SPF/DKIM/DMARC, and no spam folder to lose a login in. A bot can't message a stranger, so the link goes to the bot — which also deletes the email-bombing vector. Costs: needs Telegram.   |
+| PR screenshots | **Cloudflare R2** public bucket                                  | GitHub has no API to attach images to a comment, so they must be hosted and embedded by URL. R2 is genuinely $0 here (10 GB, egress always free) and serves unsigned public URLs. Render has no object storage.                         |
 
 **The infra today is Render + Turso**, plus **Cloudflare R2** for PR screenshots
 only — that is the whole vendor list, so nothing else should be described as
@@ -142,8 +160,8 @@ verdicts on the vendors.
 ## Layout
 
 ```
-crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers
-backend/             Axum: ingest · derive · corpus store · SSRF-guarded fetching (deploys to Render)
+crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers + measure (scale/convert)
+backend/             Axum: sync · enrich (LLM) · derive · corpus store · SSRF-guarded fetching (deploys to Render)
 frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind (parses nothing)
 frontend/src/app.css design tokens — the one place raw colour/spacing values live
 frontend/.storybook  Storybook — every UI state declared as a story (see below)
@@ -166,7 +184,12 @@ nix develop
 - **Migrate:** `cargo run --manifest-path backend/Cargo.toml -- migrate`
 - **Derive:**
   `cargo run --manifest-path backend/Cargo.toml -- derive [<source>]` — rebuild
-  `recipes` from `raw_imports`, no network
+  `recipes` from `raw_imports` (+ readings), no network
+- **Enrich:**
+  `cargo run --manifest-path backend/Cargo.toml -- enrich [--refresh]` —
+  LLM-read each recipe's ingredient lines into `ingredient_structures` (#11). A
+  no-op unless `LLM_BASE_URL`/`LLM_MODEL` are set (any OpenAI-compatible
+  endpoint); `--refresh` re-reads every recipe under the current model
 - **Frontend:** `cd frontend && npm ci && npm run dev`
 - **Storybook:** `cd frontend && npm run storybook`
 

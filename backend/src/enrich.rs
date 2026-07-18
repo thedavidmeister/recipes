@@ -1,36 +1,39 @@
-//! Enrich: read raw ingredient lines into structure (#11), and cache the result.
+//! Enrich: read a recipe's raw ingredient lines into structure (#11), stored
+//! per recipe.
 //!
 //! This is the one **networked** stage of the corpus pipeline and the only writer
-//! of `ingredient_structured`. It reads the lines the corpus holds (`recipes`),
-//! finds the ones not yet cached, sends each recipe's uncached lines to an LLM in
-//! one batched call, and writes the readings to the cache keyed by the raw line.
-//! It does **not** write `recipes` — [`crate::derive`] reattaches from the cache,
-//! which is why deriving stays offline.
+//! of `ingredient_structures`. For each recipe that has no structured reading yet,
+//! it sends that recipe's ingredient lines to an LLM in one call and stores the
+//! readings — one row per recipe (`source, id`), the array aligned to the recipe's
+//! ingredient order. It does **not** write `recipes` — [`crate::derive`] reattaches
+//! from this table, which is why deriving stays offline.
 //!
-//! **The cache is a capture, not memoization of a pure function.** `recipes` is a
-//! deterministic derivation of `raw_imports`; a reading is not — a model is
-//! non-deterministic and drifts over time, so a reading is a point-in-time
-//! artifact, a *peer of `raw_imports`* rather than of `recipes`. The cache exists
-//! *because* the extraction is not reproducible: capture a reading once and every
-//! rebuild reuses that exact one instead of re-rolling a drifting model (and
-//! re-paying). So "idempotent" here means the cached pipeline is stable, never
-//! that re-extracting a line would give the same answer. Each reading records its
-//! provenance ([`Extractor::provenance`] + a timestamp) so drift is auditable; a
-//! deliberate re-capture with a better model is an explicit act (`enrich
-//! --refresh`), never a silent side effect of a derive.
+//! **Per recipe, not per line.** A reading is captured once per recipe (matching
+//! #11's "once per recipe at write time"), which keeps the raw → enrich → derive
+//! chain a clean per-`(source, id)` cascade with no line→recipe fan-out, and lets
+//! this be a dedicated table rather than a generic `(kind, json)` container. A
+//! future enrichment (nutrition, allergens) is its own table + extractor, not a
+//! row here.
+//!
+//! **A capture, not a derivation.** `recipes` is a deterministic derivation of
+//! `raw_imports`; a reading is not — a model is non-deterministic and drifts, so a
+//! reading is a point-in-time artifact, a peer of `raw_imports`. We keep the
+//! capture rather than re-roll a drifting model on every derive; each row records
+//! its provenance ([`Extractor::provenance`] + a timestamp) so drift is auditable,
+//! and a deliberate re-snapshot with a better model is an explicit act (`enrich
+//! --refresh`), never a silent side effect.
 //!
 //! The LLM boundary is a trait ([`Extractor`]) so the engine runs against a
-//! fixture with no network, the same shape [`crate::sync`] uses for fetch/store —
-//! and so the **provider is not baked in**. Reading an ingredient line into JSON
-//! is a commodity task, so production is [`OpenAiCompatExtractor`]: one call to
-//! any OpenAI-compatible `/chat/completions` endpoint (OpenAI, OpenRouter,
-//! Together, Groq, a local Ollama/vLLM, …), picked per deployment by env. The
-//! reply is constrained to the [`StructuredMeasure`] schema by structured output,
-//! so it is always valid JSON in the shape we deserialize.
+//! fixture with no network, the same shape [`crate::sync`] uses — and so the
+//! **provider is not baked in**. Reading a line into JSON is a commodity task, so
+//! production is [`OpenAiCompatExtractor`]: one call to any OpenAI-compatible
+//! `/chat/completions` endpoint (OpenAI, OpenRouter, Together, Groq, a local
+//! Ollama/vLLM), picked per deployment by env, constrained to the
+//! [`StructuredMeasure`] schema by structured output.
 //!
 //! **Degrade-not-die.** With no endpoint configured there is no extractor, enrich
-//! is a no-op, and derive leaves those lines `structured: None`. The corpus still
-//! ingests and serves — enrichment is an addition, never a gate.
+//! is a no-op, and derive leaves recipes' `structured` fields `None`. The corpus
+//! still ingests and serves — enrichment is an addition, never a gate.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -40,17 +43,10 @@ use recipe_core::{Ingredient, StructuredMeasure};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// The cache key for a raw line: `(name, measure-or-empty)`. `measure` is `""`
-/// not `NULL` so it matches the table's `PRIMARY KEY (name, measure)` — SQLite
-/// treats NULLs in a key as distinct, which would defeat the dedup.
-fn key(ingredient: &Ingredient) -> (String, String) {
-    (
-        ingredient.name.clone(),
-        ingredient.measure.clone().unwrap_or_default(),
-    )
-}
+/// A recipe key: `(source, id)`.
+type RecipeKey = (String, String);
 
-/// Reads a batch of raw ingredient lines into one [`StructuredMeasure`] each.
+/// Reads one recipe's ingredient lines into one [`StructuredMeasure`] each.
 ///
 /// Production is an LLM call ([`OpenAiCompatExtractor`]); tests use a fixture. The
 /// engine is generic over this so it runs with no network, and so no single LLM
@@ -66,89 +62,71 @@ pub trait Extractor {
     ) -> impl Future<Output = anyhow::Result<Vec<StructuredMeasure>>>;
 
     /// A label for what produced these readings — the model id — stored with each
-    /// cached reading. Provenance for a non-deterministic, versioned source: it is
-    /// what makes "which model read this line, and roughly when" answerable, and a
-    /// future targeted re-capture (a line whose reading came from a worse model)
-    /// possible.
+    /// recipe's row. Provenance for a non-deterministic, versioned source: it makes
+    /// "which model read this recipe, and roughly when" answerable, and a targeted
+    /// re-capture possible.
     fn provenance(&self) -> String;
 }
 
-/// What an enrich run did.
+/// What an enrich run did — counted in **recipes**.
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub struct EnrichReport {
-    /// Distinct uncached lines that needed a reading this run.
+    /// Recipes that needed a reading this run (had ingredients, not yet stored).
     pub missing: usize,
-    /// Lines newly read and written to the cache.
+    /// Recipes newly read and written to `ingredient_structures`.
     pub enriched: usize,
-    /// Batches whose extraction failed — left uncached, so the line stays
-    /// `structured: None` until a later run succeeds. A failure is never fatal.
+    /// Recipes whose extraction failed — left unstored, so the recipe stays
+    /// unenriched until a later run succeeds. A failure is never fatal.
     pub failed: usize,
 }
 
-/// Fill the structured cache for every ingredient line the corpus holds that is
-/// not cached yet.
+/// Read every recipe that has no structured reading yet into `ingredient_structures`.
 ///
-/// Reads `recipes` for the lines, batches each recipe's uncached lines into one
-/// [`Extractor`] call, and writes the readings to `ingredient_structured`.
-///
-/// A line already read is not re-extracted **unless `refresh`** — not because the
-/// reading is a pure function of the line (it is not — the model is
-/// non-deterministic and drifts), but because we keep the captured reading rather
-/// than re-roll a drifting model on every run. So a normal run is stable and cheap
-/// (only genuinely new lines cost). `refresh = true` is the deliberate re-capture:
-/// re-read every line and overwrite with a fresh reading from the current model —
-/// the explicit "the model got better, re-snapshot" act, kept out of the routine
-/// path so a model change never silently re-pays for the whole corpus.
+/// One [`Extractor`] call per recipe (its whole ingredient list), one row written
+/// per recipe. A recipe already stored is skipped — not because a reading is a pure
+/// function of its lines (it is not; the model drifts), but because we keep the
+/// captured reading rather than re-roll on every run. `refresh = true` is the
+/// deliberate re-capture: re-read every recipe and overwrite with the current
+/// model, kept out of the routine path so a model change never silently re-pays for
+/// the whole corpus.
 pub async fn enrich<E: Extractor>(
     conn: &Connection,
     extractor: &E,
     refresh: bool,
 ) -> anyhow::Result<EnrichReport> {
     let mut report = EnrichReport::default();
-    // Recorded with each reading as provenance for a non-deterministic source.
     let provenance = extractor.provenance();
-    // Lines we can skip: on a normal run, everything already cached; on a refresh,
-    // nothing — every line is re-read. Either way this grows as the run caches, so
-    // two recipes sharing a line only pay once per run.
-    let mut seen = if refresh {
+    // Recipes we can skip: on a routine run, everything already stored; on a
+    // refresh, none — every recipe is re-read.
+    let done: HashSet<RecipeKey> = if refresh {
         HashSet::new()
     } else {
-        cached_keys(conn).await?
+        stored_recipes(conn).await?
     };
 
-    for lines in read_recipe_lines(conn).await? {
-        // This recipe's still-unseen lines, deduped within the recipe too.
-        let mut batch: Vec<Ingredient> = Vec::new();
-        for line in lines {
-            let k = key(&line);
-            if seen.contains(&k) || batch.iter().any(|b| key(b) == k) {
-                continue;
-            }
-            batch.push(line);
-        }
-        if batch.is_empty() {
+    for (source, id, ingredients) in recipe_ingredients(conn).await? {
+        if ingredients.is_empty() || done.contains(&(source.clone(), id.clone())) {
             continue;
         }
-        report.missing += batch.len();
+        report.missing += 1;
 
-        match extractor.extract(&batch).await {
-            Ok(readings) if readings.len() == batch.len() => {
-                for (line, reading) in batch.iter().zip(&readings) {
-                    cache_put(conn, line, reading, &provenance).await?;
-                    seen.insert(key(line));
-                    report.enriched += 1;
-                }
+        match extractor.extract(&ingredients).await {
+            Ok(readings) if readings.len() == ingredients.len() => {
+                store(conn, &source, &id, &readings, &provenance).await?;
+                report.enriched += 1;
             }
             Ok(readings) => {
                 tracing::warn!(
-                    "extractor returned {} readings for {} lines — skipping batch",
+                    "extractor returned {} readings for {}/{} ({} lines) — skipping",
                     readings.len(),
-                    batch.len()
+                    source,
+                    id,
+                    ingredients.len()
                 );
                 report.failed += 1;
             }
             Err(e) => {
-                tracing::warn!("extraction failed for a batch of {}: {e}", batch.len());
+                tracing::warn!("extraction failed for {source}/{id}: {e}");
                 report.failed += 1;
             }
         }
@@ -156,47 +134,54 @@ pub async fn enrich<E: Extractor>(
     Ok(report)
 }
 
-/// Load the whole structured cache into a map so [`crate::derive`] can reattach in
-/// memory — one query, not a lookup per line across the corpus.
-pub async fn load_cache(
-    conn: &Connection,
-) -> anyhow::Result<HashMap<(String, String), StructuredMeasure>> {
+/// Load every recipe's readings into a map so [`crate::derive`] can reattach in
+/// memory — one query, not a lookup per recipe.
+pub async fn load(conn: &Connection) -> anyhow::Result<HashMap<RecipeKey, Vec<StructuredMeasure>>> {
     let mut rows = conn
         .query(
-            "SELECT name, measure, structured FROM ingredient_structured",
+            "SELECT source, id, structured FROM ingredient_structures",
             (),
         )
         .await?;
     let mut map = HashMap::new();
     while let Some(row) = rows.next().await? {
-        let name: String = row.get(0)?;
-        let measure: String = row.get(1)?;
+        let source: String = row.get(0)?;
+        let id: String = row.get(1)?;
         let structured: String = row.get(2)?;
-        // A row that no longer deserializes (a shape change) is skipped, not fatal
-        // — the line simply stays unenriched until re-read.
-        if let Ok(sm) = serde_json::from_str::<StructuredMeasure>(&structured) {
-            map.insert((name, measure), sm);
+        // A row that no longer deserializes (a shape change) is skipped, not fatal.
+        if let Ok(readings) = serde_json::from_str::<Vec<StructuredMeasure>>(&structured) {
+            map.insert((source, id), readings);
         }
     }
     Ok(map)
 }
 
-/// Reattach cached readings onto a recipe's ingredients in place — the join
-/// `derive` performs, offline, from the cache. A line with no cache entry is left
-/// `None` (raw stays the source of truth).
+/// Reattach a recipe's readings onto its ingredients in place — the join `derive`
+/// performs, offline. Attaches only when the stored array still lines up with the
+/// recipe's ingredients (same count): a reading left over from a since-changed raw
+/// simply doesn't attach (the recipe re-enriches next run) rather than misaligning.
+/// A recipe with no row keeps `structured: None` — raw stays the source of truth.
 pub fn attach(
-    cache: &HashMap<(String, String), StructuredMeasure>,
+    readings_by_recipe: &HashMap<RecipeKey, Vec<StructuredMeasure>>,
+    source: &str,
+    id: &str,
     ingredients: &mut [Ingredient],
 ) {
-    for ing in ingredients.iter_mut() {
-        ing.structured = cache.get(&key(ing)).cloned();
+    let Some(readings) = readings_by_recipe.get(&(source.to_owned(), id.to_owned())) else {
+        return;
+    };
+    if readings.len() != ingredients.len() {
+        return;
+    }
+    for (ing, reading) in ingredients.iter_mut().zip(readings) {
+        ing.structured = Some(reading.clone());
     }
 }
 
-/// The `(name, measure)` keys already in the cache.
-async fn cached_keys(conn: &Connection) -> anyhow::Result<HashSet<(String, String)>> {
+/// The `(source, id)` of every recipe that already has a stored reading.
+async fn stored_recipes(conn: &Connection) -> anyhow::Result<HashSet<RecipeKey>> {
     let mut rows = conn
-        .query("SELECT name, measure FROM ingredient_structured", ())
+        .query("SELECT source, id FROM ingredient_structures", ())
         .await?;
     let mut set = HashSet::new();
     while let Some(row) = rows.next().await? {
@@ -205,38 +190,46 @@ async fn cached_keys(conn: &Connection) -> anyhow::Result<HashSet<(String, Strin
     Ok(set)
 }
 
-/// Every recipe's ingredient list, read from the derived view. A row whose JSON
-/// no longer parses yields an empty list rather than failing the run.
-async fn read_recipe_lines(conn: &Connection) -> anyhow::Result<Vec<Vec<Ingredient>>> {
-    let mut rows = conn.query("SELECT ingredients FROM recipes", ()).await?;
+/// Every recipe's `(source, id, ingredients)`, read from the derived view. A row
+/// whose JSON no longer parses yields an empty ingredient list (skipped) rather
+/// than failing the run.
+async fn recipe_ingredients(
+    conn: &Connection,
+) -> anyhow::Result<Vec<(String, String, Vec<Ingredient>)>> {
+    let mut rows = conn
+        .query("SELECT source, id, ingredients FROM recipes", ())
+        .await?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
-        let json: String = row.get(0)?;
-        out.push(serde_json::from_str::<Vec<Ingredient>>(&json).unwrap_or_default());
+        let source: String = row.get(0)?;
+        let id: String = row.get(1)?;
+        let json: String = row.get(2)?;
+        out.push((
+            source,
+            id,
+            serde_json::from_str::<Vec<Ingredient>>(&json).unwrap_or_default(),
+        ));
     }
     Ok(out)
 }
 
-/// Write one line's reading to the cache, keyed by the raw line, stamped with the
-/// model that produced it. `ON CONFLICT` refreshes structured + model + timestamp
-/// — but `enrich` skips already-cached lines, so this only fires on a deliberate
-/// re-capture (the cache cleared first), never as a silent per-run overwrite.
-async fn cache_put(
+/// Write one recipe's readings, keyed by `(source, id)`, stamped with the model.
+async fn store(
     conn: &Connection,
-    line: &Ingredient,
-    reading: &StructuredMeasure,
+    source: &str,
+    id: &str,
+    readings: &[StructuredMeasure],
     model: &str,
 ) -> anyhow::Result<()> {
-    let (name, measure) = key(line);
-    let structured = serde_json::to_string(reading)?;
+    let structured = serde_json::to_string(readings)?;
     conn.execute(
-        "INSERT INTO ingredient_structured (name, measure, structured, model)
+        "INSERT INTO ingredient_structures (source, id, structured, model)
          VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(name, measure) DO UPDATE SET
+         ON CONFLICT(source, id) DO UPDATE SET
             structured = excluded.structured,
             model      = excluded.model,
             created_at = unixepoch()",
-        libsql::params![name, measure, structured, model],
+        libsql::params![source, id, structured, model],
     )
     .await?;
     Ok(())
@@ -269,15 +262,12 @@ Rules:
 - Do not convert units or do any arithmetic — record what the line says. \
   Conversion and scaling happen deterministically downstream.";
 
-/// The production [`Extractor`]: one call per batch to an OpenAI-compatible
-/// `/chat/completions` endpoint, constrained by a strict `json_schema` response
-/// format so the reply is always valid, deserializable JSON.
-///
-/// Provider-neutral: `base_url`, `model`, and an optional `api_key` are all
+/// The production [`Extractor`]: one call per recipe to an OpenAI-compatible
+/// `/chat/completions` endpoint. Rust has no official Anthropic SDK — and the point
+/// is not to need one: `base_url`, `model`, and an optional `api_key` are all
 /// per-deployment config, so the same code targets OpenAI, OpenRouter, Together,
 /// Groq, or a local Ollama/vLLM without a change. `Clone` so it can live in the
-/// shared `AppState` — the inner `reqwest::Client` is `Arc`-backed, so cloning is
-/// cheap and shares one connection pool.
+/// shared `AppState` (the inner `reqwest::Client` is `Arc`-backed).
 #[derive(Clone)]
 pub struct OpenAiCompatExtractor {
     http: reqwest::Client,
@@ -387,7 +377,7 @@ fn request_body(model: &str, lines: &[Ingredient]) -> Value {
 
 /// Pull the readings out of a chat-completions response and check the count. A
 /// refusal, an empty/non-text reply, or a count mismatch is an error the engine
-/// records as a failed batch (those lines stay unenriched).
+/// records as a failed recipe (it stays unenriched).
 fn parse_response(text: &str, expected: usize) -> anyhow::Result<Vec<StructuredMeasure>> {
     let resp: ChatResponse = serde_json::from_str(text)?;
     let choice = resp
@@ -548,9 +538,8 @@ mod tests {
         }
     }
 
-    /// An extractor that echoes each line's name as the item and records every
-    /// batch it was asked to read — so a test can assert what actually hit "the
-    /// model", which is where dedup is proven.
+    /// An extractor that reads each line's name as the item and records every batch
+    /// it was asked to read — so a test can assert what actually hit "the model".
     #[derive(Default)]
     struct SpyExtractor {
         batches: Mutex<Vec<Vec<Ingredient>>>,
@@ -588,10 +577,10 @@ mod tests {
         .unwrap();
     }
 
-    /// The happy path: uncached lines get read and written to the cache; the
-    /// report counts them.
+    /// The happy path: a recipe with no reading yet gets one row, the whole
+    /// ingredient list read in a single call; the report counts recipes.
     #[tokio::test]
-    async fn enriches_uncached_lines_into_the_cache() {
+    async fn enriches_a_recipe_into_one_row() {
         let conn = conn().await;
         insert_recipe(
             &conn,
@@ -606,27 +595,27 @@ mod tests {
         assert_eq!(
             report,
             EnrichReport {
-                missing: 2,
-                enriched: 2,
+                missing: 1,
+                enriched: 1,
                 failed: 0
             }
         );
-        let cache = load_cache(&conn).await.unwrap();
-        assert_eq!(
-            cache
-                .get(&("flour".into(), "1 cup".into()))
-                .map(|m| &m.item),
-            Some(&"flour".to_string())
-        );
-        // A line with no measure keys on the empty string.
-        assert!(cache.contains_key(&("salt".into(), String::new())));
+        let loaded = load(&conn).await.unwrap();
+        let readings = loaded.get(&("themealdb".into(), "1".into())).unwrap();
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[0].item, "flour");
+
+        // One call carrying BOTH lines — per recipe, not per line. Locked last so
+        // the guard isn't held across the await above.
+        let batches = spy.batches.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 2);
     }
 
-    /// Each cached reading records which model produced it. Provenance for a
-    /// non-deterministic, drifting source — so "which model read this line" is
-    /// answerable and a deliberate re-capture can target readings from a worse one.
+    /// Each row records which model produced it — provenance for a
+    /// non-deterministic, drifting source.
     #[tokio::test]
-    async fn records_the_model_provenance_of_each_reading() {
+    async fn records_the_model_provenance() {
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
@@ -635,40 +624,17 @@ mod tests {
             .unwrap();
 
         let mut rows = conn
-            .query(
-                "SELECT model FROM ingredient_structured WHERE name = 'flour'",
-                (),
-            )
+            .query("SELECT model FROM ingredient_structures WHERE id = '1'", ())
             .await
             .unwrap();
         let model: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(model, "spy-model");
     }
 
-    /// A line shared across recipes is read once — the dedup the line-keyed cache
-    /// exists for. The spy proves the second recipe never reached the extractor.
+    /// A second run does nothing: the recipe already has a row. Idempotent, so the
+    /// scheduled pipeline only pays for genuinely new recipes.
     #[tokio::test]
-    async fn a_shared_line_is_extracted_once() {
-        let conn = conn().await;
-        insert_recipe(&conn, "1", &[ing("salt", Some("to taste"))]).await;
-        insert_recipe(&conn, "2", &[ing("salt", Some("to taste"))]).await;
-
-        let spy = SpyExtractor::default();
-        let report = enrich(&conn, &spy, false).await.unwrap();
-
-        assert_eq!(report.enriched, 1, "the shared line is read once");
-        let batches = spy.batches.lock().unwrap();
-        assert_eq!(
-            batches.len(),
-            1,
-            "only one recipe's batch reached the model"
-        );
-    }
-
-    /// A second run does nothing: everything is already cached. Idempotent, so the
-    /// scheduled pipeline only ever pays for genuinely new lines.
-    #[tokio::test]
-    async fn a_second_run_extracts_nothing() {
+    async fn a_second_run_skips_stored_recipes() {
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
@@ -684,34 +650,32 @@ mod tests {
                 failed: 0
             }
         );
+        assert_eq!(spy.batches.lock().unwrap().len(), 1, "no second call");
     }
 
-    /// `refresh` re-reads a line even when it is already cached — the deliberate
-    /// re-snapshot after a model change. The spy is called again; the reading is
-    /// overwritten (kept out of the routine path so a model switch never silently
-    /// re-pays for the corpus).
+    /// `refresh` re-reads a recipe even when already stored — the deliberate
+    /// re-snapshot after a model change; the routine run does not.
     #[tokio::test]
-    async fn refresh_recaptures_already_cached_lines() {
+    async fn refresh_recaptures_a_stored_recipe() {
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
         let spy = SpyExtractor::default();
         enrich(&conn, &spy, false).await.unwrap();
-        assert_eq!(spy.batches.lock().unwrap().len(), 1);
-
         let report = enrich(&conn, &spy, true).await.unwrap();
-        assert_eq!(report.enriched, 1, "refresh re-reads the cached line");
+
+        assert_eq!(report.enriched, 1, "refresh re-reads the stored recipe");
         assert_eq!(
             spy.batches.lock().unwrap().len(),
             2,
-            "the line reached the model again on refresh"
+            "read again on refresh"
         );
     }
 
-    /// A wrong reading count is a failed batch, not a misalignment — the lines
-    /// stay uncached rather than getting the wrong readings.
+    /// A wrong reading count is a failed recipe, not a misalignment — no row is
+    /// written, so the recipe stays unenriched rather than storing wrong readings.
     #[tokio::test]
-    async fn a_count_mismatch_fails_the_batch_without_caching() {
+    async fn a_count_mismatch_fails_without_storing() {
         struct MiscountExtractor;
         impl Extractor for MiscountExtractor {
             async fn extract(
@@ -720,7 +684,6 @@ mod tests {
             ) -> anyhow::Result<Vec<StructuredMeasure>> {
                 Ok(vec![item_reading("only one")]) // fewer than asked
             }
-
             fn provenance(&self) -> String {
                 "miscount".into()
             }
@@ -731,37 +694,51 @@ mod tests {
         let report = enrich(&conn, &MiscountExtractor, false).await.unwrap();
         assert_eq!(report.failed, 1);
         assert_eq!(report.enriched, 0);
-        assert!(load_cache(&conn).await.unwrap().is_empty());
+        assert!(load(&conn).await.unwrap().is_empty());
     }
 
-    /// `attach` is the join derive performs: cached lines get their reading, an
-    /// uncached line is left `None`.
+    /// `attach` is the join derive performs: a recipe's readings zip onto its
+    /// ingredients; a recipe with no row stays `None`; a stored array whose count
+    /// no longer matches (raw changed since) does not attach.
     #[test]
-    fn attach_reattaches_cached_readings_and_leaves_the_rest() {
-        let mut cache = HashMap::new();
-        cache.insert(
-            ("flour".to_string(), "1 cup".to_string()),
-            item_reading("flour"),
+    fn attach_zips_matching_readings_and_leaves_the_rest() {
+        let mut readings = HashMap::new();
+        readings.insert(
+            ("themealdb".to_string(), "1".to_string()),
+            vec![item_reading("flour"), item_reading("salt")],
         );
-        let mut ingredients = vec![ing("flour", Some("1 cup")), ing("pepper", None)];
+        // A stale row for recipe 2: one reading, but the recipe has two ingredients.
+        readings.insert(
+            ("themealdb".to_string(), "2".to_string()),
+            vec![item_reading("only one")],
+        );
 
-        attach(&cache, &mut ingredients);
-
+        let mut r1 = vec![ing("flour", Some("1 cup")), ing("salt", None)];
+        attach(&readings, "themealdb", "1", &mut r1);
         assert_eq!(
-            ingredients[0].structured.as_ref().map(|m| &m.item),
+            r1[0].structured.as_ref().map(|m| &m.item),
             Some(&"flour".to_string())
         );
         assert_eq!(
-            ingredients[1].structured, None,
-            "an uncached line stays None"
+            r1[1].structured.as_ref().map(|m| &m.item),
+            Some(&"salt".to_string())
         );
+
+        // Count mismatch → nothing attaches (re-enriches next run rather than misalign).
+        let mut r2 = vec![ing("a", None), ing("b", None)];
+        attach(&readings, "themealdb", "2", &mut r2);
+        assert!(r2.iter().all(|i| i.structured.is_none()));
+
+        // No row at all → None.
+        let mut r3 = vec![ing("x", None)];
+        attach(&readings, "themealdb", "9", &mut r3);
+        assert_eq!(r3[0].structured, None);
     }
 
     /// The response parser pulls readings out of a chat-completions body and
     /// enforces the count.
     #[test]
     fn parse_response_reads_the_message_content_and_checks_count() {
-        // A StructuredMeasure the way the model would return it under the schema.
         let reading = StructuredMeasure {
             item: "chopped tomatoes".into(),
             amount: Some(Amount::Quantified {
@@ -784,8 +761,7 @@ mod tests {
         let parsed = parse_response(&body, 1).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].item, "chopped tomatoes");
-
-        // The same body but the wrong expected count is rejected.
+        // The wrong expected count is rejected.
         assert!(parse_response(&body, 2).is_err());
     }
 
@@ -818,20 +794,15 @@ mod tests {
             note: None,
         };
         let instance = serde_json::to_value(&sample).unwrap();
-        // Every property the schema requires is present with an allowed shape.
-        assert_shape(&structured_measure_schema(), &instance);
-    }
-
-    /// A tiny structural check: object `required` keys exist and `anyOf` matches at
-    /// least one branch. Enough to catch a key or tag renamed on one side only,
-    /// without pulling in a full JSON-Schema validator.
-    fn assert_shape(schema: &Value, instance: &Value) {
         assert!(
-            matches_shape(schema, instance),
-            "instance {instance} does not match schema {schema}"
+            matches_shape(&structured_measure_schema(), &instance),
+            "instance {instance} does not match schema"
         );
     }
 
+    /// A tiny structural check: object `required` keys exist, `anyOf` matches at
+    /// least one branch, `enum` contains the value. Enough to catch a key or tag
+    /// renamed on one side only, without a full JSON-Schema validator.
     fn matches_shape(schema: &Value, instance: &Value) -> bool {
         if schema.get("type").and_then(|t| t.as_str()) == Some("null") {
             return instance.is_null();
