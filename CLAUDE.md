@@ -11,18 +11,23 @@ diagram in [README.md](./README.md).
   serving a valid recipe. It derives the host from the URL itself, never from a
   caller-supplied argument (the two could disagree). schema.org is kept but
   **demoted**: its allowlist is empty, so it claims nothing.
-- **`backend/`** — Rust/Axum on **Render**. **ingest** (fetch → derive → store
-  both halves), the corpus store, and **`derive`** (a command that rebuilds
-  `recipes` from `raw_imports`, no network). Fetching is SSRF-guarded and is
-  something ingest **does** — not an endpoint: there is no URL a caller can aim,
-  so the backend is not a relay.
+- **`backend/`** — Rust/Axum on **Render**. The corpus pipeline is three stages,
+  **one writer per table** (see #11): **sync** (fetch → write `raw_imports`),
+  **enrich** (LLM reads a recipe's ingredient lines → write
+  `ingredient_structures`), **derive** (rebuild `recipes` from raw + readings,
+  no network). `/api/ingest` runs all three; `derive`/`enrich` also run as CLI
+  commands for offline backfill. Fetching is SSRF-guarded and is something sync
+  **does** — not an endpoint: there is no URL a caller can aim, so the backend
+  is not a relay.
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
   site**. It **parses nothing** and **ingests nothing**: it reads **Turso**
   directly (read-only token) and renders. TanStack Query · Bits UI · Tailwind.
   UI states are declared as **Storybook** stories.
-- **Turso** (libSQL/SQLite) is the corpus, in two halves: **`raw_imports`**
-  (each recipe's payload as its source gave it) and **`recipes`** (the derived
-  view the app reads). Dev env + CI via **rainix** (`nix develop`).
+- **Turso** (libSQL/SQLite) is the corpus, in three tables, each with one
+  writer: **`raw_imports`** (sync — each recipe's payload as its source gave
+  it), **`ingredient_structures`** (enrich — the LLM reading, one row per
+  recipe), and **`recipes`** (derive — the view the app reads). Dev env + CI via
+  **rainix** (`nix develop`).
 
 ## Ingestion is server-driven; the client has no access to it (#49)
 
@@ -63,6 +68,39 @@ normalizer and run `derive`; that reaches rows imported before the fix, because
 re-fetching is not a recovery plan (sources 502 scrapers, die, and paywall).
 **Raw is not an archive**: we only want recipes, so a taxonomy or a browse of
 partials leaves no payload.
+
+## Ingredient enrichment is per-recipe and provider-neutral (#11)
+
+At ingest, an LLM reads each recipe's raw ingredient lines ("1 (14 oz) can",
+"2-3 cloves, minced", "to taste") into `StructuredMeasure`; deterministic code
+in `recipe-core` (`scaled`/`converted`) does the arithmetic. **Split by
+strength**: the model extracts, code converts/scales — never ask the model to do
+arithmetic.
+
+- **Per recipe, its own table.**
+  `ingredient_structures(source, id, structured,
+  model, created_at)` holds one
+  row per recipe — `structured` a JSON array aligned to the recipe's
+  ingredients. **Not** a generic `(kind, json)` container: a future enrichment
+  (nutrition, allergens) gets **its own table + extractor**, added by a
+  migration — that is where its shape is decided, not an untyped blob.
+  Per-recipe (not per-line) keeps the raw→enrich→derive cascade a clean
+  per-`(source,id)` chain.
+- **A capture, not a derivation.** `recipes` is a deterministic derivation of
+  raw; a reading is not — the model is non-deterministic and drifts, so it is a
+  point-in-time artifact (a peer of `raw_imports`). `model`/`created_at` are
+  provenance; `enrich --refresh` is the **deliberate** re-snapshot after a
+  better model, kept out of the routine path so a model change never silently
+  re-pays for the corpus. Don't call it "idempotent" — the _pipeline_ is stable
+  because we keep the capture, not because re-extracting would repeat.
+- **Provider is not baked in.** The LLM is behind an `Extractor` trait (tests
+  use a fixture — no live API in CI). Production is `OpenAiCompatExtractor`: any
+  OpenAI-compatible `/chat/completions` endpoint via `LLM_BASE_URL`/`LLM_MODEL`/
+  `LLM_API_KEY` (key optional for keyless local models). Reading a line into
+  JSON is a commodity task — don't marry the corpus to one vendor.
+- **Degrade-not-die**, like `INGEST_API_KEY`: unconfigured ⇒ enrich is a no-op,
+  recipes keep raw measures, the site still serves. Enrichment is an addition,
+  never a gate.
 
 ## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 

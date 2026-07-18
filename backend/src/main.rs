@@ -16,6 +16,7 @@
 mod auth;
 mod db;
 mod derive;
+mod enrich;
 mod error;
 mod ingest;
 mod proxy;
@@ -50,6 +51,11 @@ pub struct AppState {
     /// `Option` so the unset case cannot be compared against — see
     /// [`auth::ingest_key_from_env`].
     pub ingest_key: Option<String>,
+    /// The ingredient-enrichment extractor (#11) — any OpenAI-compatible endpoint,
+    /// built from `LLM_BASE_URL`/`LLM_MODEL` (+ optional `LLM_API_KEY`). `None`
+    /// when unconfigured: ingest still syncs and derives, just without new
+    /// structured readings — enrichment degrades, it does not gate.
+    pub extractor: Option<enrich::OpenAiCompatExtractor>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -194,6 +200,40 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `recipe-backend enrich [--refresh]` reads the corpus's ingredient lines into
+    // the structured cache (#11) via the LLM. Offline over data we already hold —
+    // no fetch — so it backfills existing rows without re-fetching, and runs as its
+    // own step to avoid the request timeout a one-shot over the whole corpus would
+    // risk inside `/api/ingest`. `derive` afterwards reattaches the readings onto
+    // `recipes`. A no-op without a key.
+    //
+    // Plain: only lines not already cached (the backfill + steady-state). With
+    // `--refresh`: re-read EVERY line and overwrite — the deliberate re-snapshot
+    // after switching to a better model. Kept opt-in so a model change never
+    // silently re-pays for the whole corpus.
+    if std::env::args().nth(1).as_deref() == Some("enrich") {
+        let refresh = std::env::args().nth(2).as_deref() == Some("--refresh");
+        let database = db::open().await?;
+        let conn = database.connect()?;
+        db::migrate(&conn).await?;
+        match enrich::OpenAiCompatExtractor::from_env() {
+            Some(extractor) => {
+                let report = enrich::enrich(&conn, &extractor, refresh).await?;
+                tracing::info!(
+                    refresh,
+                    missing = report.missing,
+                    enriched = report.enriched,
+                    failed = report.failed,
+                    "enrich complete"
+                );
+            }
+            None => tracing::warn!(
+                "LLM_BASE_URL/LLM_MODEL are not set — enrich is a no-op; lines stay unenriched"
+            ),
+        }
+        return Ok(());
+    }
+
     // Open the DB, ensure the schema is current, and build the shared state.
     let database = db::open().await?;
     let conn = database.connect()?;
@@ -209,12 +249,19 @@ async fn main() -> anyhow::Result<()> {
     if ingest_key.is_none() {
         tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
     }
+    // The enrichment extractor (#11) is optional the same way: missing it costs
+    // structured readings, not the service. Warn and serve; ingest/enrich degrade.
+    let extractor = enrich::OpenAiCompatExtractor::from_env();
+    if extractor.is_none() {
+        tracing::warn!("LLM_BASE_URL/LLM_MODEL are not set — ingredient enrichment is disabled; recipes keep raw measures only");
+    }
     let state = AppState {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
+        extractor,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -273,6 +320,9 @@ mod tests {
                 secure: false,
             },
             ingest_key,
+            // Enrichment is exercised in enrich.rs against a fixture extractor;
+            // the router tests are about the auth gate, so they need no LLM.
+            extractor: None,
         };
         (app(state), conn)
     }
