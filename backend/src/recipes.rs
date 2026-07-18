@@ -122,6 +122,7 @@ mod tests {
             ingredients: vec![Ingredient {
                 name: "water".into(),
                 measure: Some("1 cup".into()),
+                structured: None,
             }],
             instructions: "Boil.".into(),
             source_url: None,

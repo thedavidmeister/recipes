@@ -7,9 +7,11 @@
 //! logic therefore runs server-side and in-browser without duplication.
 
 pub mod adapters;
+pub mod measure;
 pub mod models;
 pub mod schema_org;
 pub mod themealdb;
 
 pub use adapters::{adapter_for, Adapter, IngestError};
+pub use measure::{Amount, Quantity, Size, StructuredMeasure};
 pub use models::{Ingredient, Recipe};
