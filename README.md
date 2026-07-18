@@ -209,6 +209,13 @@ nix develop
   (the `recipes-enrich` plugin), never the binary's. Install the plugin with
   `/plugin marketplace add thedavidmeister/recipes` then
   `/plugin install recipes-enrich@recipes`
+- **Enrich on a schedule (#59):** `scripts/enrich-cron.sh` drains the queue by
+  running the skill headless (Claude Code with `--plugin-dir`), looping
+  `enrich_pull → read → enrich_push` until empty. Copy
+  `scripts/enrich.env.example` to `.env.enrich` (gitignored —
+  `RECIPES_API_URL` + `INGEST_API_KEY` + `ENRICH_MODEL`) and add a crontab line.
+  The reading runs under this machine's Claude Code (Max plan), so it costs ~$0
+  and never touches the DB.
 - **Frontend:** `cd frontend && npm ci && npm run dev`
 - **Storybook:** `cd frontend && npm run storybook`
 

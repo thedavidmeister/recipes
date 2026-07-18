@@ -17,6 +17,7 @@ node_modules/
 *.db-shm
 *.db-wal
 .env
+.env.enrich
 !.env.example
 
 # Editor / OS
