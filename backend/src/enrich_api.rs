@@ -125,6 +125,17 @@ pub mod client {
         }
     }
 
+    /// A worker HTTP client with explicit timeouts, so a stalled or hung endpoint
+    /// fails the pull/push instead of blocking the worker forever (CodeRabbit, PR
+    /// #60). The `push` timeout has to cover the app's store + re-derive, so it is
+    /// generous rather than tight.
+    fn http() -> anyhow::Result<reqwest::Client> {
+        Ok(reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?)
+    }
+
     /// GET the pending recipes from the app and return the response body (the JSON
     /// array). The shared core of the `pull` CLI command and the `enrich_pull` MCP
     /// tool — neither prints; the caller decides what to do with the body.
@@ -134,11 +145,7 @@ pub mod client {
         if let Some(n) = limit {
             url.push_str(&format!("?limit={n}"));
         }
-        let resp = reqwest::Client::new()
-            .get(url)
-            .bearer_auth(&target.api_key)
-            .send()
-            .await?;
+        let resp = http()?.get(url).bearer_auth(&target.api_key).send().await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -165,7 +172,7 @@ pub mod client {
         let model = require_model(std::env::var("ENRICH_MODEL").ok())?;
         let body = json!({ "model": model, "readings": readings });
 
-        let resp = reqwest::Client::new()
+        let resp = http()?
             .post(format!("{}/api/enrich/results", target.base_url))
             .bearer_auth(&target.api_key)
             .json(&body)

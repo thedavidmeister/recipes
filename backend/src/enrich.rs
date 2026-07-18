@@ -182,7 +182,10 @@ pub async fn submit(
     for item in items {
         match current_ingredient_count(conn, &item.source, &item.id).await? {
             Some(count) if count == item.readings.len() => {
-                store(
+                // Only count and re-derive readings that actually landed: the guard
+                // no-ops a write an equal-or-newer run already superseded, and that
+                // must not read as accepted (CodeRabbit, PR #60).
+                let wrote = store(
                     conn,
                     &item.source,
                     &item.id,
@@ -191,8 +194,16 @@ pub async fn submit(
                     store_run,
                 )
                 .await?;
-                accepted.push((item.source, item.id));
-                report.accepted += 1;
+                if wrote {
+                    accepted.push((item.source, item.id));
+                    report.accepted += 1;
+                } else {
+                    report.rejected.push(Rejection {
+                        source: item.source,
+                        id: item.id,
+                        reason: "superseded — a newer run already stored a reading".into(),
+                    });
+                }
             }
             Some(count) => report.rejected.push(Rejection {
                 source: item.source,
@@ -294,6 +305,11 @@ pub fn attach(
 /// the run. The `run_id` guard (`WHERE excluded.run_id >=
 /// ingredient_structures.run_id`) stops a stale or partial run clobbering a newer
 /// reading; a deliberate re-read overwrites under a fresh (higher) run id.
+///
+/// Returns whether a row was actually written. The guard makes the upsert a **no-op**
+/// when an equal-or-newer run already holds the row (a concurrent run won the race),
+/// and a no-op affects zero rows — so the caller must not count that as a stored
+/// reading (CodeRabbit, PR #60).
 async fn store(
     conn: &Connection,
     source: &str,
@@ -301,21 +317,22 @@ async fn store(
     readings: &[StructuredMeasure],
     model: &str,
     run_id: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let structured = serde_json::to_string(readings)?;
-    conn.execute(
-        "INSERT INTO ingredient_structures (source, id, structured, model, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(source, id) DO UPDATE SET
-            structured = excluded.structured,
-            model      = excluded.model,
-            created_at = unixepoch(),
-            run_id     = excluded.run_id
-         WHERE excluded.run_id >= ingredient_structures.run_id",
-        libsql::params![source, id, structured, model, run_id],
-    )
-    .await?;
-    Ok(())
+    let affected = conn
+        .execute(
+            "INSERT INTO ingredient_structures (source, id, structured, model, run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source, id) DO UPDATE SET
+                structured = excluded.structured,
+                model      = excluded.model,
+                created_at = unixepoch(),
+                run_id     = excluded.run_id
+             WHERE excluded.run_id >= ingredient_structures.run_id",
+            libsql::params![source, id, structured, model, run_id],
+        )
+        .await?;
+    Ok(affected > 0)
 }
 
 #[cfg(test)]
@@ -497,7 +514,7 @@ mod tests {
         assert_eq!(r1.len(), 2);
         assert_eq!(r1[0].item, "flour");
         assert!(
-            loaded.get(&("themealdb".into(), "2".into())).is_none(),
+            !loaded.contains_key(&("themealdb".into(), "2".into())),
             "a rejected submission stores nothing"
         );
     }
@@ -586,23 +603,33 @@ mod tests {
                 .clone()
         };
 
-        store(&conn, "themealdb", "1", &[item_reading("run5")], "m", 5)
-            .await
-            .unwrap();
-        // An older run writing late must be a no-op.
-        store(&conn, "themealdb", "1", &[item_reading("run3")], "m", 3)
-            .await
-            .unwrap();
+        assert!(
+            store(&conn, "themealdb", "1", &[item_reading("run5")], "m", 5)
+                .await
+                .unwrap(),
+            "a fresh write lands"
+        );
+        // An older run writing late must be a no-op — and must report that it wrote
+        // nothing, so `submit` doesn't count it (CodeRabbit, PR #60).
+        assert!(
+            !store(&conn, "themealdb", "1", &[item_reading("run3")], "m", 3)
+                .await
+                .unwrap(),
+            "a stale write is a no-op"
+        );
         assert_eq!(
             read_item(&load(&conn).await.unwrap()),
             "run5",
             "an older run must not clobber a newer reading"
         );
 
-        // A newer run still wins.
-        store(&conn, "themealdb", "1", &[item_reading("run9")], "m", 9)
-            .await
-            .unwrap();
+        // A newer run still wins, and reports that it wrote.
+        assert!(
+            store(&conn, "themealdb", "1", &[item_reading("run9")], "m", 9)
+                .await
+                .unwrap(),
+            "a newer write lands"
+        );
         assert_eq!(read_item(&load(&conn).await.unwrap()), "run9");
     }
 

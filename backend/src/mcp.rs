@@ -15,7 +15,7 @@
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
@@ -23,7 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::enrich_api::client;
 
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EnrichPullParams {
     /// Maximum recipes to return. Omit for the server's default page size; the
     /// worker loops until the queue is empty regardless.
@@ -31,7 +31,7 @@ struct EnrichPullParams {
     limit: Option<usize>,
 }
 
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EnrichPushParams {
     /// The readings produced from the pulled lines: a JSON array with one entry per
     /// recipe, each `{ "source", "id", "readings": [StructuredMeasure, ...] }`, the
@@ -45,6 +45,11 @@ struct EnrichPushParams {
 /// [`client`], exactly as the CLI does.
 #[derive(Clone)]
 pub struct Enricher {
+    // Read by the `#[tool_handler]`-generated `ServerHandler` to route tool calls,
+    // but that read is inside macro-expanded code the dead-code lint doesn't trace
+    // (the rmcp examples blanket the file with `#![allow(dead_code)]` for the same
+    // reason). Kept scoped to the field.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Enricher>,
 }
 
