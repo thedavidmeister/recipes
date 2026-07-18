@@ -7,8 +7,8 @@
 //! that job runs **outside this app**. A worker on another machine pulls the work,
 //! a model reads the lines, and the worker pushes the results back. The app holds
 //! **no** model code, no prompt, and no provider credential: extraction lives
-//! entirely in `.claude/skills/enrich`, the skill that drives the loop. Keeping the
-//! model out of the service is the point — it is surface the service does not need.
+//! entirely in the `recipes-enrich` plugin's `enrich` skill, which drives the loop.
+//! Keeping the model out of the service is the point — it is surface it does not need.
 //!
 //! This module is the two ends of that queue, plus the storage between them:
 //!

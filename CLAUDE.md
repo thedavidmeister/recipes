@@ -84,13 +84,17 @@ the model extracts, code converts/scales — never ask the model to do arithmeti
 
 - **The model is not in the app.** Extraction runs **off the deployed service**
   — a worker pulls the recipes still needing reading and pushes readings back
-  (`recipe-backend enrich pull|push`), driven by the enrich skill
-  (`.claude/skills/enrich`). The binary is pure I/O; the skill does the reading.
-  The service holds **no** model code, prompt, or provider key — that is surface
-  a recipe API does not need, and keeping it out is the point (#59).
-  `pull`/`push` are batch commands over the corpus (like `derive`), **not** new
-  endpoints. Extending _what_ gets enriched is a migration + a table, never a
-  new route or a provider config.
+  (`recipe-backend enrich pull|push`), driven by the enrich skill (the
+  `recipes-enrich` plugin's `enrich` skill). The binary is pure I/O; the skill
+  does the reading. The skill ships as a plugin in **this repo's own
+  marketplace** (`.claude-plugin/marketplace.json`), so it versions in lockstep
+  with the binary it drives — install via
+  `/plugin marketplace add thedavidmeister/recipes` then
+  `/plugin install recipes-enrich@recipes`. The service holds **no** model code,
+  prompt, or provider key — that is surface a recipe API does not need, and
+  keeping it out is the point (#59). `pull`/`push` are batch commands over the
+  corpus (like `derive`), **not** new endpoints. Extending _what_ gets enriched
+  is a migration + a table, never a new route or a provider config.
 - **Per recipe, its own table.**
   `ingredient_structures(source, id, structured,
   model, created_at)` holds one

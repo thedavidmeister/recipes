@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace-manifest.json",
+  "name": "recipes",
+  "owner": {
+    "name": "thedavidmeister"
+  },
+  "description": "Plugins for the recipes corpus. Hosted in the app repo itself, so a plugin versions in lockstep with the binary it drives.",
+  "plugins": [
+    {
+      "name": "recipes-enrich",
+      "source": "./plugins/recipes-enrich",
+      "description": "The ingredient-enrichment worker: a fixed pull -> read -> push loop that reads a recipe's raw ingredient lines into structured measures, using recipe-backend as its only I/O."
+    }
+  ]
+}

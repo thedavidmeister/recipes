@@ -129,8 +129,8 @@ payload" holds by construction: recipes only come from deriving raw.
 convert — a model does the extraction, deterministic code the arithmetic. It
 runs **off the deployed service**: a worker pulls the recipes still needing
 reading and pushes readings back (`recipe-backend enrich pull|push`), driven by
-the enrich skill (`.claude/skills/enrich`), so the app carries no model code,
-prompt, or provider key. `pull`/`push` are batch commands over the corpus,
+the enrich skill (the `recipes-enrich` plugin), so the app carries no model
+code, prompt, or provider key. `pull`/`push` are batch commands over the corpus,
 **not** endpoints. A push is stored only when the reading count still matches
 the recipe's current lines. It is **degrade-not-die** — until the worker runs,
 recipes keep their raw measures and the site still serves — and a reading is a
@@ -197,8 +197,11 @@ nix develop
   `cargo run --manifest-path backend/Cargo.toml -- enrich pull [--limit N]`
   prints the recipes that still need reading as JSON; `… -- enrich push` reads
   readings JSON on stdin, stores them, and re-derives the affected recipes. The
-  reading itself is done by the enrich skill (`.claude/skills/enrich`), not the
-  binary — these two commands are its only I/O
+  reading itself is done by the enrich skill (the `recipes-enrich` plugin), not
+  the binary — these two commands are its only I/O. The skill ships as the
+  `recipes-enrich` plugin in this repo's own marketplace: install it with
+  `/plugin marketplace add thedavidmeister/recipes` then
+  `/plugin install recipes-enrich@recipes`
 - **Frontend:** `cd frontend && npm ci && npm run dev`
 - **Storybook:** `cd frontend && npm run storybook`
 

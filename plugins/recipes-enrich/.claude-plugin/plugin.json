@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "recipes-enrich",
+  "displayName": "Recipe Enrichment Worker",
+  "description": "Drives the recipes corpus enrichment (#11, #59): pull recipes that still need a structured reading of their ingredient lines, read each line, and push the results back. The recipe-backend binary does all I/O; the skill does only the reading. No version field, so it tracks the repo it ships in — the skill stays in lockstep with the binary's contract.",
+  "author": {
+    "name": "thedavidmeister"
+  },
+  "homepage": "https://github.com/thedavidmeister/recipes",
+  "repository": "https://github.com/thedavidmeister/recipes",
+  "license": "MIT"
+}
