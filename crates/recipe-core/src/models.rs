@@ -77,7 +77,8 @@ mod tests {
         );
 
         // A row stored before this field existed (no key at all) reads back None.
-        let old: Ingredient = serde_json::from_str(r#"{"name":"flour","measure":"1 cup"}"#).unwrap();
+        let old: Ingredient =
+            serde_json::from_str(r#"{"name":"flour","measure":"1 cup"}"#).unwrap();
         assert_eq!(old.structured, None);
     }
 
@@ -99,8 +100,7 @@ mod tests {
                 note: None,
             }),
         };
-        let back: Ingredient =
-            serde_json::from_str(&serde_json::to_string(&ing).unwrap()).unwrap();
+        let back: Ingredient = serde_json::from_str(&serde_json::to_string(&ing).unwrap()).unwrap();
         assert_eq!(ing, back);
         // Raw stays the source of truth next to the enrichment.
         assert_eq!(back.measure.as_deref(), Some("500 g"));
