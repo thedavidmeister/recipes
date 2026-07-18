@@ -59,6 +59,9 @@ export interface Recipe {
 export interface User {
   telegram_user_id: string;
   username: string | null;
+  /** Whether this user is the configured admin — the frontend uses it to offer the
+   * health dashboard. Not a security boundary: the admin endpoints re-check. */
+  is_admin: boolean;
 }
 
 /**
@@ -107,3 +110,41 @@ export interface WalkStop {
  * - `ready` — a walk is in hand (possibly empty, if the corpus is).
  */
 export type WalkStatus = "pending" | "error" | "ready";
+
+/** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */
+export interface ModelCount {
+  model: string;
+  count: number;
+}
+
+/** A row of the `runs` table (`admin::RunRow`). `finished_at` is null while a run
+ * is still going — a long-null one is the died-mid-flight signal. */
+export interface RunRow {
+  id: number;
+  kind: string;
+  status: string;
+  started_at: number;
+  finished_at: number | null;
+}
+
+/** The health dashboard's data (`admin::HealthStats`): corpus + enrichment + runs. */
+export interface HealthStats {
+  recipes: number;
+  raw: number;
+  enriched: number;
+  enriched_pct: number;
+  by_model: ModelCount[];
+  recent_runs: RunRow[];
+  running: number;
+}
+
+/**
+ * Render state for the admin health dashboard. The page owns the query; the
+ * `HealthDashboard` component owns rendering.
+ *
+ * - `pending` — loading the snapshot.
+ * - `error` — the endpoint could not be reached.
+ * - `forbidden` — logged in, but not the admin (a 403 from the endpoint).
+ * - `ready` — a snapshot is in hand.
+ */
+export type HealthStatus = "pending" | "error" | "forbidden" | "ready";

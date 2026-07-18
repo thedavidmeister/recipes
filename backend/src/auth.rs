@@ -146,6 +146,30 @@ pub fn ingest_key_from_env() -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
+/// The configured admin's Telegram id, or `None` when unset.
+///
+/// Identity is the numeric Telegram id, **not** the username — the same rule the
+/// login path follows ([`upsert_user`]): a username can be released and reclaimed by
+/// someone else, so keying admin on it could hand admin to a different person. Find
+/// your id in `GET /api/me`.
+pub fn admin_id_from_env() -> Option<String> {
+    std::env::var("ADMIN_TELEGRAM_USER_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// Is this Telegram id the configured admin? **False when no admin is configured** —
+/// an unset `ADMIN_TELEGRAM_USER_ID` grants admin to nobody (fail closed), the same
+/// stance as the ingest key. A plain compare is fine: the id is not a secret (the
+/// session already authenticated the user), so there is no timing signal worth
+/// hiding.
+pub fn is_admin(state: &AppState, telegram_user_id: &str) -> bool {
+    state
+        .admin_id
+        .as_deref()
+        .is_some_and(|admin| admin == telegram_user_id)
+}
+
 /// How the session cookie is scoped.
 #[derive(Debug, Clone)]
 pub struct CookieConfig {
@@ -453,10 +477,15 @@ pub async fn require_session(
 /// also how the tab that showed the bot link notices the login: when the
 /// completion link is opened in the same browser, the cookie appears and this
 /// starts answering.
-pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<MeResponse> {
+pub async fn me(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Json<MeResponse> {
+    let is_admin = is_admin(&state, &user.telegram_user_id);
     Json(MeResponse {
         telegram_user_id: user.telegram_user_id,
         username: user.username,
+        is_admin,
     })
 }
 
@@ -464,6 +493,10 @@ pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<MeResponse> {
 pub struct MeResponse {
     pub telegram_user_id: String,
     pub username: Option<String>,
+    /// Whether this user is the configured admin — the frontend uses it to show the
+    /// admin-only health dashboard. Not a security boundary by itself: the admin
+    /// endpoints re-check server-side; this only decides what the UI offers.
+    pub is_admin: bool,
 }
 
 /// `POST /api/auth/logout` — drop the session.

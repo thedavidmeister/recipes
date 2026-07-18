@@ -17,6 +17,7 @@
 //!   recipe-backend enrich push              POST readings (from stdin) to the app
 //!   recipe-backend mcp                       MCP stdio server: enrich_pull/push tools
 
+mod admin;
 mod auth;
 mod db;
 mod derive;
@@ -58,6 +59,10 @@ pub struct AppState {
     /// `Option` so the unset case cannot be compared against — see
     /// [`auth::ingest_key_from_env`].
     pub ingest_key: Option<String>,
+    /// The admin's Telegram id (`ADMIN_TELEGRAM_USER_ID`), gating the admin-only
+    /// views (the health dashboard). `None` means no admin — the views 403 for
+    /// everyone, fail-closed like the ingest key. See [`auth::is_admin`].
+    pub admin_id: Option<String>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -99,6 +104,9 @@ pub fn app(state: AppState) -> Router {
         // The `pick` engine (#47): a variety-first wander over the corpus. A
         // person-facing read, so it is session-gated like the rest.
         .route("/walk", get(walk::walk))
+        // Admin-only health dashboard: session-gated here, then narrowed to the
+        // configured admin inside the handler ([`admin::health`]).
+        .route("/admin/health", get(admin::health))
         .route("/auth/logout", post(auth::logout))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -281,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
+        admin_id: auth::admin_id_from_env(),
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -339,6 +348,8 @@ mod tests {
                 secure: false,
             },
             ingest_key,
+            // The test sessions below log in as "4242", so make that the admin.
+            admin_id: Some("4242".into()),
         };
         (app(state), conn)
     }
@@ -653,6 +664,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn admin_health_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri("/api/admin/health");
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// The admin dashboard needs a session at all, like everything else.
+    #[tokio::test]
+    async fn admin_health_requires_a_session() {
+        let (app, _conn) = test_app().await;
+        let res = app.oneshot(admin_health_req(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A logged-in NON-admin is refused — 403, not 401: the session is valid, the
+    /// identity just is not the admin. `4242` is the configured admin (see the test
+    /// state), so `9999` must not pass.
+    #[tokio::test]
+    async fn admin_health_forbids_a_non_admin() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "9999").await;
+        let res = app
+            .oneshot(admin_health_req(Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The admin passes the gate and gets the stats. The test corpus is empty, so
+    /// the counts are 0 — what this pins is the gate + the response shape.
+    #[tokio::test]
+    async fn admin_health_serves_the_admin() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(admin_health_req(Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        for key in [
+            "recipes",
+            "raw",
+            "enriched",
+            "enriched_pct",
+            "by_model",
+            "recent_runs",
+            "running",
+        ] {
+            assert!(json.get(key).is_some(), "missing {key} in {json}");
+        }
+        assert_eq!(json["recipes"], 0, "empty test corpus");
     }
 
     fn walk_req(cookie: Option<&str>) -> Request<Body> {
