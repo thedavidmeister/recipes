@@ -10,15 +10,21 @@
 //! and no client is involved.
 //!
 //! Usage:
-//!   recipe-backend                    serve
-//!   recipe-backend derive [<source>]  rebuild `recipes` from `raw_imports`
+//!   recipe-backend                          serve
+//!   recipe-backend migrate                  apply pending DB migrations
+//!   recipe-backend derive [<source>]        rebuild `recipes` from `raw_imports`
+//!   recipe-backend enrich pull [--limit N]  GET the app's pending recipes (#59)
+//!   recipe-backend enrich push              POST readings (from stdin) to the app
+//!   recipe-backend mcp                       MCP stdio server: enrich_pull/push tools
 
 mod auth;
 mod db;
 mod derive;
 mod enrich;
+mod enrich_api;
 mod error;
 mod ingest;
+mod mcp;
 mod proxy;
 mod recipes;
 mod runs;
@@ -52,11 +58,6 @@ pub struct AppState {
     /// `Option` so the unset case cannot be compared against — see
     /// [`auth::ingest_key_from_env`].
     pub ingest_key: Option<String>,
-    /// The ingredient-enrichment extractor (#11) — any OpenAI-compatible endpoint,
-    /// built from `LLM_BASE_URL`/`LLM_MODEL` (+ optional `LLM_API_KEY`). `None`
-    /// when unconfigured: ingest still syncs and derives, just without new
-    /// structured readings — enrichment degrades, it does not gate.
-    pub extractor: Option<enrich::OpenAiCompatExtractor>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -77,6 +78,12 @@ pub fn app(state: AppState) -> Router {
     // point: the client no longer decides what enters the corpus.
     let machine = Router::new()
         .route("/ingest", post(ingest::ingest))
+        // The enrichment work queue (#59): a worker pulls the recipes still needing
+        // a structured reading and pushes readings back. Machine-gated like
+        // `/ingest` — the worker authenticates as infrastructure, and the app (never
+        // the worker, never a model) is what writes the corpus.
+        .route("/enrich/pending", get(enrich_api::pending))
+        .route("/enrich/results", post(enrich_api::results))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -166,6 +173,15 @@ fn cors() -> CorsLayer {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+
+    // `recipe-backend mcp` — the enrichment MCP server (#59). Dispatched before the
+    // default tracing init on purpose: that subscriber writes to stdout, and stdout
+    // is the MCP JSON-RPC channel, so `mcp::serve` installs its own stderr
+    // subscriber instead. Anything on stdout here would corrupt the protocol.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        return mcp::serve().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -212,45 +228,34 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // `recipe-backend enrich [--refresh]` reads the corpus's ingredient lines into
-    // the structured cache (#11) via the LLM. Offline over data we already hold —
-    // no fetch — so it backfills existing rows without re-fetching, and runs as its
-    // own step to avoid the request timeout a one-shot over the whole corpus would
-    // risk inside `/api/ingest`. `derive` afterwards reattaches the readings onto
-    // `recipes`. A no-op without a key.
+    // `recipe-backend enrich pull|push` — the enrichment worker's two commands
+    // (#59). They are HTTP clients for the app's machine-gated enrich endpoints, not
+    // database access: the worker reads work and writes readings through the app's
+    // front door (`RECIPES_API_URL` + `INGEST_API_KEY`), so the model behind the
+    // enrich skill never touches the corpus. No model logic here either — the skill
+    // does the reading; `push` only stamps `ENRICH_MODEL` and forwards. No DB, so
+    // this opens no connection.
     //
-    // Plain: only lines not already cached (the backfill + steady-state). With
-    // `--refresh`: re-read EVERY line and overwrite — the deliberate re-snapshot
-    // after switching to a better model. Kept opt-in so a model change never
-    // silently re-pays for the whole corpus.
+    //   enrich pull [--limit N]  → GET the recipes still needing reading, to stdout
+    //   enrich push              → POST readings read from stdin, print the result
     if std::env::args().nth(1).as_deref() == Some("enrich") {
-        let refresh = std::env::args().nth(2).as_deref() == Some("--refresh");
-        let database = db::open().await?;
-        let conn = database.connect()?;
-        db::migrate(&conn).await?;
-        match enrich::OpenAiCompatExtractor::from_env() {
-            Some(extractor) => {
-                let run_id = runs::begin(&conn, if refresh { "refresh" } else { "enrich" }).await?;
-                let outcome = enrich::enrich(&conn, &extractor, refresh, run_id).await;
-                let status = if outcome.is_ok() {
-                    runs::COMPLETED
-                } else {
-                    runs::FAILED
-                };
-                runs::finish(&conn, run_id, status).await?;
-                let report = outcome?;
-                tracing::info!(
-                    run_id,
-                    refresh,
-                    missing = report.missing,
-                    enriched = report.enriched,
-                    failed = report.failed,
-                    "enrich complete"
-                );
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                enrich_api::client::pull(limit).await?;
             }
-            None => tracing::warn!(
-                "LLM_BASE_URL/LLM_MODEL are not set — enrich is a no-op; lines stay unenriched"
-            ),
+            Some("push") => enrich_api::client::push().await?,
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend enrich pull [--limit N] | recipe-backend enrich push"
+                );
+                std::process::exit(2);
+            }
         }
         return Ok(());
     }
@@ -270,19 +275,12 @@ async fn main() -> anyhow::Result<()> {
     if ingest_key.is_none() {
         tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
     }
-    // The enrichment extractor (#11) is optional the same way: missing it costs
-    // structured readings, not the service. Warn and serve; ingest/enrich degrade.
-    let extractor = enrich::OpenAiCompatExtractor::from_env();
-    if extractor.is_none() {
-        tracing::warn!("LLM_BASE_URL/LLM_MODEL are not set — ingredient enrichment is disabled; recipes keep raw measures only");
-    }
     let state = AppState {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
-        extractor,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -341,9 +339,6 @@ mod tests {
                 secure: false,
             },
             ingest_key,
-            // Enrichment is exercised in enrich.rs against a fixture extractor;
-            // the router tests are about the auth gate, so they need no LLM.
-            extractor: None,
         };
         (app(state), conn)
     }
@@ -527,6 +522,137 @@ mod tests {
             StatusCode::OK,
             "a live session must pass the gate and reach the handler"
         );
+    }
+
+    fn enrich_pending_req(auth: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri("/api/enrich/pending");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    fn enrich_results_req(auth: Option<&str>, body: &str) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/enrich/results")
+            .header("content-type", "application/json");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    /// The enrich queue is machine-only, like ingest (#59): no key, no entry, and a
+    /// session does not open it either — proving the new routes sit behind the
+    /// machine gate, so a model reaching the app through them still can't get past
+    /// the same door a browser can't.
+    #[tokio::test]
+    async fn enrich_endpoints_require_the_api_key_not_a_session() {
+        let (app, conn) = test_app().await;
+        for req in [
+            enrich_pending_req(None),
+            enrich_results_req(None, r#"{"model":"m","readings":[]}"#),
+        ] {
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "no key must be refused"
+            );
+        }
+        // A perfectly good session must not open a machine endpoint.
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/enrich/pending")
+                    .header("cookie", format!("recipes_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session must not open the enrich queue"
+        );
+    }
+
+    /// End to end through the router: a worker GETs pending, POSTs readings with the
+    /// machine key, and the **app** stores + derives them. The caller only speaks
+    /// HTTP+JSON — it never touches the database.
+    #[tokio::test]
+    async fn enrich_pending_then_results_round_trips_through_the_app() {
+        let (app, conn) = test_app().await;
+        conn.execute(
+            "INSERT INTO raw_imports (source, id, raw, source_url) VALUES ('themealdb','1',?1,?2)",
+            libsql::params![
+                r#"{"meals":[{"idMeal":"1","strMeal":"T","strInstructions":"go","strIngredient1":"Flour","strMeasure1":"1 cup"}]}"#,
+                "https://www.themealdb.com/api/json/v1/1/lookup.php?i=1"
+            ],
+        )
+        .await
+        .unwrap();
+        derive::derive(&conn, None, 1).await.unwrap();
+
+        let auth = "Bearer test-ingest-key";
+
+        // pending lists the un-enriched recipe.
+        let res = app
+            .clone()
+            .oneshot(enrich_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 1);
+        assert_eq!(pending[0]["id"], "1");
+
+        // push a matching reading.
+        let submit = r#"{"model":"claude-opus-4-8","readings":[{"source":"themealdb","id":"1","readings":[{"item":"flour","amount":null,"preparation":null,"note":null}]}]}"#;
+        let res = app
+            .clone()
+            .oneshot(enrich_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["accepted"], 1);
+
+        // pending is now empty — the recipe has a reading.
+        let res = app.oneshot(enrich_pending_req(Some(auth))).await.unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            pending.as_array().unwrap().len(),
+            0,
+            "reading stored → no longer pending"
+        );
+    }
+
+    /// A blank model is a bad request, not a silently-stored placeholder (CodeRabbit).
+    #[tokio::test]
+    async fn enrich_results_rejects_a_blank_model() {
+        let (app, _conn) = test_app().await;
+        let res = app
+            .oneshot(enrich_results_req(
+                Some("Bearer test-ingest-key"),
+                r#"{"model":"  ","readings":[]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     fn walk_req(cookie: Option<&str>) -> Request<Body> {

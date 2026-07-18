@@ -47,27 +47,15 @@ services:
         # still serves — only /api/ingest closes (503), so the corpus goes stale
         # rather than the site going down. Unset is closed, never open.
         sync: false
-      # --- Ingredient enrichment (#11) --------------------------------------
-      # An LLM reads raw ingredient lines ("1 (14 oz) can", "2-3 cloves", "to
-      # taste") into structured data at ingest, cached in Turso. Provider-neutral:
-      # any OpenAI-compatible /chat/completions endpoint — OpenAI, OpenRouter,
-      # Together, Groq, or a self-hosted model. All three are OPTIONAL and behave
-      # like INGEST_API_KEY: unset ⇒ enrichment is skipped and recipes keep raw
-      # measures only; the corpus still ingests and serves. Enrichment is active
-      # only when both LLM_BASE_URL and LLM_MODEL are set.
-      - key: LLM_BASE_URL
-        # The API root, e.g. https://api.openai.com/v1 or
-        # https://openrouter.ai/api/v1 — /chat/completions is appended.
-        sync: false
-      - key: LLM_MODEL
-        # The model id at that endpoint, e.g. gpt-4o-mini or
-        # meta-llama/llama-3.1-8b-instruct. No default — it is endpoint-specific.
-        sync: false
-      - key: LLM_API_KEY
-        # The bearer token for the endpoint. Optional even when the other two are
-        # set — a self-hosted/local endpoint may need none. Never reaches the
-        # browser (server-side only, like the Turso write token).
-        sync: false
+      # --- Ingredient enrichment (#11, #59) ---------------------------------
+      # Enrichment runs OFF this service: an out-of-band worker (the recipes-enrich
+      # skill, driving `recipe-backend enrich pull|push`) reads ingredient lines into
+      # structured data and pushes readings back through the app's two machine-gated
+      # enrich endpoints — GET /api/enrich/pending and POST /api/enrich/results. The
+      # app validates and writes; the worker (and the model behind it) never touches
+      # the database. Those endpoints reuse the INGEST_API_KEY above, so there is
+      # nothing new to set here — the model code and provider key live on the worker,
+      # never on Render.
       - key: FRONTEND_BASE_URL
         # Where the bot's completion link points. Must be the site the user's
         # browser can open, not this service.

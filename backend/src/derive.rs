@@ -9,8 +9,10 @@
 //! That matters because re-fetching is not a reliable recovery plan: sources 502
 //! scrapers (Serious Eats already does), disappear, and paywall.
 
+use std::collections::HashMap;
+
 use libsql::Connection;
-use recipe_core::adapters;
+use recipe_core::{adapters, StructuredMeasure};
 
 use crate::enrich;
 use crate::recipes::upsert;
@@ -63,41 +65,113 @@ pub async fn derive(
         let id: String = row.get(1)?;
         let raw: String = row.get(2)?;
         let source_url: Option<String> = row.get(3)?;
-
-        let Some(adapter) = adapters::adapter_by_id(&source) else {
-            report.skipped += 1;
-            continue;
-        };
-
-        // A payload is a document for its own adapter, so deriving runs the
-        // ingest path rather than a parallel one. schema.org reads a recipe's id
-        // and source_url off the URL, so pass the URL it was fetched at.
-        let url = source_url.unwrap_or_else(|| format!("https://{source}/{id}"));
-        let Ok(parsed) = url::Url::parse(&url) else {
-            report.skipped += 1;
-            continue;
-        };
-
-        let ingested = (adapter.normalize)(&parsed, &raw);
-        if ingested.is_empty() {
-            report.skipped += 1;
-            continue;
-        }
-        for mut item in ingested {
-            // Reattach the enrichment half. Normalization produces `structured:
-            // None`; `derive` is the join that fills it from the recipe's readings.
-            enrich::attach(
-                &readings,
-                &item.recipe.source,
-                &item.recipe.id,
-                &mut item.recipe.ingredients,
-            );
-            upsert(conn, &item.recipe, run_id).await?;
-            report.derived += 1;
-        }
+        normalize_and_upsert(
+            conn,
+            &source,
+            &id,
+            &raw,
+            source_url,
+            &readings,
+            run_id,
+            &mut report,
+        )
+        .await?;
     }
 
     Ok(report)
+}
+
+/// Re-derive just these recipes from their raw payloads — the targeted counterpart
+/// to [`derive`]'s full replay. Used by [`crate::enrich::submit`] so a worker's
+/// freshly-pushed readings appear in `recipes` at once, without replaying the whole
+/// corpus (which would be O(corpus) work per pushed batch). A recipe with no raw
+/// payload — never synced, or a stale key — is counted skipped, not an error.
+pub async fn derive_recipes(
+    conn: &Connection,
+    recipes: &[(String, String)],
+    run_id: i64,
+) -> anyhow::Result<Report> {
+    let mut report = Report::default();
+    // One load for the batch, same as `derive` — reattaching is then in-memory.
+    let readings = enrich::load(conn).await?;
+
+    for (source, id) in recipes {
+        let mut rows = conn
+            .query(
+                "SELECT raw, source_url FROM raw_imports WHERE source = ?1 AND id = ?2",
+                libsql::params![source.clone(), id.clone()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            report.skipped += 1;
+            continue;
+        };
+        report.read += 1;
+        let raw: String = row.get(0)?;
+        let source_url: Option<String> = row.get(1)?;
+        normalize_and_upsert(
+            conn,
+            source,
+            id,
+            &raw,
+            source_url,
+            &readings,
+            run_id,
+            &mut report,
+        )
+        .await?;
+    }
+
+    Ok(report)
+}
+
+/// Normalize one raw payload and upsert whatever it yields, reattaching readings.
+/// Shared by [`derive`] (the full replay) and [`derive_recipes`] (the targeted
+/// re-derive), so both take exactly the same path from a raw row to a `recipes`
+/// row.
+#[allow(clippy::too_many_arguments)]
+async fn normalize_and_upsert(
+    conn: &Connection,
+    source: &str,
+    id: &str,
+    raw: &str,
+    source_url: Option<String>,
+    readings: &HashMap<(String, String), Vec<StructuredMeasure>>,
+    run_id: i64,
+    report: &mut Report,
+) -> anyhow::Result<()> {
+    let Some(adapter) = adapters::adapter_by_id(source) else {
+        report.skipped += 1;
+        return Ok(());
+    };
+
+    // A payload is a document for its own adapter, so deriving runs the ingest path
+    // rather than a parallel one. schema.org reads a recipe's id and source_url off
+    // the URL, so pass the URL it was fetched at.
+    let url = source_url.unwrap_or_else(|| format!("https://{source}/{id}"));
+    let Ok(parsed) = url::Url::parse(&url) else {
+        report.skipped += 1;
+        return Ok(());
+    };
+
+    let ingested = (adapter.normalize)(&parsed, raw);
+    if ingested.is_empty() {
+        report.skipped += 1;
+        return Ok(());
+    }
+    for mut item in ingested {
+        // Reattach the enrichment half. Normalization produces `structured: None`;
+        // `derive` is the join that fills it from the recipe's readings.
+        enrich::attach(
+            readings,
+            &item.recipe.source,
+            &item.recipe.id,
+            &mut item.recipe.ingredients,
+        );
+        upsert(conn, &item.recipe, run_id).await?;
+        report.derived += 1;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -306,5 +380,71 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<String>(0).unwrap(), "Toast");
         assert_eq!(row.get::<String>(1).unwrap(), "Toast it.");
+    }
+
+    /// `derive_recipes` re-derives only the recipes it is handed — the targeted path
+    /// the enrich push (#59) uses to reattach a just-pushed batch without replaying
+    /// the corpus. A reading stored for a recipe *not* named must not attach, which
+    /// is what proves the scope.
+    #[tokio::test]
+    async fn derive_recipes_reattaches_only_the_named_recipes() {
+        let conn = conn().await;
+        insert_raw(
+            &conn,
+            "1",
+            r#"{"meals":[{"idMeal":"1","strMeal":"A","strInstructions":"go","strIngredient1":"Bread","strMeasure1":"1 slice"}]}"#,
+        )
+        .await;
+        insert_raw(
+            &conn,
+            "2",
+            r#"{"meals":[{"idMeal":"2","strMeal":"B","strInstructions":"go","strIngredient1":"Water","strMeasure1":"1 cup"}]}"#,
+        )
+        .await;
+        // Populate `recipes` from raw (no readings yet).
+        derive(&conn, None, 1).await.unwrap();
+        // Readings now exist for BOTH recipes...
+        conn.execute(
+            "INSERT INTO ingredient_structures (source, id, structured)
+             VALUES ('themealdb','1',?1),('themealdb','2',?2)",
+            libsql::params![
+                r#"[{"item":"bread","amount":null,"preparation":null,"note":null}]"#,
+                r#"[{"item":"water","amount":null,"preparation":null,"note":null}]"#
+            ],
+        )
+        .await
+        .unwrap();
+
+        // ...but only recipe 1 is re-derived.
+        let report = derive_recipes(&conn, &[("themealdb".into(), "1".into())], 2)
+            .await
+            .unwrap();
+        assert_eq!(report.derived, 1, "exactly the one named recipe");
+
+        let one = read_ingredients(&conn, "1").await;
+        assert_eq!(one[0].structured.as_ref().unwrap().item, "bread");
+        let two = read_ingredients(&conn, "2").await;
+        assert_eq!(
+            two[0].structured, None,
+            "a recipe not named is left as it was"
+        );
+    }
+
+    /// A key with no raw payload is skipped, not an error — the push may name a
+    /// recipe whose raw has since been removed.
+    #[tokio::test]
+    async fn derive_recipes_skips_a_missing_raw() {
+        let conn = conn().await;
+        let report = derive_recipes(&conn, &[("themealdb".into(), "ghost".into())], 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            Report {
+                read: 0,
+                derived: 0,
+                skipped: 1
+            }
+        );
     }
 }

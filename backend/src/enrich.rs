@@ -1,139 +1,261 @@
-//! Enrich: read a recipe's raw ingredient lines into structure (#11), stored
-//! per recipe.
+//! Enrichment: the corpus's structured ingredient readings (#11), and the queue an
+//! off-Render worker uses to produce them (#59).
 //!
-//! This is the one **networked** stage of the corpus pipeline and the only writer
-//! of `ingredient_structures`. For each recipe that has no structured reading yet,
-//! it sends that recipe's ingredient lines to an LLM in one call and stores the
-//! readings — one row per recipe (`source, id`), the array aligned to the recipe's
-//! ingredient order. It does **not** write `recipes` — [`crate::derive`] reattaches
-//! from this table, which is why deriving stays offline.
+//! A reading turns a recipe's raw ingredient line ("1 (14 oz) can chopped
+//! tomatoes") into a [`StructuredMeasure`] deterministic code can scale and
+//! convert. Producing one is an LLM job — reading messy text into structure — and
+//! that job runs **outside this app**. A worker on another machine pulls the work,
+//! a model reads the lines, and the worker pushes the results back. The app holds
+//! **no** model code, no prompt, and no provider credential: extraction lives
+//! entirely in the `recipes-enrich` plugin's `enrich` skill, which drives the loop.
+//! Keeping the model out of the service is the point — it is surface it does not need.
 //!
-//! **Per recipe, not per line.** A reading is captured once per recipe (matching
-//! #11's "once per recipe at write time"), which keeps the raw → enrich → derive
-//! chain a clean per-`(source, id)` cascade with no line→recipe fan-out, and lets
-//! this be a dedicated table rather than a generic `(kind, json)` container. A
-//! future enrichment (nutrition, allergens) is its own table + extractor, not a
-//! row here.
+//! This module is the two ends of that queue, plus the storage between them:
+//!
+//! - [`pending`] — recipes with no reading yet, and their ingredient lines. Served
+//!   by [`crate::enrich_api::pending`] (`GET /api/enrich/pending`).
+//! - [`submit`] — a batch of the worker's readings, validated (the recipe still
+//!   exists, the reading count matches its *current* ingredient list), stored, and
+//!   re-derived so the recipe shows them at once. Driven by
+//!   [`crate::enrich_api::results`] (`POST /api/enrich/results`).
+//! - [`store`]/[`load`]/[`attach`] — where a reading lands, and the join
+//!   [`crate::derive`] performs to hang readings back onto `recipes`.
+//!
+//! **The worker never touches the database.** It reaches all of this over the app's
+//! two machine-gated endpoints (above), so the app stays the **sole DB writer** and
+//! the Turso write token never leaves it. An LLM sits on the far side of the app's
+//! front door — it produces JSON the app validates before writing, and holds no DB
+//! connection, no token, and no SQL. Letting a model write the corpus directly is
+//! exactly what this shape refuses.
 //!
 //! **A capture, not a derivation.** `recipes` is a deterministic derivation of
 //! `raw_imports`; a reading is not — a model is non-deterministic and drifts, so a
-//! reading is a point-in-time artifact, a peer of `raw_imports`. We keep the
-//! capture rather than re-roll a drifting model on every derive; each row records
-//! its provenance ([`Extractor::provenance`] + a timestamp) so drift is auditable,
-//! and a deliberate re-snapshot with a better model is an explicit act (`enrich
-//! --refresh`), never a silent side effect.
+//! reading is a point-in-time artifact, a peer of `raw_imports`, carrying its
+//! provenance (the model id + a timestamp). `pull` only offers recipes with no
+//! reading yet; re-reading the corpus with a better model is a deliberate act, not
+//! a silent side effect.
 //!
-//! The LLM boundary is a trait ([`Extractor`]) so the engine runs against a
-//! fixture with no network, the same shape [`crate::sync`] uses — and so the
-//! **provider is not baked in**. Reading a line into JSON is a commodity task, so
-//! production is [`OpenAiCompatExtractor`]: one call to any OpenAI-compatible
-//! `/chat/completions` endpoint (OpenAI, OpenRouter, Together, Groq, a local
-//! Ollama/vLLM), picked per deployment by env, constrained to the
-//! [`StructuredMeasure`] schema by structured output.
+//! **Per recipe, not per line.** One reading array is captured per recipe, aligned
+//! to its ingredient order, stored as one row keyed by `(source, id)`. That keeps
+//! the raw → enrich → derive chain a clean per-`(source, id)` cascade, and lets
+//! this be a dedicated table rather than a generic `(kind, json)` container — a
+//! future enrichment (nutrition, allergens) is its own table, not a row here.
 //!
-//! **Degrade-not-die.** With no endpoint configured there is no extractor, enrich
-//! is a no-op, and derive leaves recipes' `structured` fields `None`. The corpus
-//! still ingests and serves — enrichment is an addition, never a gate.
+//! **Degrade-not-die.** Until the worker has run, recipes carry `structured: None`
+//! and the corpus serves raw measures. Enrichment is an addition, never a gate.
 
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
+use std::collections::HashMap;
 
 use libsql::Connection;
 use recipe_core::{Ingredient, StructuredMeasure};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+
+use crate::{derive, runs};
 
 /// A recipe key: `(source, id)`.
 type RecipeKey = (String, String);
 
-/// Reads one recipe's ingredient lines into one [`StructuredMeasure`] each.
-///
-/// Production is an LLM call ([`OpenAiCompatExtractor`]); tests use a fixture. The
-/// engine is generic over this so it runs with no network, and so no single LLM
-/// vendor is wired into the corpus.
-pub trait Extractor {
-    /// Read `lines` into one reading each, **in the same order**. Must return
-    /// exactly `lines.len()` readings or an error — the engine treats a count
-    /// mismatch as a failed extraction rather than misaligning readings onto the
-    /// wrong lines.
-    fn extract(
-        &self,
-        lines: &[Ingredient],
-    ) -> impl Future<Output = anyhow::Result<Vec<StructuredMeasure>>>;
+// --- The pull side: what still needs reading. ----------------------------------
 
-    /// A label for what produced these readings — the model id — stored with each
-    /// recipe's row. Provenance for a non-deterministic, versioned source: it makes
-    /// "which model read this recipe, and roughly when" answerable, and a targeted
-    /// re-capture possible.
-    fn provenance(&self) -> String;
+/// One recipe awaiting enrichment: its key and the raw ingredient lines to read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingRecipe {
+    pub source: String,
+    pub id: String,
+    pub ingredients: Vec<PendingLine>,
 }
 
-/// What an enrich run did — counted in **recipes**.
-#[derive(Debug, Default, PartialEq, Eq, Serialize)]
-pub struct EnrichReport {
-    /// Recipes that needed a reading this run (had ingredients, not yet stored).
-    pub missing: usize,
-    /// Recipes newly read and written to `ingredient_structures`.
-    pub enriched: usize,
-    /// Recipes whose extraction failed — left unstored, so the recipe stays
-    /// unenriched until a later run succeeds. A failure is never fatal.
-    pub failed: usize,
+/// A single line to read — the raw text as the source wrote it, nothing structured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingLine {
+    pub name: String,
+    pub measure: Option<String>,
 }
 
-/// Read every recipe that has no structured reading yet into `ingredient_structures`.
+/// Recipes with no stored reading yet, capped at `limit`.
 ///
-/// One [`Extractor`] call per recipe (its whole ingredient list), one row written
-/// per recipe. A recipe already stored is skipped — not because a reading is a pure
-/// function of its lines (it is not; the model drifts), but because we keep the
-/// captured reading rather than re-roll on every run. `refresh = true` is the
-/// deliberate re-capture: re-read every recipe and overwrite with the current
-/// model, kept out of the routine path so a model change never silently re-pays for
-/// the whole corpus.
-pub async fn enrich<E: Extractor>(
-    conn: &Connection,
-    extractor: &E,
-    refresh: bool,
-    run_id: i64,
-) -> anyhow::Result<EnrichReport> {
-    let mut report = EnrichReport::default();
-    let provenance = extractor.provenance();
-    // Recipes we can skip: on a routine run, everything already stored; on a
-    // refresh, none — every recipe is re-read.
-    let done: HashSet<RecipeKey> = if refresh {
-        HashSet::new()
-    } else {
-        stored_recipes(conn).await?
-    };
+/// A left join for "no row in `ingredient_structures`". Recipes with no ingredients
+/// are excluded in SQL (`json_array_length > 0`): there is nothing to read, and if
+/// one were returned the worker's "loop until pending is empty" would never
+/// terminate — an empty recipe never earns a reading, so it never leaves the queue.
+pub async fn pending(conn: &Connection, limit: usize) -> anyhow::Result<Vec<PendingRecipe>> {
+    let limit = limit.max(1) as i64;
+    let mut rows = conn
+        .query(
+            "SELECT r.source, r.id, r.ingredients
+             FROM recipes r
+             LEFT JOIN ingredient_structures s ON s.source = r.source AND s.id = r.id
+             WHERE s.id IS NULL
+               AND json_valid(r.ingredients)
+               AND json_array_length(r.ingredients) > 0
+             LIMIT ?1",
+            libsql::params![limit],
+        )
+        .await?;
 
-    for (source, id, ingredients) in recipe_ingredients(conn).await? {
-        if ingredients.is_empty() || done.contains(&(source.clone(), id.clone())) {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let source: String = row.get(0)?;
+        let id: String = row.get(1)?;
+        let json: String = row.get(2)?;
+        // Parsed for the line text. `json_array_length` already required a JSON
+        // array, so a parse failure here is not expected — skip rather than fail the
+        // whole pull if it somehow happens.
+        let ingredients: Vec<Ingredient> = serde_json::from_str(&json).unwrap_or_default();
+        if ingredients.is_empty() {
             continue;
         }
-        report.missing += 1;
+        out.push(PendingRecipe {
+            source,
+            id,
+            ingredients: ingredients
+                .into_iter()
+                .map(|i| PendingLine {
+                    name: i.name,
+                    measure: i.measure,
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}
 
-        match extractor.extract(&ingredients).await {
-            Ok(readings) if readings.len() == ingredients.len() => {
-                store(conn, &source, &id, &readings, &provenance, run_id).await?;
-                report.enriched += 1;
+// --- The push side: the worker's readings. -------------------------------------
+
+/// One recipe's readings as the worker submits them: the key, and the readings in
+/// the recipe's ingredient order. Provenance (the model) is stamped by the `push`
+/// command from its environment, not carried here — the skill does not hardcode a
+/// model id.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SubmittedReadings {
+    pub source: String,
+    pub id: String,
+    pub readings: Vec<StructuredMeasure>,
+}
+
+/// A submission that could not be stored, and why — surfaced so the worker (and a
+/// person reading the run) sees what was dropped rather than a silent miss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rejection {
+    pub source: String,
+    pub id: String,
+    pub reason: String,
+}
+
+/// What a `push` did.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SubmitReport {
+    /// Recipes whose readings were stored.
+    pub accepted: usize,
+    /// Recipes re-derived so their readings show in `recipes` now.
+    pub derived: usize,
+    /// Submissions dropped, with the reason.
+    pub rejected: Vec<Rejection>,
+}
+
+/// Store a batch of the worker's readings, then re-derive the accepted recipes.
+///
+/// Runs entirely server-side: the [`crate::enrich_api::results`] handler calls this
+/// with what a worker POSTed. Each submission is validated before it is stored: the
+/// recipe must still exist, and its reading count must match the recipe's
+/// **current** ingredient list. A mismatch means the raw changed between the
+/// worker's pull and its push, so the readings would misalign — it is rejected (the
+/// recipe re-enters [`pending`] and is read again) rather than stored wrong.
+///
+/// Two runs, deliberately: readings are stored under one run, then the reattach is
+/// derived under a **fresh run allocated after storage**. Reusing a single run id
+/// would race a concurrent ingest — if an ingest derived `recipes` between this
+/// push's start and its reattach, the guard (`excluded.run_id >= recipes.run_id`)
+/// would reject the reattach, leaving the stored reading unattached until the next
+/// full derive. Allocating the derive run last makes it newer than any run that has
+/// already touched `recipes`, so the reattach always wins; a later ingest re-reads
+/// and reattaches it anyway. (CodeRabbit, PR #60.)
+pub async fn submit(
+    conn: &Connection,
+    items: Vec<SubmittedReadings>,
+    model: &str,
+) -> anyhow::Result<SubmitReport> {
+    let mut report = SubmitReport::default();
+    let mut accepted: Vec<RecipeKey> = Vec::new();
+
+    let store_run = runs::begin(conn, "enrich").await?;
+    for item in items {
+        match current_ingredient_count(conn, &item.source, &item.id).await? {
+            Some(count) if count == item.readings.len() => {
+                // Only count and re-derive readings that actually landed: the guard
+                // no-ops a write an equal-or-newer run already superseded, and that
+                // must not read as accepted (CodeRabbit, PR #60).
+                let wrote = store(
+                    conn,
+                    &item.source,
+                    &item.id,
+                    &item.readings,
+                    model,
+                    store_run,
+                )
+                .await?;
+                if wrote {
+                    accepted.push((item.source, item.id));
+                    report.accepted += 1;
+                } else {
+                    report.rejected.push(Rejection {
+                        source: item.source,
+                        id: item.id,
+                        reason: "superseded — a newer run already stored a reading".into(),
+                    });
+                }
             }
-            Ok(readings) => {
-                tracing::warn!(
-                    "extractor returned {} readings for {}/{} ({} lines) — skipping",
-                    readings.len(),
-                    source,
-                    id,
-                    ingredients.len()
-                );
-                report.failed += 1;
-            }
-            Err(e) => {
-                tracing::warn!("extraction failed for {source}/{id}: {e}");
-                report.failed += 1;
-            }
+            Some(count) => report.rejected.push(Rejection {
+                source: item.source,
+                id: item.id,
+                reason: format!(
+                    "reading count {} does not match the recipe's {count} ingredients \
+                     (raw changed since pull?)",
+                    item.readings.len()
+                ),
+            }),
+            None => report.rejected.push(Rejection {
+                source: item.source,
+                id: item.id,
+                reason: "no such recipe".into(),
+            }),
         }
+    }
+    runs::finish(conn, store_run, runs::COMPLETED).await?;
+
+    // The derive run is allocated *here*, after storage — see the doc comment.
+    if !accepted.is_empty() {
+        let derive_run = runs::begin(conn, "derive").await?;
+        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
+            .await?
+            .derived;
+        runs::finish(conn, derive_run, runs::COMPLETED).await?;
     }
     Ok(report)
 }
+
+/// The number of ingredients a recipe currently has, or `None` if there is no such
+/// recipe — the count a submission's readings must match.
+async fn current_ingredient_count(
+    conn: &Connection,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<Option<usize>> {
+    let mut rows = conn
+        .query(
+            "SELECT ingredients FROM recipes WHERE source = ?1 AND id = ?2",
+            libsql::params![source.to_owned(), id.to_owned()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let json: String = row.get(0)?;
+    let ingredients: Vec<Ingredient> = serde_json::from_str(&json).unwrap_or_default();
+    Ok(Some(ingredients.len()))
+}
+
+// --- Storage + the derive-time join. -------------------------------------------
 
 /// Load every recipe's readings into a map so [`crate::derive`] can reattach in
 /// memory — one query, not a lookup per recipe.
@@ -179,45 +301,15 @@ pub fn attach(
     }
 }
 
-/// The `(source, id)` of every recipe that already has a stored reading.
-async fn stored_recipes(conn: &Connection) -> anyhow::Result<HashSet<RecipeKey>> {
-    let mut rows = conn
-        .query("SELECT source, id FROM ingredient_structures", ())
-        .await?;
-    let mut set = HashSet::new();
-    while let Some(row) = rows.next().await? {
-        set.insert((row.get::<String>(0)?, row.get::<String>(1)?));
-    }
-    Ok(set)
-}
-
-/// Every recipe's `(source, id, ingredients)`, read from the derived view. A row
-/// whose JSON no longer parses yields an empty ingredient list (skipped) rather
-/// than failing the run.
-async fn recipe_ingredients(
-    conn: &Connection,
-) -> anyhow::Result<Vec<(String, String, Vec<Ingredient>)>> {
-    let mut rows = conn
-        .query("SELECT source, id, ingredients FROM recipes", ())
-        .await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source: String = row.get(0)?;
-        let id: String = row.get(1)?;
-        let json: String = row.get(2)?;
-        out.push((
-            source,
-            id,
-            serde_json::from_str::<Vec<Ingredient>>(&json).unwrap_or_default(),
-        ));
-    }
-    Ok(out)
-}
-
-/// Write one recipe's readings, keyed by `(source, id)`, stamped with the model
-/// and the run. The `run_id` guard (`WHERE excluded.run_id >=
+/// Write one recipe's readings, keyed by `(source, id)`, stamped with the model and
+/// the run. The `run_id` guard (`WHERE excluded.run_id >=
 /// ingredient_structures.run_id`) stops a stale or partial run clobbering a newer
-/// reading; `--refresh` overwrites under a fresh (higher) run id.
+/// reading; a deliberate re-read overwrites under a fresh (higher) run id.
+///
+/// Returns whether a row was actually written. The guard makes the upsert a **no-op**
+/// when an equal-or-newer run already holds the row (a concurrent run won the race),
+/// and a no-op affects zero rows — so the caller must not count that as a stored
+/// reading (CodeRabbit, PR #60).
 async fn store(
     conn: &Connection,
     source: &str,
@@ -225,306 +317,27 @@ async fn store(
     readings: &[StructuredMeasure],
     model: &str,
     run_id: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let structured = serde_json::to_string(readings)?;
-    conn.execute(
-        "INSERT INTO ingredient_structures (source, id, structured, model, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(source, id) DO UPDATE SET
-            structured = excluded.structured,
-            model      = excluded.model,
-            created_at = unixepoch(),
-            run_id     = excluded.run_id
-         WHERE excluded.run_id >= ingredient_structures.run_id",
-        libsql::params![source, id, structured, model, run_id],
-    )
-    .await?;
-    Ok(())
-}
-
-// --- The production extractor: any OpenAI-compatible chat-completions endpoint. -
-
-/// Guardrails for the extraction. The schema constrains the *shape*; this
-/// constrains the *reading* — most importantly, not inventing ingredients.
-const SYSTEM_PROMPT: &str = "\
-You normalize cooking-recipe ingredient lines into structured data. You are given \
-a JSON array of lines, each with a `name` and an optional `measure` (the raw \
-quantity text, exactly as the source wrote it). Return one reading per line, in \
-the same order, matching the provided schema.
-
-Rules:
-- `item` is the ingredient itself, taken from the line — never invent an \
-  ingredient the line does not name. If `name` is the ingredient, use it; if the \
-  item is folded into the measure text (name empty, measure \"1 cup flour\"), pull \
-  the item out of it.
-- `amount` is null when the line states no quantity at all.
-- A plain number is `{kind: exact}`. A range like \"2-3\" is `{kind: range}`.
-- A phrase with no number — \"to taste\", \"a pinch\", \"a splash\" — is a \
-  qualitative amount. Do not invent a number for it.
-- Put preparation (\"minced\", \"finely chopped\") in `preparation`, and anything \
-  else the line carries (\"to serve\", \"optional\", \"plus extra\") in `note`. \
-  Leave each null when absent.
-- A size annotation like \"1 (14 oz) can\" is quantity 1, unit \"can\", size \
-  {quantity 14, unit \"oz\"}.
-- Do not convert units or do any arithmetic — record what the line says. \
-  Conversion and scaling happen deterministically downstream.";
-
-/// The production [`Extractor`]: one call per recipe to an OpenAI-compatible
-/// `/chat/completions` endpoint. Rust has no official Anthropic SDK — and the point
-/// is not to need one: `base_url`, `model`, and an optional `api_key` are all
-/// per-deployment config, so the same code targets OpenAI, OpenRouter, Together,
-/// Groq, or a local Ollama/vLLM without a change. `Clone` so it can live in the
-/// shared `AppState` (the inner `reqwest::Client` is `Arc`-backed).
-#[derive(Clone)]
-pub struct OpenAiCompatExtractor {
-    http: reqwest::Client,
-    /// The API root, e.g. `https://api.openai.com/v1` — `/chat/completions` is
-    /// appended. Trailing slash trimmed so the join never doubles up.
-    base_url: String,
-    /// `None` for a keyless endpoint (a local model). Sent as `Authorization:
-    /// Bearer` when present.
-    api_key: Option<String>,
-    model: String,
-}
-
-impl OpenAiCompatExtractor {
-    /// Build from the environment, or `None` when enrichment is not configured —
-    /// the caller then skips it rather than failing.
-    ///
-    /// Active iff **both** `LLM_BASE_URL` and `LLM_MODEL` are set: there is no
-    /// sensible universal default for either (the model depends on the endpoint),
-    /// and defaulting the URL to one vendor is exactly the lock-in this design
-    /// avoids. `LLM_API_KEY` is optional — a local endpoint needs none, and an
-    /// empty one is filtered so it can't send a blank `Bearer`.
-    pub fn from_env() -> Option<Self> {
-        let base_url = non_empty_env("LLM_BASE_URL")?;
-        let model = non_empty_env("LLM_MODEL")?;
-        let api_key = non_empty_env("LLM_API_KEY");
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .ok()?;
-        Some(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            api_key,
-            model,
-        })
-    }
-}
-
-/// An env var, trimmed, or `None` when unset or empty.
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_owned())
-        .filter(|v| !v.is_empty())
-}
-
-impl Extractor for OpenAiCompatExtractor {
-    async fn extract(&self, lines: &[Ingredient]) -> anyhow::Result<Vec<StructuredMeasure>> {
-        if lines.is_empty() {
-            return Ok(vec![]);
-        }
-        let mut req = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&request_body(&self.model, lines));
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req.send().await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("llm endpoint responded {status}: {text}");
-        }
-        parse_response(&text, lines.len())
-    }
-
-    fn provenance(&self) -> String {
-        self.model.clone()
-    }
-}
-
-/// The chat-completions request: the lines as JSON, and the readings schema as a
-/// strict `json_schema` response format so the reply is always valid,
-/// deserializable JSON. `max_tokens` (not `max_completion_tokens`) for the widest
-/// compatibility across OpenAI-compatible endpoints.
-fn request_body(model: &str, lines: &[Ingredient]) -> Value {
-    let numbered: Vec<Value> = lines
-        .iter()
-        .map(|l| json!({ "name": l.name, "measure": l.measure }))
-        .collect();
-    json!({
-        "model": model,
-        "max_tokens": 4096,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            {
-                "role": "user",
-                "content": format!(
-                    "Read these {n} ingredient lines into structure. Return exactly \
-                     {n} readings, in this order:\n{}",
-                    serde_json::to_string_pretty(&numbered).unwrap_or_default(),
-                    n = lines.len(),
-                ),
-            },
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "ingredient_readings",
-                "strict": true,
-                "schema": readings_schema(),
-            },
-        },
-    })
-}
-
-/// Pull the readings out of a chat-completions response and check the count. A
-/// refusal, an empty/non-text reply, or a count mismatch is an error the engine
-/// records as a failed recipe (it stays unenriched).
-fn parse_response(text: &str, expected: usize) -> anyhow::Result<Vec<StructuredMeasure>> {
-    let resp: ChatResponse = serde_json::from_str(text)?;
-    let choice = resp
-        .choices
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no choices in the response"))?;
-    if let Some(refusal) = choice.message.refusal {
-        anyhow::bail!("model refused the extraction: {refusal}");
-    }
-    let content = choice
-        .message
-        .content
-        .ok_or_else(|| anyhow::anyhow!("no content in the response message"))?;
-    let readings: Readings = serde_json::from_str(&content)?;
-    if readings.readings.len() != expected {
-        anyhow::bail!(
-            "expected {expected} readings, got {}",
-            readings.readings.len()
-        );
-    }
-    Ok(readings.readings)
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChatMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatMessage {
-    /// The model's text — the JSON we asked for. `null` on a refusal.
-    content: Option<String>,
-    /// Present (with a reason) when the model declined under structured outputs.
-    #[serde(default)]
-    refusal: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Readings {
-    readings: Vec<StructuredMeasure>,
-}
-
-// --- The JSON schema, mirroring the serde representation of StructuredMeasure. --
-// Built by hand rather than derived because the wire schema and the Rust type are
-// two sides of the same contract; a mismatch shows up immediately as a parse
-// failure in the round-trip test below. The type is non-recursive (Size is flat),
-// which is what lets it be a structured-output schema at all.
-
-/// `{ "readings": [StructuredMeasure, ...] }`.
-fn readings_schema() -> Value {
-    obj(&[(
-        "readings",
-        json!({ "type": "array", "items": structured_measure_schema() }),
-    )])
-}
-
-fn structured_measure_schema() -> Value {
-    obj(&[
-        ("item", json!({ "type": "string" })),
-        ("amount", nullable(amount_schema())),
-        ("preparation", nullable(json!({ "type": "string" }))),
-        ("note", nullable(json!({ "type": "string" }))),
-    ])
-}
-
-fn amount_schema() -> Value {
-    json!({ "anyOf": [
-        obj(&[
-            ("kind", tag("quantified")),
-            ("quantity", quantity_schema()),
-            ("unit", nullable(json!({ "type": "string" }))),
-            ("size", nullable(size_schema())),
-        ]),
-        obj(&[
-            ("kind", tag("qualitative")),
-            ("text", json!({ "type": "string" })),
-        ]),
-    ]})
-}
-
-fn quantity_schema() -> Value {
-    json!({ "anyOf": [
-        obj(&[
-            ("kind", tag("exact")),
-            ("value", json!({ "type": "number" })),
-        ]),
-        obj(&[
-            ("kind", tag("range")),
-            ("low", json!({ "type": "number" })),
-            ("high", json!({ "type": "number" })),
-        ]),
-    ]})
-}
-
-fn size_schema() -> Value {
-    obj(&[
-        ("quantity", quantity_schema()),
-        ("unit", nullable(json!({ "type": "string" }))),
-    ])
-}
-
-/// A closed object schema: every listed property required, nothing else allowed —
-/// the form strict structured output wants.
-fn obj(props: &[(&str, Value)]) -> Value {
-    let required: Vec<&str> = props.iter().map(|(k, _)| *k).collect();
-    let properties: serde_json::Map<String, Value> = props
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), v.clone()))
-        .collect();
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": required,
-        "properties": properties,
-    })
-}
-
-/// A `#[serde(tag = "kind")]` discriminator, as a single-value `enum` rather than
-/// `const` — `enum` is in the strict-mode subset every OpenAI-compatible endpoint
-/// supports, whereas `const` is not universal.
-fn tag(value: &str) -> Value {
-    json!({ "enum": [value] })
-}
-
-/// `T | null`, for the `Option<_>` fields (which serialize as `null`, not absent).
-fn nullable(schema: Value) -> Value {
-    json!({ "anyOf": [schema, { "type": "null" }] })
+    let affected = conn
+        .execute(
+            "INSERT INTO ingredient_structures (source, id, structured, model, run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source, id) DO UPDATE SET
+                structured = excluded.structured,
+                model      = excluded.model,
+                created_at = unixepoch(),
+                run_id     = excluded.run_id
+             WHERE excluded.run_id >= ingredient_structures.run_id",
+            libsql::params![source, id, structured, model, run_id],
+        )
+        .await?;
+    Ok(affected > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use recipe_core::measure::{Amount, Quantity, Size};
-    use std::sync::Mutex;
 
     fn ing(name: &str, measure: Option<&str>) -> Ingredient {
         Ingredient {
@@ -542,24 +355,6 @@ mod tests {
             amount: None,
             preparation: None,
             note: None,
-        }
-    }
-
-    /// An extractor that reads each line's name as the item and records every batch
-    /// it was asked to read — so a test can assert what actually hit "the model".
-    #[derive(Default)]
-    struct SpyExtractor {
-        batches: Mutex<Vec<Vec<Ingredient>>>,
-    }
-
-    impl Extractor for SpyExtractor {
-        async fn extract(&self, lines: &[Ingredient]) -> anyhow::Result<Vec<StructuredMeasure>> {
-            self.batches.lock().unwrap().push(lines.to_vec());
-            Ok(lines.iter().map(|l| item_reading(&l.name)).collect())
-        }
-
-        fn provenance(&self) -> String {
-            "spy-model".into()
         }
     }
 
@@ -584,10 +379,50 @@ mod tests {
         .unwrap();
     }
 
-    /// The happy path: a recipe with no reading yet gets one row, the whole
-    /// ingredient list read in a single call; the report counts recipes.
+    async fn insert_raw(conn: &Connection, id: &str, raw: &str) {
+        conn.execute(
+            "INSERT INTO raw_imports (source, id, raw, source_url) VALUES ('themealdb', ?1, ?2, ?3)",
+            libsql::params![
+                id,
+                raw,
+                format!("https://www.themealdb.com/api/json/v1/1/lookup.php?i={id}")
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The `structured` of a recipe's first ingredient, as stored in `recipes`.
+    async fn read_structured(conn: &Connection, id: &str) -> Option<StructuredMeasure> {
+        let mut rows = conn
+            .query(
+                "SELECT ingredients FROM recipes WHERE id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        let json: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let ings: Vec<Ingredient> = serde_json::from_str(&json).unwrap();
+        ings.into_iter().next().unwrap().structured
+    }
+
+    /// The most recent run id of a given kind — the store (`enrich`) or derive run a
+    /// push opened.
+    async fn last_run_id(conn: &Connection, kind: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                "SELECT MAX(id) FROM runs WHERE kind = ?1",
+                libsql::params![kind],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    /// `pending` lists exactly the recipes with no reading yet, carrying their raw
+    /// lines; an already-enriched recipe drops out.
     #[tokio::test]
-    async fn enriches_a_recipe_into_one_row() {
+    async fn pending_lists_unenriched_recipes_with_their_lines() {
         let conn = conn().await;
         insert_recipe(
             &conn,
@@ -595,92 +430,168 @@ mod tests {
             &[ing("flour", Some("1 cup")), ing("salt", None)],
         )
         .await;
-
-        let spy = SpyExtractor::default();
-        let report = enrich(&conn, &spy, false, 1).await.unwrap();
-
-        assert_eq!(
-            report,
-            EnrichReport {
-                missing: 1,
-                enriched: 1,
-                failed: 0
-            }
-        );
-        let loaded = load(&conn).await.unwrap();
-        let readings = loaded.get(&("themealdb".into(), "1".into())).unwrap();
-        assert_eq!(readings.len(), 2);
-        assert_eq!(readings[0].item, "flour");
-
-        // One call carrying BOTH lines — per recipe, not per line. Locked last so
-        // the guard isn't held across the await above.
-        let batches = spy.batches.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 2);
-    }
-
-    /// Each row records which model produced it — provenance for a
-    /// non-deterministic, drifting source.
-    #[tokio::test]
-    async fn records_the_model_provenance() {
-        let conn = conn().await;
-        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
-
-        enrich(&conn, &SpyExtractor::default(), false, 1)
+        insert_recipe(&conn, "2", &[ing("egg", Some("2"))]).await;
+        // Recipe 2 already has a reading → it must not be pending.
+        store(&conn, "themealdb", "2", &[item_reading("egg")], "m", 1)
             .await
             .unwrap();
+
+        let p = pending(&conn, 25).await.unwrap();
+        assert_eq!(p.len(), 1, "only the un-enriched recipe is pending");
+        assert_eq!(p[0].id, "1");
+        assert_eq!(p[0].ingredients.len(), 2);
+        assert_eq!(p[0].ingredients[0].name, "flour");
+        assert_eq!(p[0].ingredients[0].measure.as_deref(), Some("1 cup"));
+        assert_eq!(p[0].ingredients[1].measure, None);
+    }
+
+    /// A recipe with no ingredients never earns a reading, so returning it would
+    /// loop the worker forever — it must not appear in `pending`.
+    #[tokio::test]
+    async fn pending_excludes_empty_ingredient_recipes() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[]).await;
+        assert!(
+            pending(&conn, 25).await.unwrap().is_empty(),
+            "an empty recipe must not be offered — it can never leave the queue"
+        );
+    }
+
+    /// The limit bounds one pull's payload; the worker loops for the rest.
+    #[tokio::test]
+    async fn pending_respects_the_limit() {
+        let conn = conn().await;
+        for i in 0..5 {
+            insert_recipe(&conn, &i.to_string(), &[ing("x", None)]).await;
+        }
+        assert_eq!(pending(&conn, 3).await.unwrap().len(), 3);
+    }
+
+    /// `submit` stores a matching submission, and rejects — never stores — one whose
+    /// count no longer matches the recipe, or one for a recipe that does not exist.
+    #[tokio::test]
+    async fn submit_stores_matching_and_rejects_the_rest() {
+        let conn = conn().await;
+        insert_recipe(
+            &conn,
+            "1",
+            &[ing("flour", Some("1 cup")), ing("salt", None)],
+        )
+        .await;
+        insert_recipe(&conn, "2", &[ing("egg", Some("2"))]).await;
+
+        let items = vec![
+            // Matches recipe 1's two lines → accepted.
+            SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour"), item_reading("salt")],
+            },
+            // Two readings for a one-ingredient recipe → rejected (raw changed).
+            SubmittedReadings {
+                source: "themealdb".into(),
+                id: "2".into(),
+                readings: vec![item_reading("a"), item_reading("b")],
+            },
+            // No such recipe → rejected.
+            SubmittedReadings {
+                source: "themealdb".into(),
+                id: "9".into(),
+                readings: vec![item_reading("x")],
+            },
+        ];
+
+        let report = submit(&conn, items, "spy-model").await.unwrap();
+        assert_eq!(report.accepted, 1);
+        assert_eq!(
+            report.rejected.len(),
+            2,
+            "mismatch and unknown are both dropped"
+        );
+
+        let loaded = load(&conn).await.unwrap();
+        let r1 = loaded.get(&("themealdb".into(), "1".into())).unwrap();
+        assert_eq!(r1.len(), 2);
+        assert_eq!(r1[0].item, "flour");
+        assert!(
+            !loaded.contains_key(&("themealdb".into(), "2".into())),
+            "a rejected submission stores nothing"
+        );
+    }
+
+    /// Each stored row records which model produced it — provenance for a
+    /// non-deterministic, drifting source.
+    #[tokio::test]
+    async fn submit_records_the_model_provenance() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+        submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour")],
+            }],
+            "claude-opus-4-8",
+        )
+        .await
+        .unwrap();
 
         let mut rows = conn
             .query("SELECT model FROM ingredient_structures WHERE id = '1'", ())
             .await
             .unwrap();
         let model: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(model, "spy-model");
+        assert_eq!(model, "claude-opus-4-8");
     }
 
-    /// A second run does nothing: the recipe already has a row. Idempotent, so the
-    /// scheduled pipeline only pays for genuinely new recipes.
+    /// A push re-derives under a run allocated **after** storage, so a concurrent
+    /// ingest that derived `recipes` first cannot leave the accepted reading
+    /// unattached (CodeRabbit, PR #60). Here an "ingest" derives `recipes` under its
+    /// own run before the push; the push must still (a) attach the reading and (b)
+    /// do so under a derive run newer than its store run — reusing the store run
+    /// would have lost to the ingest's newer `recipes` row.
     #[tokio::test]
-    async fn a_second_run_skips_stored_recipes() {
+    async fn submit_re_derives_under_a_run_allocated_after_storage() {
         let conn = conn().await;
-        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+        insert_raw(
+            &conn,
+            "1",
+            r#"{"meals":[{"idMeal":"1","strMeal":"T","strInstructions":"go","strIngredient1":"Flour","strMeasure1":"1 cup"}]}"#,
+        )
+        .await;
+        // A prior ingest derived `recipes` (structured None) under its own run.
+        let ingest_run = runs::begin(&conn, "ingest").await.unwrap();
+        derive::derive(&conn, None, ingest_run).await.unwrap();
+        assert_eq!(read_structured(&conn, "1").await, None, "not yet enriched");
 
-        let spy = SpyExtractor::default();
-        enrich(&conn, &spy, false, 1).await.unwrap();
-        let second = enrich(&conn, &spy, false, 1).await.unwrap();
+        submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour")],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(
-            second,
-            EnrichReport {
-                missing: 0,
-                enriched: 0,
-                failed: 0
-            }
+        // The reading attached, despite `recipes` having been derived first...
+        assert_eq!(read_structured(&conn, "1").await.unwrap().item, "flour");
+
+        // ...because the derive ran under a run newer than the store run, itself
+        // newer than the ingest run.
+        let store = last_run_id(&conn, "enrich").await;
+        let der = last_run_id(&conn, "derive").await;
+        assert!(
+            der > store && store > ingest_run,
+            "derive {der} > store {store} > ingest {ingest_run}"
         );
-        assert_eq!(spy.batches.lock().unwrap().len(), 1, "no second call");
     }
 
-    /// `refresh` re-reads a recipe even when already stored — the deliberate
-    /// re-snapshot after a model change; the routine run does not.
-    #[tokio::test]
-    async fn refresh_recaptures_a_stored_recipe() {
-        let conn = conn().await;
-        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
-
-        let spy = SpyExtractor::default();
-        enrich(&conn, &spy, false, 1).await.unwrap();
-        let report = enrich(&conn, &spy, true, 2).await.unwrap();
-
-        assert_eq!(report.enriched, 1, "refresh re-reads the stored recipe");
-        assert_eq!(
-            spy.batches.lock().unwrap().len(),
-            2,
-            "read again on refresh"
-        );
-    }
-
-    /// The run-id guard on the enrichment writer: a stale run cannot clobber a
-    /// newer reading; a higher run (a `--refresh`) still can.
+    /// The run-id guard on the writer: a stale run cannot clobber a newer reading; a
+    /// higher run still can.
     #[tokio::test]
     async fn a_stale_run_cannot_clobber_a_reading() {
         let conn = conn().await;
@@ -692,54 +603,39 @@ mod tests {
                 .clone()
         };
 
-        store(&conn, "themealdb", "1", &[item_reading("run5")], "m", 5)
-            .await
-            .unwrap();
-        // An older run writing late must be a no-op.
-        store(&conn, "themealdb", "1", &[item_reading("run3")], "m", 3)
-            .await
-            .unwrap();
+        assert!(
+            store(&conn, "themealdb", "1", &[item_reading("run5")], "m", 5)
+                .await
+                .unwrap(),
+            "a fresh write lands"
+        );
+        // An older run writing late must be a no-op — and must report that it wrote
+        // nothing, so `submit` doesn't count it (CodeRabbit, PR #60).
+        assert!(
+            !store(&conn, "themealdb", "1", &[item_reading("run3")], "m", 3)
+                .await
+                .unwrap(),
+            "a stale write is a no-op"
+        );
         assert_eq!(
             read_item(&load(&conn).await.unwrap()),
             "run5",
             "an older run must not clobber a newer reading"
         );
 
-        // A newer run still wins.
-        store(&conn, "themealdb", "1", &[item_reading("run9")], "m", 9)
-            .await
-            .unwrap();
+        // A newer run still wins, and reports that it wrote.
+        assert!(
+            store(&conn, "themealdb", "1", &[item_reading("run9")], "m", 9)
+                .await
+                .unwrap(),
+            "a newer write lands"
+        );
         assert_eq!(read_item(&load(&conn).await.unwrap()), "run9");
     }
 
-    /// A wrong reading count is a failed recipe, not a misalignment — no row is
-    /// written, so the recipe stays unenriched rather than storing wrong readings.
-    #[tokio::test]
-    async fn a_count_mismatch_fails_without_storing() {
-        struct MiscountExtractor;
-        impl Extractor for MiscountExtractor {
-            async fn extract(
-                &self,
-                _lines: &[Ingredient],
-            ) -> anyhow::Result<Vec<StructuredMeasure>> {
-                Ok(vec![item_reading("only one")]) // fewer than asked
-            }
-            fn provenance(&self) -> String {
-                "miscount".into()
-            }
-        }
-        let conn = conn().await;
-        insert_recipe(&conn, "1", &[ing("a", None), ing("b", None)]).await;
-
-        let report = enrich(&conn, &MiscountExtractor, false, 1).await.unwrap();
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.enriched, 0);
-        assert!(load(&conn).await.unwrap().is_empty());
-    }
-
     /// `attach` is the join derive performs: a recipe's readings zip onto its
-    /// ingredients; a recipe with no row stays `None`; a stored array whose count
-    /// no longer matches (raw changed since) does not attach.
+    /// ingredients; a recipe with no row stays `None`; a stored array whose count no
+    /// longer matches (raw changed since) does not attach.
     #[test]
     fn attach_zips_matching_readings_and_leaves_the_rest() {
         let mut readings = HashMap::new();
@@ -773,108 +669,5 @@ mod tests {
         let mut r3 = vec![ing("x", None)];
         attach(&readings, "themealdb", "9", &mut r3);
         assert_eq!(r3[0].structured, None);
-    }
-
-    /// The response parser pulls readings out of a chat-completions body and
-    /// enforces the count.
-    #[test]
-    fn parse_response_reads_the_message_content_and_checks_count() {
-        let reading = StructuredMeasure {
-            item: "chopped tomatoes".into(),
-            amount: Some(Amount::Quantified {
-                quantity: Quantity::Exact { value: 1.0 },
-                unit: Some("can".into()),
-                size: Some(Size {
-                    quantity: Quantity::Exact { value: 14.0 },
-                    unit: Some("oz".into()),
-                }),
-            }),
-            preparation: None,
-            note: None,
-        };
-        let readings_json = serde_json::to_string(&json!({ "readings": [reading] })).unwrap();
-        let body = json!({
-            "choices": [{ "message": { "role": "assistant", "content": readings_json } }],
-        })
-        .to_string();
-
-        let parsed = parse_response(&body, 1).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].item, "chopped tomatoes");
-        // The wrong expected count is rejected.
-        assert!(parse_response(&body, 2).is_err());
-    }
-
-    /// A refusal is an error, not a silent empty.
-    #[test]
-    fn parse_response_rejects_a_refusal() {
-        let refusal = json!({
-            "choices": [{ "message": { "role": "assistant", "content": null, "refusal": "no" } }],
-        })
-        .to_string();
-        assert!(parse_response(&refusal, 1).is_err());
-    }
-
-    /// The schema mirrors the serde shape: a StructuredMeasure serialized to JSON
-    /// validates against the generated schema. Guards the hand-built schema from
-    /// drifting away from the type it constrains.
-    #[test]
-    fn the_schema_matches_the_serialized_type() {
-        let sample = StructuredMeasure {
-            item: "flour".into(),
-            amount: Some(Amount::Quantified {
-                quantity: Quantity::Range {
-                    low: 2.0,
-                    high: 3.0,
-                },
-                unit: Some("cup".into()),
-                size: None,
-            }),
-            preparation: Some("sifted".into()),
-            note: None,
-        };
-        let instance = serde_json::to_value(&sample).unwrap();
-        assert!(
-            matches_shape(&structured_measure_schema(), &instance),
-            "instance {instance} does not match schema"
-        );
-    }
-
-    /// A tiny structural check: object `required` keys exist, `anyOf` matches at
-    /// least one branch, `enum` contains the value. Enough to catch a key or tag
-    /// renamed on one side only, without a full JSON-Schema validator.
-    fn matches_shape(schema: &Value, instance: &Value) -> bool {
-        if schema.get("type").and_then(|t| t.as_str()) == Some("null") {
-            return instance.is_null();
-        }
-        if let Some(branches) = schema.get("anyOf").and_then(|b| b.as_array()) {
-            return branches.iter().any(|b| matches_shape(b, instance));
-        }
-        if let Some(values) = schema.get("enum").and_then(|e| e.as_array()) {
-            return values.contains(instance);
-        }
-        match schema.get("type").and_then(|t| t.as_str()) {
-            Some("object") => {
-                let Some(inst_obj) = instance.as_object() else {
-                    return false;
-                };
-                let props = schema.get("properties").and_then(|p| p.as_object());
-                let required = schema.get("required").and_then(|r| r.as_array());
-                if let (Some(props), Some(required)) = (props, required) {
-                    required.iter().all(|k| {
-                        let k = k.as_str().unwrap();
-                        inst_obj
-                            .get(k)
-                            .is_some_and(|v| props.get(k).is_none_or(|sub| matches_shape(sub, v)))
-                    })
-                } else {
-                    true
-                }
-            }
-            Some("array") => instance.is_array(),
-            Some("string") => instance.is_string(),
-            Some("number") => instance.is_number(),
-            _ => true,
-        }
     }
 }

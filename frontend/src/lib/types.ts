@@ -4,10 +4,10 @@
 export interface Ingredient {
   name: string;
   measure: string | null;
-  // The LLM's structured reading of this line (#11), added at ingestion. Absent
-  // on rows stored before enrichment existed, or when enrichment is off — the
-  // raw name/measure stay the source of truth, so fall back to them when this is
-  // absent rather than treating a missing reading as an error.
+  // A model's structured reading of this line (#11), produced by the off-service
+  // enrich worker (#59) and reattached at derive. Absent until that worker has
+  // read the recipe — the raw name/measure stay the source of truth, so fall back
+  // to them when this is absent rather than treating a missing reading as an error.
   structured?: StructuredMeasure | null;
 }
 

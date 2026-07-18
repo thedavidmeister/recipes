@@ -13,24 +13,29 @@ diagram in [README.md](./README.md).
   **demoted**: its allowlist is empty, so it claims nothing.
 - **`backend/`** — Rust/Axum on **Render**. The corpus pipeline is three stages,
   **one writer per table** (see #11): **sync** (fetch → write `raw_imports`),
-  **enrich** (LLM reads a recipe's ingredient lines → write
+  **enrich** (a model reads a recipe's ingredient lines → write
   `ingredient_structures`), **derive** (rebuild `recipes` from raw + readings,
-  no network). `/api/ingest` runs all three; `derive`/`enrich` also run as CLI
-  commands for offline backfill. Every corpus write carries a monotonic `run_id`
-  (a `runs` table) and guards on it (`WHERE excluded.run_id >= <table>.run_id`),
-  so a concurrent or partial run can't clobber a newer one — the DB-assigned id
-  is a total order free of the clock skew between Render and a CLI box. Fetching
-  is SSRF-guarded and is something sync **does** — not an endpoint: there is no
-  URL a caller can aim, so the backend is not a relay.
+  no network). `/api/ingest` runs **sync + derive**; the **enrich reading runs
+  off the service** (#59) — a worker pulls pending recipes and pushes readings
+  back through two machine-gated endpoints (`enrich pull|push`), so no model
+  code, prompt, or provider key lives in the deployed app, yet the app still
+  validates and writes every reading (the worker never touches the DB). `derive`
+  also runs as a CLI command for offline backfill. Every corpus write carries a
+  monotonic `run_id` (a `runs` table) and guards on it
+  (`WHERE excluded.run_id >= <table>.run_id`), so a concurrent or partial run
+  can't clobber a newer one — the DB-assigned id is a total order free of the
+  clock skew between Render and a CLI box. Fetching is SSRF-guarded and is
+  something sync **does** — not an endpoint: there is no URL a caller can aim,
+  so the backend is not a relay.
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
   site**. It **parses nothing** and **ingests nothing**: it reads **Turso**
   directly (read-only token) and renders. TanStack Query · Bits UI · Tailwind.
   UI states are declared as **Storybook** stories.
 - **Turso** (libSQL/SQLite) is the corpus, in three tables, each with one
   writer: **`raw_imports`** (sync — each recipe's payload as its source gave
-  it), **`ingredient_structures`** (enrich — the LLM reading, one row per
-  recipe), and **`recipes`** (derive — the view the app reads). Dev env + CI via
-  **rainix** (`nix develop`).
+  it), **`ingredient_structures`** (enrich — a model's reading, one row per
+  recipe, written by the off-service worker), and **`recipes`** (derive — the
+  view the app reads). Dev env + CI via **rainix** (`nix develop`).
 
 ## Ingestion is server-driven; the client has no access to it (#49)
 
@@ -72,38 +77,59 @@ re-fetching is not a recovery plan (sources 502 scrapers, die, and paywall).
 **Raw is not an archive**: we only want recipes, so a taxonomy or a browse of
 partials leaves no payload.
 
-## Ingredient enrichment is per-recipe and provider-neutral (#11)
+## Ingredient enrichment is a capture, produced off the service (#11, #59)
 
-At ingest, an LLM reads each recipe's raw ingredient lines ("1 (14 oz) can",
-"2-3 cloves, minced", "to taste") into `StructuredMeasure`; deterministic code
-in `recipe-core` (`scaled`/`converted`) does the arithmetic. **Split by
-strength**: the model extracts, code converts/scales — never ask the model to do
-arithmetic.
+A model reads each recipe's raw ingredient lines ("1 (14 oz) can", "2-3 cloves,
+minced", "to taste") into `StructuredMeasure`; deterministic code in
+`recipe-core` (`scaled`/`converted`) does the arithmetic. **Split by strength**:
+the model extracts, code converts/scales — never ask the model to do arithmetic.
 
+- **The model is not in the app.** Extraction runs **off the deployed service**
+  — a worker pulls the recipes still needing reading and pushes readings back
+  (`recipe-backend enrich pull|push`), driven by the enrich skill (the
+  `recipes-enrich` plugin's `enrich` skill). The binary is pure I/O; the skill
+  does the reading. The skill ships as a plugin in **this repo's own
+  marketplace** (`.claude-plugin/marketplace.json`), so it versions in lockstep
+  with the binary it drives — install via
+  `/plugin marketplace add thedavidmeister/recipes` then
+  `/plugin install recipes-enrich@recipes`. The skill drives two **MCP tools** —
+  `enrich_pull` / `enrich_push`, served by `recipe-backend mcp` (the
+  `enrich
+  pull|push` CLI is the shell equivalent) — thin HTTP clients for the
+  endpoints, so the model calls typed tools, not raw Bash. The service holds
+  **no** model code, prompt, or provider key — that is surface a recipe API does
+  not need, and keeping it out is the point (#59). `pull`/`push` are **HTTP
+  clients** for the app's two machine-gated endpoints
+  (`GET /api/enrich/pending`, `POST
+  /api/enrich/results`), so the worker — and
+  the model behind it — never touches the database; the app validates and writes
+  every reading. An LLM writing corpus rows directly is exactly what this
+  refuses. Extending _what_ gets enriched is a migration + a table, not a
+  widening of the app's surface.
 - **Per recipe, its own table.**
   `ingredient_structures(source, id, structured,
   model, created_at)` holds one
   row per recipe — `structured` a JSON array aligned to the recipe's
   ingredients. **Not** a generic `(kind, json)` container: a future enrichment
-  (nutrition, allergens) gets **its own table + extractor**, added by a
-  migration — that is where its shape is decided, not an untyped blob.
-  Per-recipe (not per-line) keeps the raw→enrich→derive cascade a clean
-  per-`(source,id)` chain.
+  (nutrition, allergens) gets **its own table**, added by a migration — that is
+  where its shape is decided, not an untyped blob. Per-recipe (not per-line)
+  keeps the raw→enrich→derive cascade a clean per-`(source,id)` chain.
 - **A capture, not a derivation.** `recipes` is a deterministic derivation of
   raw; a reading is not — the model is non-deterministic and drifts, so it is a
   point-in-time artifact (a peer of `raw_imports`). `model`/`created_at` are
-  provenance; `enrich --refresh` is the **deliberate** re-snapshot after a
-  better model, kept out of the routine path so a model change never silently
-  re-pays for the corpus. Don't call it "idempotent" — the _pipeline_ is stable
-  because we keep the capture, not because re-extracting would repeat.
-- **Provider is not baked in.** The LLM is behind an `Extractor` trait (tests
-  use a fixture — no live API in CI). Production is `OpenAiCompatExtractor`: any
-  OpenAI-compatible `/chat/completions` endpoint via `LLM_BASE_URL`/`LLM_MODEL`/
-  `LLM_API_KEY` (key optional for keyless local models). Reading a line into
-  JSON is a commodity task — don't marry the corpus to one vendor.
-- **Degrade-not-die**, like `INGEST_API_KEY`: unconfigured ⇒ enrich is a no-op,
-  recipes keep raw measures, the site still serves. Enrichment is an addition,
-  never a gate.
+  provenance. Routine `pull` offers only recipes with **no** reading yet;
+  re-reading the corpus with a better model is a deliberate, manual act (clear
+  the rows, re-run the worker), never the routine path — so a model change never
+  silently re-pays for the corpus. Don't call it "idempotent" — the _pipeline_
+  is stable because we keep the capture, not because re-extracting would repeat.
+- **The push validates on the way in.** A submitted batch is stored only when
+  the recipe still exists and the reading count matches its _current_ ingredient
+  list (the raw may have changed since the pull); a mismatch is rejected and the
+  recipe is read again next run. Every write carries a `run_id`, so a stale or
+  partial run can't clobber a newer reading.
+- **Degrade-not-die.** Until the worker has run, recipes carry
+  `structured: None` and the site serves raw measures. Enrichment is an
+  addition, never a gate.
 
 ## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 
