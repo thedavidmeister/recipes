@@ -156,10 +156,54 @@
             node frontend/scripts/visual-shoot.mjs
           '';
         };
+
+        # The backend as a proper package, so `recipe-backend` is available via
+        # `nix run .#recipe-backend` (and on PATH) without a manual `cargo build`.
+        # The enrichment cron (scripts/enrich-cron.sh) needs it on PATH for the MCP
+        # server Claude Code launches (`recipe-backend mcp`).
+        recipe-backend = pkgs.rustPlatform.buildRustPackage {
+          pname = "recipe-backend";
+          version = "0.1.0";
+          # Only what cargo needs. `./.` is already the git tree (so `.env`, target/,
+          # node_modules/ are excluded), and this drops the frontend and screenshots
+          # too, so a frontend-only change doesn't churn the backend build.
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                base = baseNameOf path;
+              in
+              !(
+                builtins.elem base [
+                  "frontend"
+                  "screenshots"
+                  "target"
+                  "node_modules"
+                  ".git"
+                ]
+                || pkgs.lib.hasPrefix ".env" base
+              );
+          };
+          cargoLock.lockFile = ./Cargo.lock;
+          # Build only the backend binary; the other workspace crates build as its
+          # deps. Tests need a DB — CI (rs-test) covers them, so the package skips them.
+          cargoBuildFlags = [
+            "-p"
+            "recipe-backend"
+          ];
+          doCheck = false;
+          nativeBuildInputs = [
+            pkgs.rustPlatform.bindgenHook # libclang for bindgen (libsql-ffi)
+            pkgs.cmake # the `cmake` build-dep crate
+            pkgs.pkg-config
+          ];
+          meta.mainProgram = "recipe-backend";
+        };
       in
       {
         packages = {
-          inherit storybook-shot visual-shoot;
+          inherit storybook-shot visual-shoot recipe-backend;
         };
 
         devShells.default = rainix.devShells.${system}.rust-node-shell.overrideAttrs (old: {
