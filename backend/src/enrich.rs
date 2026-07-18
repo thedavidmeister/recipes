@@ -12,19 +12,21 @@
 //!
 //! This module is the two ends of that queue, plus the storage between them:
 //!
-//! - [`pending`] — recipes with no reading yet, and their ingredient lines. What
-//!   the worker pulls (`recipe-backend enrich pull`).
+//! - [`pending`] — recipes with no reading yet, and their ingredient lines. Served
+//!   by [`crate::enrich_api::pending`] (`GET /api/enrich/pending`).
 //! - [`submit`] — a batch of the worker's readings, validated (the recipe still
 //!   exists, the reading count matches its *current* ingredient list), stored, and
-//!   re-derived so the recipe shows them at once. What the worker pushes
-//!   (`recipe-backend enrich push`).
+//!   re-derived so the recipe shows them at once. Driven by
+//!   [`crate::enrich_api::results`] (`POST /api/enrich/results`).
 //! - [`store`]/[`load`]/[`attach`] — where a reading lands, and the join
 //!   [`crate::derive`] performs to hang readings back onto `recipes`.
 //!
-//! Both `pull` and `push` are **batch commands over the corpus we already hold**,
-//! like `derive` — not request paths. There is no new endpoint anyone can hit; the
-//! worker runs the binary against the database directly, on the machine that holds
-//! the write token.
+//! **The worker never touches the database.** It reaches all of this over the app's
+//! two machine-gated endpoints (above), so the app stays the **sole DB writer** and
+//! the Turso write token never leaves it. An LLM sits on the far side of the app's
+//! front door — it produces JSON the app validates before writing, and holds no DB
+//! connection, no token, and no SQL. Letting a model write the corpus directly is
+//! exactly what this shape refuses.
 //!
 //! **A capture, not a derivation.** `recipes` is a deterministic derivation of
 //! `raw_imports`; a reading is not — a model is non-deterministic and drifts, so a
@@ -48,7 +50,7 @@ use libsql::Connection;
 use recipe_core::{Ingredient, StructuredMeasure};
 use serde::{Deserialize, Serialize};
 
-use crate::derive;
+use crate::{derive, runs};
 
 /// A recipe key: `(source, id)`.
 type RecipeKey = (String, String);
@@ -153,26 +155,42 @@ pub struct SubmitReport {
 
 /// Store a batch of the worker's readings, then re-derive the accepted recipes.
 ///
-/// Each submission is validated before it is stored: the recipe must still exist,
-/// and its reading count must match the recipe's **current** ingredient list. A
-/// mismatch means the raw changed between the worker's pull and its push, so the
-/// readings would misalign — it is rejected (the recipe re-enters [`pending`] and
-/// is read again) rather than stored wrong. Everything accepted is stored under one
-/// `run_id` (the clobber guard, #11), then re-derived so `recipes` shows the
-/// readings at once, without replaying the whole corpus.
+/// Runs entirely server-side: the [`crate::enrich_api::results`] handler calls this
+/// with what a worker POSTed. Each submission is validated before it is stored: the
+/// recipe must still exist, and its reading count must match the recipe's
+/// **current** ingredient list. A mismatch means the raw changed between the
+/// worker's pull and its push, so the readings would misalign — it is rejected (the
+/// recipe re-enters [`pending`] and is read again) rather than stored wrong.
+///
+/// Two runs, deliberately: readings are stored under one run, then the reattach is
+/// derived under a **fresh run allocated after storage**. Reusing a single run id
+/// would race a concurrent ingest — if an ingest derived `recipes` between this
+/// push's start and its reattach, the guard (`excluded.run_id >= recipes.run_id`)
+/// would reject the reattach, leaving the stored reading unattached until the next
+/// full derive. Allocating the derive run last makes it newer than any run that has
+/// already touched `recipes`, so the reattach always wins; a later ingest re-reads
+/// and reattaches it anyway. (CodeRabbit, PR #60.)
 pub async fn submit(
     conn: &Connection,
     items: Vec<SubmittedReadings>,
     model: &str,
-    run_id: i64,
 ) -> anyhow::Result<SubmitReport> {
     let mut report = SubmitReport::default();
     let mut accepted: Vec<RecipeKey> = Vec::new();
 
+    let store_run = runs::begin(conn, "enrich").await?;
     for item in items {
         match current_ingredient_count(conn, &item.source, &item.id).await? {
             Some(count) if count == item.readings.len() => {
-                store(conn, &item.source, &item.id, &item.readings, model, run_id).await?;
+                store(
+                    conn,
+                    &item.source,
+                    &item.id,
+                    &item.readings,
+                    model,
+                    store_run,
+                )
+                .await?;
                 accepted.push((item.source, item.id));
                 report.accepted += 1;
             }
@@ -192,11 +210,15 @@ pub async fn submit(
             }),
         }
     }
+    runs::finish(conn, store_run, runs::COMPLETED).await?;
 
+    // The derive run is allocated *here*, after storage — see the doc comment.
     if !accepted.is_empty() {
-        report.derived = derive::derive_recipes(conn, &accepted, run_id)
+        let derive_run = runs::begin(conn, "derive").await?;
+        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
             .await?
             .derived;
+        runs::finish(conn, derive_run, runs::COMPLETED).await?;
     }
     Ok(report)
 }
@@ -340,6 +362,46 @@ mod tests {
         .unwrap();
     }
 
+    async fn insert_raw(conn: &Connection, id: &str, raw: &str) {
+        conn.execute(
+            "INSERT INTO raw_imports (source, id, raw, source_url) VALUES ('themealdb', ?1, ?2, ?3)",
+            libsql::params![
+                id,
+                raw,
+                format!("https://www.themealdb.com/api/json/v1/1/lookup.php?i={id}")
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The `structured` of a recipe's first ingredient, as stored in `recipes`.
+    async fn read_structured(conn: &Connection, id: &str) -> Option<StructuredMeasure> {
+        let mut rows = conn
+            .query(
+                "SELECT ingredients FROM recipes WHERE id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        let json: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let ings: Vec<Ingredient> = serde_json::from_str(&json).unwrap();
+        ings.into_iter().next().unwrap().structured
+    }
+
+    /// The most recent run id of a given kind — the store (`enrich`) or derive run a
+    /// push opened.
+    async fn last_run_id(conn: &Connection, kind: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                "SELECT MAX(id) FROM runs WHERE kind = ?1",
+                libsql::params![kind],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
     /// `pending` lists exactly the recipes with no reading yet, carrying their raw
     /// lines; an already-enriched recipe drops out.
     #[tokio::test]
@@ -422,7 +484,7 @@ mod tests {
             },
         ];
 
-        let report = submit(&conn, items, "spy-model", 1).await.unwrap();
+        let report = submit(&conn, items, "spy-model").await.unwrap();
         assert_eq!(report.accepted, 1);
         assert_eq!(
             report.rejected.len(),
@@ -454,7 +516,6 @@ mod tests {
                 readings: vec![item_reading("flour")],
             }],
             "claude-opus-4-8",
-            1,
         )
         .await
         .unwrap();
@@ -465,6 +526,51 @@ mod tests {
             .unwrap();
         let model: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(model, "claude-opus-4-8");
+    }
+
+    /// A push re-derives under a run allocated **after** storage, so a concurrent
+    /// ingest that derived `recipes` first cannot leave the accepted reading
+    /// unattached (CodeRabbit, PR #60). Here an "ingest" derives `recipes` under its
+    /// own run before the push; the push must still (a) attach the reading and (b)
+    /// do so under a derive run newer than its store run — reusing the store run
+    /// would have lost to the ingest's newer `recipes` row.
+    #[tokio::test]
+    async fn submit_re_derives_under_a_run_allocated_after_storage() {
+        let conn = conn().await;
+        insert_raw(
+            &conn,
+            "1",
+            r#"{"meals":[{"idMeal":"1","strMeal":"T","strInstructions":"go","strIngredient1":"Flour","strMeasure1":"1 cup"}]}"#,
+        )
+        .await;
+        // A prior ingest derived `recipes` (structured None) under its own run.
+        let ingest_run = runs::begin(&conn, "ingest").await.unwrap();
+        derive::derive(&conn, None, ingest_run).await.unwrap();
+        assert_eq!(read_structured(&conn, "1").await, None, "not yet enriched");
+
+        submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour")],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        // The reading attached, despite `recipes` having been derived first...
+        assert_eq!(read_structured(&conn, "1").await.unwrap().item, "flour");
+
+        // ...because the derive ran under a run newer than the store run, itself
+        // newer than the ingest run.
+        let store = last_run_id(&conn, "enrich").await;
+        let der = last_run_id(&conn, "derive").await;
+        assert!(
+            der > store && store > ingest_run,
+            "derive {der} > store {store} > ingest {ingest_run}"
+        );
     }
 
     /// The run-id guard on the writer: a stale run cannot clobber a newer reading; a

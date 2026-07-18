@@ -16,13 +16,14 @@ flowchart TD
     cron["Schedule · GitHub Actions (free)<br/>daily: POST /api/ingest"]
 
     subgraph render["Rust · Axum — Render · free, managed"]
-        gate["auth gate<br/>session for people · Bearer key for the sync"]
+        gate["auth gate<br/>session for people · Bearer key for the machine"]
         ingest["sync → derive (server-driven)<br/>walk every adapter's catalog → fetch (SSRF-guarded)<br/>→ store raw → derive recipes"]
+        enrichep["enrich endpoints (#59)<br/>GET pending · POST results → validate → store + derive"]
         core["recipe-core<br/>adapters: the only way in · catalog() says what to pull"]
         derivecmd["derive (command)<br/>rebuild recipes from raw + readings · no network fetch"]
     end
 
-    worker["enrich worker · off the service (#59)<br/>pull recipes → a model reads the lines → push readings<br/>Claude via the enrich skill · no model or key in the app"]
+    worker["enrich worker · off the service (#59)<br/>pull recipes → a model reads the lines → push readings<br/>Claude via the enrich skill · hits the app, never the DB"]
 
     tg["Telegram<br/>you press Start; the bot links back to you"]
 
@@ -41,7 +42,9 @@ flowchart TD
     ingest --> core
     core -->|"4 · recipes + their raw"| ingest
     ingest -->|"5 · store raw · derive"| turso
-    worker -->|"enrich pull / push · reads + writes the corpus directly"| turso
+    worker -->|"enrich pull / push · HTTP · machine key"| gate
+    gate --> enrichep
+    enrichep -->|"validate · store readings · derive"| turso
     derivecmd -->|"replay raw + readings → recipes"| turso
 ```
 
@@ -130,12 +133,16 @@ convert — a model does the extraction, deterministic code the arithmetic. It
 runs **off the deployed service**: a worker pulls the recipes still needing
 reading and pushes readings back (`recipe-backend enrich pull|push`), driven by
 the enrich skill (the `recipes-enrich` plugin), so the app carries no model
-code, prompt, or provider key. `pull`/`push` are batch commands over the corpus,
-**not** endpoints. A push is stored only when the reading count still matches
-the recipe's current lines. It is **degrade-not-die** — until the worker runs,
-recipes keep their raw measures and the site still serves — and a reading is a
-_capture_, not a derivation (the model drifts), so it carries provenance and is
-re-read only deliberately, never on the routine path.
+code, prompt, or provider key. `pull`/`push` are **HTTP clients** for the app's
+two machine-gated endpoints (`GET /api/enrich/pending`,
+`POST
+/api/enrich/results`): the worker — and the model behind it — never
+touches the database; the app validates and writes every reading. A push is
+stored only when the reading count still matches the recipe's current lines. It
+is **degrade-not-die** — until the worker runs, recipes keep their raw measures
+and the site still serves — and a reading is a _capture_, not a derivation (the
+model drifts), so it carries provenance and is re-read only deliberately, never
+on the routine path.
 
 Raw is not an archive of everything downloaded — **we only want recipes**. A
 category listing is a taxonomy, and a browse returns partials we refuse to

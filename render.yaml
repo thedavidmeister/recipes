@@ -48,12 +48,14 @@ services:
         # rather than the site going down. Unset is closed, never open.
         sync: false
       # --- Ingredient enrichment (#11, #59) ---------------------------------
-      # Enrichment runs OFF this service: an out-of-band worker (`recipe-backend
-      # enrich pull|push`, driven by the enrich skill) reads ingredient lines into
-      # structured data and pushes results back. The deployed service holds no
-      # model code, no prompt, and no provider key — deliberately: it is surface
-      # the service does not need. There is nothing to configure here; the worker
-      # runs where the corpus credentials and the model live, not on Render.
+      # Enrichment runs OFF this service: an out-of-band worker (the recipes-enrich
+      # skill, driving `recipe-backend enrich pull|push`) reads ingredient lines into
+      # structured data and pushes readings back through the app's two machine-gated
+      # enrich endpoints — GET /api/enrich/pending and POST /api/enrich/results. The
+      # app validates and writes; the worker (and the model behind it) never touches
+      # the database. Those endpoints reuse the INGEST_API_KEY above, so there is
+      # nothing new to set here — the model code and provider key live on the worker,
+      # never on Render.
       - key: FRONTEND_BASE_URL
         # Where the bot's completion link points. Must be the site the user's
         # browser can open, not this service.

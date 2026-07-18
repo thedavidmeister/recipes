@@ -15,11 +15,13 @@ diagram in [README.md](./README.md).
   **one writer per table** (see #11): **sync** (fetch → write `raw_imports`),
   **enrich** (a model reads a recipe's ingredient lines → write
   `ingredient_structures`), **derive** (rebuild `recipes` from raw + readings,
-  no network). `/api/ingest` runs **sync + derive**; **enrich runs off the
-  service** (#59) — a worker pulls the pending recipes and pushes readings back
-  (`enrich pull|push`), so no model code, prompt, or provider key lives in the
-  deployed app. `derive` also runs as a CLI command for offline backfill. Every
-  corpus write carries a monotonic `run_id` (a `runs` table) and guards on it
+  no network). `/api/ingest` runs **sync + derive**; the **enrich reading runs
+  off the service** (#59) — a worker pulls pending recipes and pushes readings
+  back through two machine-gated endpoints (`enrich pull|push`), so no model
+  code, prompt, or provider key lives in the deployed app, yet the app still
+  validates and writes every reading (the worker never touches the DB). `derive`
+  also runs as a CLI command for offline backfill. Every corpus write carries a
+  monotonic `run_id` (a `runs` table) and guards on it
   (`WHERE excluded.run_id >= <table>.run_id`), so a concurrent or partial run
   can't clobber a newer one — the DB-assigned id is a total order free of the
   clock skew between Render and a CLI box. Fetching is SSRF-guarded and is
@@ -92,9 +94,13 @@ the model extracts, code converts/scales — never ask the model to do arithmeti
   `/plugin marketplace add thedavidmeister/recipes` then
   `/plugin install recipes-enrich@recipes`. The service holds **no** model code,
   prompt, or provider key — that is surface a recipe API does not need, and
-  keeping it out is the point (#59). `pull`/`push` are batch commands over the
-  corpus (like `derive`), **not** new endpoints. Extending _what_ gets enriched
-  is a migration + a table, never a new route or a provider config.
+  keeping it out is the point (#59). `pull`/`push` are **HTTP clients** for the
+  app's two machine-gated endpoints (`GET /api/enrich/pending`,
+  `POST
+  /api/enrich/results`), so the worker — and the model behind it — never
+  touches the database; the app validates and writes every reading. An LLM
+  writing corpus rows directly is exactly what this refuses. Extending _what_
+  gets enriched is a migration + a table, not a widening of the app's surface.
 - **Per recipe, its own table.**
   `ingredient_structures(source, id, structured,
   model, created_at)` holds one

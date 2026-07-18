@@ -18,10 +18,10 @@ You are the enrichment worker. Your whole job is a loop:
 3. **push** the readings back (a binary command),
 4. repeat until nothing is pending.
 
-The binary `recipe-backend` is your only tool. It does every bit of I/O —
-talking to the database, the run bookkeeping, validation, storage. You never
-touch the database, never run `git`, never read the repo. You read lines and
-emit JSON.
+The binary `recipe-backend` is your only tool. It does every bit of I/O — it
+GETs the pending recipes from the app and POSTs your readings back; the **app**
+does the validation, storage, and bookkeeping. You never touch the database,
+never run `git`, never read the repo. You read lines and emit JSON.
 
 Keep it tight: no prose, no explanation, no exploring. Run the two commands, do
 the reading between them, stop when the queue is empty.
@@ -170,11 +170,15 @@ Go back to step 1. Stop when:
 
 ## Setup (the cron provides this)
 
-`recipe-backend` reads the corpus directly, so its environment must carry:
+`recipe-backend enrich pull|push` are HTTP clients for the app — they never
+touch the database. Their environment must carry:
 
-- `DATABASE_URL` + `TURSO_AUTH_TOKEN` — the corpus to pull from and push to.
+- `RECIPES_API_URL` — the app's base URL (e.g.
+  `https://api.recipes.lehlehleh.com`).
+- `INGEST_API_KEY` — the machine key that gates the enrich endpoints.
 - `ENRICH_MODEL` — recorded as each reading's provenance (e.g.
-  `claude-opus-4-8`).
+  `claude-opus-4-8`). Required: `push` refuses to run without it rather than
+  record a placeholder.
 
-If `recipe-backend enrich pull` errors with a database or auth message, that env
-is missing — stop and say so; do not try to work around it.
+If `pull`/`push` error with a missing-env or auth message, that config is
+missing — stop and say so; do not try to work around it.
