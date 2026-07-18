@@ -67,6 +67,11 @@
       {#if session.data?.username}
         <span class="text-stone-500">@{session.data.username}</span>
       {/if}
+      {#if session.data?.is_admin}
+        <a href="/health" class="text-stone-500 underline hover:text-stone-900">
+          health
+        </a>
+      {/if}
       <button
         onclick={signOut}
         class="text-stone-500 underline hover:text-stone-900"

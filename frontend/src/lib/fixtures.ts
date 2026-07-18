@@ -1,4 +1,4 @@
-import type { Recipe, WalkStop } from "$lib/types";
+import type { HealthStats, Recipe, WalkStop } from "$lib/types";
 
 // Real TheMealDB records (verified against the live API), shaped the way
 // recipe-core normalizes them. Real data keeps stories honest: invented ids and
@@ -99,4 +99,28 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
     },
   ];
   return base.map((stop, i) => ({ ...stop, ...over[i] }));
+}
+
+/**
+ * A realistic mid-enrichment snapshot — the real corpus size (745), part-read.
+ * Fixed unix timestamps so the runs table renders identically in every capture.
+ * Override per story (empty corpus, a stuck run, etc.).
+ */
+export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
+  return {
+    recipes: 745,
+    raw: 745,
+    enriched: 512,
+    enriched_pct: (512 / 745) * 100,
+    by_model: [{ model: "claude-sonnet-5", count: 512 }],
+    recent_runs: [
+      { id: 27, kind: "enrich", status: "completed", started_at: 1_752_849_600, finished_at: 1_752_849_642 },
+      { id: 26, kind: "derive", status: "completed", started_at: 1_752_849_598, finished_at: 1_752_849_600 },
+      { id: 25, kind: "ingest", status: "completed", started_at: 1_752_846_000, finished_at: 1_752_846_071 },
+      { id: 24, kind: "enrich", status: "failed", started_at: 1_752_838_800, finished_at: 1_752_838_815 },
+      { id: 23, kind: "ingest", status: "completed", started_at: 1_752_760_800, finished_at: 1_752_760_863 },
+    ],
+    running: 0,
+    ...over,
+  };
 }

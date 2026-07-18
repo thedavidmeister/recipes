@@ -15,6 +15,11 @@ pub enum AppError {
     /// to an anonymous caller.
     #[error("{0}")]
     Unauthorized(String),
+    /// Authenticated, but not permitted — e.g. a logged-in non-admin hitting an
+    /// admin view. Distinct from [`AppError::Unauthorized`]: the session is valid,
+    /// the identity just is not allowed here, so it is 403, not 401.
+    #[error("{0}")]
+    Forbidden(String),
     /// The target resolves to a non-public address (SSRF guard).
     #[error("blocked: target address is not permitted")]
     Blocked,
@@ -42,6 +47,7 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Blocked => StatusCode::FORBIDDEN,
             AppError::Upstream(e) => {
                 tracing::warn!("upstream error: {e}");
