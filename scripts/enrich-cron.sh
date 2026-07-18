@@ -52,11 +52,11 @@ cd "$REPO"
 
 # --- recipe-backend on PATH ------------------------------------------------------
 # The MCP server (recipe-backend mcp) and the CLI queue-peek below both need the
-# binary. The flake does not ship it as a package, so build the release binary
-# (incremental, fast when unchanged) and prepend target/release.
-log "building recipe-backend"
-nix develop -c cargo build --release --bin recipe-backend >/dev/null 2>&1 || die "build failed"
-export PATH="$REPO/target/release:$PATH"
+# binary. Build it as a flake package (cached after the first run) and prepend its
+# bin dir; this tracks the repo checkout with no manual cargo build.
+log "resolving recipe-backend via nix"
+backend_bin="$(nix build "$REPO#recipe-backend" --no-link --print-out-paths)" || die "nix build failed"
+export PATH="$backend_bin/bin:$PATH"
 
 PLUGIN_DIR="$REPO/plugins/recipes-enrich"
 SKILL_FILE="$PLUGIN_DIR/skills/enrich/SKILL.md"
