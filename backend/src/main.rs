@@ -21,6 +21,7 @@ mod error;
 mod ingest;
 mod proxy;
 mod recipes;
+mod runs;
 mod sync;
 mod walk;
 
@@ -190,8 +191,19 @@ async fn main() -> anyhow::Result<()> {
         let conn = database.connect()?;
         db::migrate(&conn).await?;
         let source = std::env::args().nth(2);
-        let report = derive::derive(&conn, source.as_deref()).await?;
+        // Open a run so this derive's writes are ordered against any concurrent
+        // ingest, and close it with the outcome so a failed run is visible.
+        let run_id = runs::begin(&conn, "derive").await?;
+        let outcome = derive::derive(&conn, source.as_deref(), run_id).await;
+        let status = if outcome.is_ok() {
+            runs::COMPLETED
+        } else {
+            runs::FAILED
+        };
+        runs::finish(&conn, run_id, status).await?;
+        let report = outcome?;
         tracing::info!(
+            run_id,
             read = report.read,
             derived = report.derived,
             skipped = report.skipped,
@@ -218,8 +230,17 @@ async fn main() -> anyhow::Result<()> {
         db::migrate(&conn).await?;
         match enrich::OpenAiCompatExtractor::from_env() {
             Some(extractor) => {
-                let report = enrich::enrich(&conn, &extractor, refresh).await?;
+                let run_id = runs::begin(&conn, if refresh { "refresh" } else { "enrich" }).await?;
+                let outcome = enrich::enrich(&conn, &extractor, refresh, run_id).await;
+                let status = if outcome.is_ok() {
+                    runs::COMPLETED
+                } else {
+                    runs::FAILED
+                };
+                runs::finish(&conn, run_id, status).await?;
+                let report = outcome?;
                 tracing::info!(
+                    run_id,
                     refresh,
                     missing = report.missing,
                     enriched = report.enriched,

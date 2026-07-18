@@ -28,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         include_str!("../migrations/0004_ingredient_structures.sql"),
     ),
+    (5, include_str!("../migrations/0005_runs.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -225,6 +226,7 @@ mod tests {
             "recipes",
             "raw_imports",
             "ingredient_structures",
+            "runs",
             "users",
             "login_completions",
             "sessions",

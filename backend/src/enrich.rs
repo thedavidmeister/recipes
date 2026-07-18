@@ -93,6 +93,7 @@ pub async fn enrich<E: Extractor>(
     conn: &Connection,
     extractor: &E,
     refresh: bool,
+    run_id: i64,
 ) -> anyhow::Result<EnrichReport> {
     let mut report = EnrichReport::default();
     let provenance = extractor.provenance();
@@ -112,7 +113,7 @@ pub async fn enrich<E: Extractor>(
 
         match extractor.extract(&ingredients).await {
             Ok(readings) if readings.len() == ingredients.len() => {
-                store(conn, &source, &id, &readings, &provenance).await?;
+                store(conn, &source, &id, &readings, &provenance, run_id).await?;
                 report.enriched += 1;
             }
             Ok(readings) => {
@@ -213,23 +214,29 @@ async fn recipe_ingredients(
     Ok(out)
 }
 
-/// Write one recipe's readings, keyed by `(source, id)`, stamped with the model.
+/// Write one recipe's readings, keyed by `(source, id)`, stamped with the model
+/// and the run. The `run_id` guard (`WHERE excluded.run_id >=
+/// ingredient_structures.run_id`) stops a stale or partial run clobbering a newer
+/// reading; `--refresh` overwrites under a fresh (higher) run id.
 async fn store(
     conn: &Connection,
     source: &str,
     id: &str,
     readings: &[StructuredMeasure],
     model: &str,
+    run_id: i64,
 ) -> anyhow::Result<()> {
     let structured = serde_json::to_string(readings)?;
     conn.execute(
-        "INSERT INTO ingredient_structures (source, id, structured, model)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO ingredient_structures (source, id, structured, model, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(source, id) DO UPDATE SET
             structured = excluded.structured,
             model      = excluded.model,
-            created_at = unixepoch()",
-        libsql::params![source, id, structured, model],
+            created_at = unixepoch(),
+            run_id     = excluded.run_id
+         WHERE excluded.run_id >= ingredient_structures.run_id",
+        libsql::params![source, id, structured, model, run_id],
     )
     .await?;
     Ok(())
@@ -590,7 +597,7 @@ mod tests {
         .await;
 
         let spy = SpyExtractor::default();
-        let report = enrich(&conn, &spy, false).await.unwrap();
+        let report = enrich(&conn, &spy, false, 1).await.unwrap();
 
         assert_eq!(
             report,
@@ -619,7 +626,7 @@ mod tests {
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
-        enrich(&conn, &SpyExtractor::default(), false)
+        enrich(&conn, &SpyExtractor::default(), false, 1)
             .await
             .unwrap();
 
@@ -639,8 +646,8 @@ mod tests {
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
         let spy = SpyExtractor::default();
-        enrich(&conn, &spy, false).await.unwrap();
-        let second = enrich(&conn, &spy, false).await.unwrap();
+        enrich(&conn, &spy, false, 1).await.unwrap();
+        let second = enrich(&conn, &spy, false, 1).await.unwrap();
 
         assert_eq!(
             second,
@@ -661,8 +668,8 @@ mod tests {
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
         let spy = SpyExtractor::default();
-        enrich(&conn, &spy, false).await.unwrap();
-        let report = enrich(&conn, &spy, true).await.unwrap();
+        enrich(&conn, &spy, false, 1).await.unwrap();
+        let report = enrich(&conn, &spy, true, 2).await.unwrap();
 
         assert_eq!(report.enriched, 1, "refresh re-reads the stored recipe");
         assert_eq!(
@@ -670,6 +677,39 @@ mod tests {
             2,
             "read again on refresh"
         );
+    }
+
+    /// The run-id guard on the enrichment writer: a stale run cannot clobber a
+    /// newer reading; a higher run (a `--refresh`) still can.
+    #[tokio::test]
+    async fn a_stale_run_cannot_clobber_a_reading() {
+        let conn = conn().await;
+        let read_item = |loaded: &HashMap<RecipeKey, Vec<StructuredMeasure>>| {
+            loaded
+                .get(&("themealdb".to_string(), "1".to_string()))
+                .unwrap()[0]
+                .item
+                .clone()
+        };
+
+        store(&conn, "themealdb", "1", &[item_reading("run5")], "m", 5)
+            .await
+            .unwrap();
+        // An older run writing late must be a no-op.
+        store(&conn, "themealdb", "1", &[item_reading("run3")], "m", 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_item(&load(&conn).await.unwrap()),
+            "run5",
+            "an older run must not clobber a newer reading"
+        );
+
+        // A newer run still wins.
+        store(&conn, "themealdb", "1", &[item_reading("run9")], "m", 9)
+            .await
+            .unwrap();
+        assert_eq!(read_item(&load(&conn).await.unwrap()), "run9");
     }
 
     /// A wrong reading count is a failed recipe, not a misalignment — no row is
@@ -691,7 +731,7 @@ mod tests {
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("a", None), ing("b", None)]).await;
 
-        let report = enrich(&conn, &MiscountExtractor, false).await.unwrap();
+        let report = enrich(&conn, &MiscountExtractor, false, 1).await.unwrap();
         assert_eq!(report.failed, 1);
         assert_eq!(report.enriched, 0);
         assert!(load(&conn).await.unwrap().is_empty());

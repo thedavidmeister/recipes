@@ -30,7 +30,11 @@ pub struct Report {
 
 /// Rebuild `recipes` from every stored payload. Optionally limited to one
 /// source, so fixing one adapter need not replay the whole corpus.
-pub async fn derive(conn: &Connection, source: Option<&str>) -> anyhow::Result<Report> {
+pub async fn derive(
+    conn: &Connection,
+    source: Option<&str>,
+    run_id: i64,
+) -> anyhow::Result<Report> {
     let mut report = Report::default();
 
     // The structured readings (#11), loaded once so reattaching a recipe's
@@ -88,7 +92,7 @@ pub async fn derive(conn: &Connection, source: Option<&str>) -> anyhow::Result<R
                 &item.recipe.id,
                 &mut item.recipe.ingredients,
             );
-            upsert(conn, &item.recipe).await?;
+            upsert(conn, &item.recipe, run_id).await?;
             report.derived += 1;
         }
     }
@@ -144,7 +148,7 @@ mod tests {
             0
         );
 
-        let report = derive(&conn, None).await.unwrap();
+        let report = derive(&conn, None, 1).await.unwrap();
         assert_eq!(
             report,
             Report {
@@ -174,8 +178,8 @@ mod tests {
         )
         .await;
 
-        derive(&conn, None).await.unwrap();
-        derive(&conn, None).await.unwrap();
+        derive(&conn, None, 1).await.unwrap();
+        derive(&conn, None, 1).await.unwrap();
 
         let mut rows = conn
             .query("SELECT count(*) FROM recipes", ())
@@ -199,7 +203,7 @@ mod tests {
         .await
         .unwrap();
 
-        let report = derive(&conn, None).await.unwrap();
+        let report = derive(&conn, None, 1).await.unwrap();
         assert_eq!(report.skipped, 1);
         assert_eq!(report.derived, 0);
 
@@ -256,7 +260,7 @@ mod tests {
         )
         .await;
 
-        derive(&conn, None).await.unwrap();
+        derive(&conn, None, 1).await.unwrap();
 
         let one = read_ingredients(&conn, "1").await;
         assert_eq!(one.len(), 2);
@@ -293,7 +297,7 @@ mod tests {
         .await
         .unwrap();
 
-        derive(&conn, None).await.unwrap();
+        derive(&conn, None, 1).await.unwrap();
 
         let mut rows = conn
             .query("SELECT title, instructions FROM recipes WHERE id = '1'", ())

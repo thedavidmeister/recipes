@@ -16,9 +16,12 @@ diagram in [README.md](./README.md).
   **enrich** (LLM reads a recipe's ingredient lines → write
   `ingredient_structures`), **derive** (rebuild `recipes` from raw + readings,
   no network). `/api/ingest` runs all three; `derive`/`enrich` also run as CLI
-  commands for offline backfill. Fetching is SSRF-guarded and is something sync
-  **does** — not an endpoint: there is no URL a caller can aim, so the backend
-  is not a relay.
+  commands for offline backfill. Every corpus write carries a monotonic `run_id`
+  (a `runs` table) and guards on it (`WHERE excluded.run_id >= <table>.run_id`),
+  so a concurrent or partial run can't clobber a newer one — the DB-assigned id
+  is a total order free of the clock skew between Render and a CLI box. Fetching
+  is SSRF-guarded and is something sync **does** — not an endpoint: there is no
+  URL a caller can aim, so the backend is not a relay.
 - **`frontend/`** — SvelteKit SPA (`adapter-static`) on a **Render static
   site**. It **parses nothing** and **ingests nothing**: it reads **Turso**
   directly (read-only token) and renders. TanStack Query · Bits UI · Tailwind.

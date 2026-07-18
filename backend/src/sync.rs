@@ -36,14 +36,18 @@ pub trait Fetcher {
     fn fetch(&self, url: &str) -> impl Future<Output = anyhow::Result<Fetched>>;
 }
 
-/// Stores one complete recipe (both halves). Production writes Turso; a fixture
-/// collects in memory. Idempotency is the store's job — the real one upserts on
-/// `(source, id)`, so re-syncing overwrites rather than duplicating.
+/// Persists one fetched payload into `raw_imports` — raw only. `recipes` is
+/// derived and written solely by [`crate::derive`], not here (the write path is
+/// decoupled by table). Production writes Turso; a fixture collects in memory.
+/// Idempotency is the store's job — the real one upserts on `(source, id)`,
+/// guarded by `run_id`, so re-syncing overwrites rather than duplicating and a
+/// stale run cannot clobber a newer one.
 pub trait Sink {
-    fn store(
+    fn store_raw(
         &self,
         item: &Ingested,
         content_type: Option<&str>,
+        run_id: i64,
     ) -> impl Future<Output = anyhow::Result<()>>;
 }
 
@@ -83,7 +87,12 @@ pub struct Failure {
 /// best-effort-complete, not all-or-nothing.
 ///
 /// [`Adapter::handles`]: recipe_core::adapters::Adapter::handles
-pub async fn sync<F: Fetcher, S: Sink>(adapters: &[Adapter], fetcher: &F, sink: &S) -> SyncReport {
+pub async fn sync<F: Fetcher, S: Sink>(
+    adapters: &[Adapter],
+    fetcher: &F,
+    sink: &S,
+    run_id: i64,
+) -> SyncReport {
     let mut report = SyncReport::default();
     for adapter in adapters {
         for url in (adapter.catalog)() {
@@ -129,7 +138,10 @@ pub async fn sync<F: Fetcher, S: Sink>(adapters: &[Adapter], fetcher: &F, sink: 
                 if !is_complete(&item.recipe) {
                     continue;
                 }
-                match sink.store(&item, doc.content_type.as_deref()).await {
+                match sink
+                    .store_raw(&item, doc.content_type.as_deref(), run_id)
+                    .await
+                {
                     Ok(()) => report.stored += 1,
                     Err(e) => report.failures.push(Failure {
                         url: url.clone(),
@@ -178,14 +190,20 @@ impl Fetcher for ProxyFetcher<'_> {
     }
 }
 
-/// The production [`Sink`]: both halves into Turso via [`crate::recipes`].
+/// The production [`Sink`]: the fetched payload into `raw_imports` via
+/// [`crate::recipes::store_raw`]. `recipes` is left to [`crate::derive`].
 pub struct TursoSink<'a> {
     pub conn: &'a libsql::Connection,
 }
 
 impl Sink for TursoSink<'_> {
-    async fn store(&self, item: &Ingested, content_type: Option<&str>) -> anyhow::Result<()> {
-        crate::recipes::store(self.conn, item, content_type).await
+    async fn store_raw(
+        &self,
+        item: &Ingested,
+        content_type: Option<&str>,
+        run_id: i64,
+    ) -> anyhow::Result<()> {
+        crate::recipes::store_raw(self.conn, item, content_type, run_id).await
     }
 }
 
@@ -272,7 +290,12 @@ mod tests {
     }
 
     impl Sink for MemorySink {
-        async fn store(&self, item: &Ingested, _content_type: Option<&str>) -> anyhow::Result<()> {
+        async fn store_raw(
+            &self,
+            item: &Ingested,
+            _content_type: Option<&str>,
+            _run_id: i64,
+        ) -> anyhow::Result<()> {
             self.stored.lock().unwrap().push(item.recipe.clone());
             Ok(())
         }
@@ -298,7 +321,7 @@ mod tests {
         ]);
         let sink = MemorySink::default();
 
-        let report = sync(&[FIXTURE], &fetcher, &sink).await;
+        let report = sync(&[FIXTURE], &fetcher, &sink, 1).await;
 
         assert_eq!(report.stored, 2, "soup and stew are complete");
         assert_eq!(report.fetched, 3, "soup, stew, blank fetched; gone failed");
@@ -332,7 +355,7 @@ mod tests {
             }
         }
         let sink = MemorySink::default();
-        let report = sync(&[FIXTURE], &RedirectingFetcher, &sink).await;
+        let report = sync(&[FIXTURE], &RedirectingFetcher, &sink, 1).await;
 
         assert_eq!(report.stored, 0, "a stranger's body must not be stored");
         assert_eq!(
@@ -370,7 +393,7 @@ mod tests {
                 panic!("the gate must answer before fetching, but it fetched {url}")
             }
         }
-        let report = sync(&[ROGUE], &NeverFetcher, &MemorySink::default()).await;
+        let report = sync(&[ROGUE], &NeverFetcher, &MemorySink::default(), 1).await;
         assert_eq!(report.fetched, 0);
         assert_eq!(report.stored, 0);
         assert_eq!(report.failures.len(), 1);
@@ -388,7 +411,7 @@ mod tests {
             normalize: fixture_normalize,
             catalog: empty_catalog,
         };
-        let report = sync(&[CLAIMLESS], &fetcher_with(&[]), &MemorySink::default()).await;
+        let report = sync(&[CLAIMLESS], &fetcher_with(&[]), &MemorySink::default(), 1).await;
         assert_eq!(report.stored, 0);
         assert_eq!(report.fetched, 0);
         assert!(report.failures.is_empty());
@@ -398,7 +421,7 @@ mod tests {
     async fn a_store_error_is_recorded_not_fatal() {
         struct FailingSink;
         impl Sink for FailingSink {
-            async fn store(&self, _: &Ingested, _: Option<&str>) -> anyhow::Result<()> {
+            async fn store_raw(&self, _: &Ingested, _: Option<&str>, _: i64) -> anyhow::Result<()> {
                 anyhow::bail!("disk full")
             }
         }
@@ -408,7 +431,7 @@ mod tests {
             ("fix://blank", ""),
             ("fix://gone", ""),
         ]);
-        let report = sync(&[FIXTURE], &fetcher, &FailingSink).await;
+        let report = sync(&[FIXTURE], &fetcher, &FailingSink, 1).await;
         assert_eq!(report.stored, 0, "every store failed");
         assert_eq!(report.fetched, 4, "but every fetch succeeded");
         assert_eq!(report.failures.len(), 2, "soup and stew failed to store");
