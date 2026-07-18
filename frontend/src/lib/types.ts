@@ -1,9 +1,44 @@
 // Mirrors `recipe_core::Recipe`, the shape the backend returns and the shape
-// stored in Turso. Kept in sync with crates/recipe-core/src/models.rs.
+// stored in Turso. Kept in sync with crates/recipe-core/src/models.rs (and
+// measure.rs for the structured half).
 export interface Ingredient {
   name: string;
   measure: string | null;
+  // The LLM's structured reading of this line (#11), added at ingestion. Absent
+  // on rows stored before enrichment existed, or when enrichment is off — the
+  // raw name/measure stay the source of truth, so fall back to them when this is
+  // absent rather than treating a missing reading as an error.
+  structured?: StructuredMeasure | null;
 }
+
+// Mirrors `recipe_core::measure::StructuredMeasure`. The enums are internally
+// tagged in Rust (`#[serde(tag = "kind")]`), so they arrive as discriminated
+// unions on `kind`. The Option<_> fields serialize as `null` when absent
+// (matching `measure` above) — only `structured` itself is omitted entirely.
+export interface StructuredMeasure {
+  item: string;
+  amount: Amount | null;
+  preparation: string | null;
+  note: string | null;
+}
+
+export type Amount =
+  | {
+      kind: "quantified";
+      quantity: Quantity;
+      unit: string | null;
+      size: Size | null;
+    }
+  | { kind: "qualitative"; text: string };
+
+export interface Size {
+  quantity: Quantity;
+  unit: string | null;
+}
+
+export type Quantity =
+  | { kind: "exact"; value: number }
+  | { kind: "range"; low: number; high: number };
 
 export interface Recipe {
   id: string;

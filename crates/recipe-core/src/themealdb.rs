@@ -68,7 +68,11 @@ impl Meal {
                 .flatten()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            out.push(Ingredient { name, measure });
+            out.push(Ingredient {
+                name,
+                measure,
+                structured: None,
+            });
         }
         out
     }

@@ -186,6 +186,7 @@ fn extract_ingredients(value: Option<&Value>) -> Vec<Ingredient> {
         .map(|name| Ingredient {
             name,
             measure: None,
+            structured: None,
         })
         .collect()
 }

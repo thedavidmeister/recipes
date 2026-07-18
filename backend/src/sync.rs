@@ -222,6 +222,7 @@ mod tests {
             ingredients: vec![Ingredient {
                 name: "water".to_string(),
                 measure: None,
+                structured: None,
             }],
             instructions: "Cook it.".to_string(),
             source_url: None,
