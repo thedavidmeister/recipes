@@ -45,7 +45,9 @@ pub async fn ingest(State(state): State<AppState>) -> Json<IngestReport> {
     // error (e.g. the API is down) must not fail the trigger — derive still runs
     // and reattaches whatever is already cached.
     let enrich = match state.extractor.as_ref() {
-        Some(extractor) => match enrich::enrich(&state.db, extractor).await {
+        // Routine, not a refresh: only newly-seen lines are read. A model-driven
+        // re-snapshot is the deliberate `enrich --refresh`, never the daily path.
+        Some(extractor) => match enrich::enrich(&state.db, extractor, false).await {
             Ok(report) => Some(report),
             Err(e) => {
                 tracing::warn!("enrich step failed, continuing: {e}");

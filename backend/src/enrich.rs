@@ -7,6 +7,18 @@
 //! It does **not** write `recipes` — [`crate::derive`] reattaches from the cache,
 //! which is why deriving stays offline.
 //!
+//! **The cache is a capture, not memoization of a pure function.** `recipes` is a
+//! deterministic derivation of `raw_imports`; a reading is not — a model is
+//! non-deterministic and drifts over time, so a reading is a point-in-time
+//! artifact, a *peer of `raw_imports`* rather than of `recipes`. The cache exists
+//! *because* the extraction is not reproducible: capture a reading once and every
+//! rebuild reuses that exact one instead of re-rolling a drifting model (and
+//! re-paying). So "idempotent" here means the cached pipeline is stable, never
+//! that re-extracting a line would give the same answer. Each reading records its
+//! provenance ([`Extractor::provenance`] + a timestamp) so drift is auditable; a
+//! deliberate re-capture with a better model is an explicit act (`enrich
+//! --refresh`), never a silent side effect of a derive.
+//!
 //! The LLM boundary is a trait ([`Extractor`]) so the engine runs against a
 //! fixture with no network, the same shape [`crate::sync`] uses for fetch/store —
 //! and so the **provider is not baked in**. Reading an ingredient line into JSON
@@ -52,6 +64,13 @@ pub trait Extractor {
         &self,
         lines: &[Ingredient],
     ) -> impl Future<Output = anyhow::Result<Vec<StructuredMeasure>>>;
+
+    /// A label for what produced these readings — the model id — stored with each
+    /// cached reading. Provenance for a non-deterministic, versioned source: it is
+    /// what makes "which model read this line, and roughly when" answerable, and a
+    /// future targeted re-capture (a line whose reading came from a worse model)
+    /// possible.
+    fn provenance(&self) -> String;
 }
 
 /// What an enrich run did.
@@ -71,16 +90,31 @@ pub struct EnrichReport {
 ///
 /// Reads `recipes` for the lines, batches each recipe's uncached lines into one
 /// [`Extractor`] call, and writes the readings to `ingredient_structured`.
-/// Idempotent: a line already in the cache — or already enriched earlier in this
-/// same run, since recipes share lines — is never re-extracted.
+///
+/// A line already read is not re-extracted **unless `refresh`** — not because the
+/// reading is a pure function of the line (it is not — the model is
+/// non-deterministic and drifts), but because we keep the captured reading rather
+/// than re-roll a drifting model on every run. So a normal run is stable and cheap
+/// (only genuinely new lines cost). `refresh = true` is the deliberate re-capture:
+/// re-read every line and overwrite with a fresh reading from the current model —
+/// the explicit "the model got better, re-snapshot" act, kept out of the routine
+/// path so a model change never silently re-pays for the whole corpus.
 pub async fn enrich<E: Extractor>(
     conn: &Connection,
     extractor: &E,
+    refresh: bool,
 ) -> anyhow::Result<EnrichReport> {
     let mut report = EnrichReport::default();
-    // Lines we no longer need to read: everything already cached, growing as this
-    // run caches more. Two recipes sharing a new line only pay for it once.
-    let mut seen = cached_keys(conn).await?;
+    // Recorded with each reading as provenance for a non-deterministic source.
+    let provenance = extractor.provenance();
+    // Lines we can skip: on a normal run, everything already cached; on a refresh,
+    // nothing — every line is re-read. Either way this grows as the run caches, so
+    // two recipes sharing a line only pay once per run.
+    let mut seen = if refresh {
+        HashSet::new()
+    } else {
+        cached_keys(conn).await?
+    };
 
     for lines in read_recipe_lines(conn).await? {
         // This recipe's still-unseen lines, deduped within the recipe too.
@@ -100,7 +134,7 @@ pub async fn enrich<E: Extractor>(
         match extractor.extract(&batch).await {
             Ok(readings) if readings.len() == batch.len() => {
                 for (line, reading) in batch.iter().zip(&readings) {
-                    cache_put(conn, line, reading).await?;
+                    cache_put(conn, line, reading, &provenance).await?;
                     seen.insert(key(line));
                     report.enriched += 1;
                 }
@@ -183,20 +217,26 @@ async fn read_recipe_lines(conn: &Connection) -> anyhow::Result<Vec<Vec<Ingredie
     Ok(out)
 }
 
-/// Write one line's reading to the cache, keyed by the raw line.
+/// Write one line's reading to the cache, keyed by the raw line, stamped with the
+/// model that produced it. `ON CONFLICT` refreshes structured + model + timestamp
+/// — but `enrich` skips already-cached lines, so this only fires on a deliberate
+/// re-capture (the cache cleared first), never as a silent per-run overwrite.
 async fn cache_put(
     conn: &Connection,
     line: &Ingredient,
     reading: &StructuredMeasure,
+    model: &str,
 ) -> anyhow::Result<()> {
     let (name, measure) = key(line);
     let structured = serde_json::to_string(reading)?;
     conn.execute(
-        "INSERT INTO ingredient_structured (name, measure, structured) VALUES (?1, ?2, ?3)
+        "INSERT INTO ingredient_structured (name, measure, structured, model)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(name, measure) DO UPDATE SET
             structured = excluded.structured,
+            model      = excluded.model,
             created_at = unixepoch()",
-        libsql::params![name, measure, structured],
+        libsql::params![name, measure, structured, model],
     )
     .await?;
     Ok(())
@@ -303,6 +343,10 @@ impl Extractor for OpenAiCompatExtractor {
             anyhow::bail!("llm endpoint responded {status}: {text}");
         }
         parse_response(&text, lines.len())
+    }
+
+    fn provenance(&self) -> String {
+        self.model.clone()
     }
 }
 
@@ -517,6 +561,10 @@ mod tests {
             self.batches.lock().unwrap().push(lines.to_vec());
             Ok(lines.iter().map(|l| item_reading(&l.name)).collect())
         }
+
+        fn provenance(&self) -> String {
+            "spy-model".into()
+        }
     }
 
     async fn conn() -> Connection {
@@ -553,7 +601,7 @@ mod tests {
         .await;
 
         let spy = SpyExtractor::default();
-        let report = enrich(&conn, &spy).await.unwrap();
+        let report = enrich(&conn, &spy, false).await.unwrap();
 
         assert_eq!(
             report,
@@ -574,6 +622,29 @@ mod tests {
         assert!(cache.contains_key(&("salt".into(), String::new())));
     }
 
+    /// Each cached reading records which model produced it. Provenance for a
+    /// non-deterministic, drifting source — so "which model read this line" is
+    /// answerable and a deliberate re-capture can target readings from a worse one.
+    #[tokio::test]
+    async fn records_the_model_provenance_of_each_reading() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+
+        enrich(&conn, &SpyExtractor::default(), false)
+            .await
+            .unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT model FROM ingredient_structured WHERE name = 'flour'",
+                (),
+            )
+            .await
+            .unwrap();
+        let model: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(model, "spy-model");
+    }
+
     /// A line shared across recipes is read once — the dedup the line-keyed cache
     /// exists for. The spy proves the second recipe never reached the extractor.
     #[tokio::test]
@@ -583,7 +654,7 @@ mod tests {
         insert_recipe(&conn, "2", &[ing("salt", Some("to taste"))]).await;
 
         let spy = SpyExtractor::default();
-        let report = enrich(&conn, &spy).await.unwrap();
+        let report = enrich(&conn, &spy, false).await.unwrap();
 
         assert_eq!(report.enriched, 1, "the shared line is read once");
         let batches = spy.batches.lock().unwrap();
@@ -602,8 +673,8 @@ mod tests {
         insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
 
         let spy = SpyExtractor::default();
-        enrich(&conn, &spy).await.unwrap();
-        let second = enrich(&conn, &spy).await.unwrap();
+        enrich(&conn, &spy, false).await.unwrap();
+        let second = enrich(&conn, &spy, false).await.unwrap();
 
         assert_eq!(
             second,
@@ -612,6 +683,28 @@ mod tests {
                 enriched: 0,
                 failed: 0
             }
+        );
+    }
+
+    /// `refresh` re-reads a line even when it is already cached — the deliberate
+    /// re-snapshot after a model change. The spy is called again; the reading is
+    /// overwritten (kept out of the routine path so a model switch never silently
+    /// re-pays for the corpus).
+    #[tokio::test]
+    async fn refresh_recaptures_already_cached_lines() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+
+        let spy = SpyExtractor::default();
+        enrich(&conn, &spy, false).await.unwrap();
+        assert_eq!(spy.batches.lock().unwrap().len(), 1);
+
+        let report = enrich(&conn, &spy, true).await.unwrap();
+        assert_eq!(report.enriched, 1, "refresh re-reads the cached line");
+        assert_eq!(
+            spy.batches.lock().unwrap().len(),
+            2,
+            "the line reached the model again on refresh"
         );
     }
 
@@ -627,11 +720,15 @@ mod tests {
             ) -> anyhow::Result<Vec<StructuredMeasure>> {
                 Ok(vec![item_reading("only one")]) // fewer than asked
             }
+
+            fn provenance(&self) -> String {
+                "miscount".into()
+            }
         }
         let conn = conn().await;
         insert_recipe(&conn, "1", &[ing("a", None), ing("b", None)]).await;
 
-        let report = enrich(&conn, &MiscountExtractor).await.unwrap();
+        let report = enrich(&conn, &MiscountExtractor, false).await.unwrap();
         assert_eq!(report.failed, 1);
         assert_eq!(report.enriched, 0);
         assert!(load_cache(&conn).await.unwrap().is_empty());

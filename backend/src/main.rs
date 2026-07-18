@@ -200,20 +200,27 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // `recipe-backend enrich` reads the corpus's ingredient lines into the
-    // structured cache (#11) via the LLM, for lines not already cached. Offline
-    // over data we already hold — no fetch — so it backfills existing rows without
-    // re-fetching, and runs as its own step to avoid the request timeout a
-    // one-shot over the whole corpus would risk inside `/api/ingest`. `derive`
-    // afterwards reattaches the readings onto `recipes`. A no-op without a key.
+    // `recipe-backend enrich [--refresh]` reads the corpus's ingredient lines into
+    // the structured cache (#11) via the LLM. Offline over data we already hold —
+    // no fetch — so it backfills existing rows without re-fetching, and runs as its
+    // own step to avoid the request timeout a one-shot over the whole corpus would
+    // risk inside `/api/ingest`. `derive` afterwards reattaches the readings onto
+    // `recipes`. A no-op without a key.
+    //
+    // Plain: only lines not already cached (the backfill + steady-state). With
+    // `--refresh`: re-read EVERY line and overwrite — the deliberate re-snapshot
+    // after switching to a better model. Kept opt-in so a model change never
+    // silently re-pays for the whole corpus.
     if std::env::args().nth(1).as_deref() == Some("enrich") {
+        let refresh = std::env::args().nth(2).as_deref() == Some("--refresh");
         let database = db::open().await?;
         let conn = database.connect()?;
         db::migrate(&conn).await?;
         match enrich::OpenAiCompatExtractor::from_env() {
             Some(extractor) => {
-                let report = enrich::enrich(&conn, &extractor).await?;
+                let report = enrich::enrich(&conn, &extractor, refresh).await?;
                 tracing::info!(
+                    refresh,
                     missing = report.missing,
                     enriched = report.enriched,
                     failed = report.failed,
