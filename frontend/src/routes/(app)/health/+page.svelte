@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createQuery } from "@tanstack/svelte-query";
+  import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { me } from "$lib/auth";
   import { fetchHealth } from "$lib/health";
   import { ApiError } from "$lib/client";
@@ -43,6 +43,17 @@
   const error = $derived(
     health.error instanceof Error ? health.error.message : undefined,
   );
+
+  // A 401 from the health poll means the session lapsed since the page loaded.
+  // Re-check the session so the `(app)` layout re-gates to the login screen,
+  // rather than leaving a dashboard error card up for a signed-out visitor. (403
+  // is the *admin* gate and stays on the page as `forbidden`.)
+  const queryClient = useQueryClient();
+  $effect(() => {
+    if (health.error instanceof ApiError && health.error.status === 401) {
+      queryClient.invalidateQueries({ queryKey: ["session"] });
+    }
+  });
 </script>
 
 <HealthDashboard {status} stats={health.data} {error} />
