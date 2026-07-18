@@ -79,19 +79,29 @@ enrich_pull and enrich_push tools."
 # remainder, so a large backfill drains over several sessions instead of one
 # unbounded one.
 for batch in $(seq 1 "$MAX_BATCHES"); do
-  pending="$(recipe-backend enrich pull --limit 1 2>/dev/null || true)"
-  if [ "$pending" = "[]" ] || [ -z "$pending" ]; then
+  # A failed peek (backend down, bad key) must NOT read as an empty queue, or the
+  # cron would exit "drained" and hide the outage from monitoring; fail loudly.
+  pending="$(recipe-backend enrich pull --limit 1)" \
+    || die "queue peek failed; backend unreachable or misconfigured"
+  if [ "$pending" = "[]" ]; then
     log "queue empty; drained after $((batch - 1)) session(s)"
     exit 0
   fi
 
   log "session $batch: draining (model=$MODEL)"
-  if ! timeout "$SESSION_TIMEOUT" claude -p "$PROMPT" \
-      --plugin-dir "$PLUGIN_DIR" \
-      --append-system-prompt "$(< "$SKILL_FILE")" \
-      --model "$MODEL" \
-      --allowedTools "$ALLOWED"; then
-    die "claude session $batch failed or timed out; next cron run will retry"
+  # A session loops internally until the queue drains or the wall-clock cap. A
+  # timeout (exit 124) is expected mid-backfill, so continue to the next batch; any
+  # other non-zero exit is a real failure worth stopping on (the next cron retries).
+  rc=0
+  timeout "$SESSION_TIMEOUT" claude -p "$PROMPT" \
+    --plugin-dir "$PLUGIN_DIR" \
+    --append-system-prompt "$(< "$SKILL_FILE")" \
+    --model "$MODEL" \
+    --allowedTools "$ALLOWED" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    log "session $batch hit the ${SESSION_TIMEOUT}s cap; continuing"
+  elif [ "$rc" -ne 0 ]; then
+    die "claude session $batch failed (exit $rc); next cron run will retry"
   fi
 done
 
