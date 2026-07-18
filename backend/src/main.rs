@@ -10,8 +10,11 @@
 //! and no client is involved.
 //!
 //! Usage:
-//!   recipe-backend                    serve
-//!   recipe-backend derive [<source>]  rebuild `recipes` from `raw_imports`
+//!   recipe-backend                          serve
+//!   recipe-backend migrate                  apply pending DB migrations
+//!   recipe-backend derive [<source>]        rebuild `recipes` from `raw_imports`
+//!   recipe-backend enrich pull [--limit N]  print recipes that still need reading
+//!   recipe-backend enrich push              store readings piped in on stdin (#59)
 
 mod auth;
 mod db;
@@ -52,15 +55,36 @@ pub struct AppState {
     /// `Option` so the unset case cannot be compared against — see
     /// [`auth::ingest_key_from_env`].
     pub ingest_key: Option<String>,
-    /// The ingredient-enrichment extractor (#11) — any OpenAI-compatible endpoint,
-    /// built from `LLM_BASE_URL`/`LLM_MODEL` (+ optional `LLM_API_KEY`). `None`
-    /// when unconfigured: ingest still syncs and derives, just without new
-    /// structured readings — enrichment degrades, it does not gate.
-    pub extractor: Option<enrich::OpenAiCompatExtractor>,
 }
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// How many recipes `enrich pull` returns when the worker names no `--limit` — a
+/// bound so one extraction batch is a predictable size; the worker loops for the
+/// rest (#59).
+const DEFAULT_PULL_LIMIT: usize = 25;
+
+/// Parse the worker's `enrich push` input: the skill's readings, either a bare JSON
+/// array of `{source, id, readings}` or a `{ "readings": [...] }` object wrapping
+/// it. Accepting both keeps the contract forgiving about that one wrapper.
+fn parse_submissions(input: &str) -> anyhow::Result<Vec<enrich::SubmittedReadings>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+    if let Ok(items) = serde_json::from_str::<Vec<enrich::SubmittedReadings>>(trimmed) {
+        return Ok(items);
+    }
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        readings: Vec<enrich::SubmittedReadings>,
+    }
+    let wrapped: Wrapper = serde_json::from_str(trimmed).map_err(|e| {
+        anyhow::anyhow!("push input is neither a readings array nor {{\"readings\":[...]}}: {e}")
+    })?;
+    Ok(wrapped.readings)
 }
 
 /// Build the HTTP surface.
@@ -212,26 +236,43 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // `recipe-backend enrich [--refresh]` reads the corpus's ingredient lines into
-    // the structured cache (#11) via the LLM. Offline over data we already hold —
-    // no fetch — so it backfills existing rows without re-fetching, and runs as its
-    // own step to avoid the request timeout a one-shot over the whole corpus would
-    // risk inside `/api/ingest`. `derive` afterwards reattaches the readings onto
-    // `recipes`. A no-op without a key.
+    // `recipe-backend enrich pull|push` — the enrichment worker's two primitives
+    // (#59), batch commands over the corpus we already hold (like `derive`), not a
+    // service. There is no model here: extraction happens in the worker (the enrich
+    // skill), and this only moves work out and readings back in.
     //
-    // Plain: only lines not already cached (the backfill + steady-state). With
-    // `--refresh`: re-read EVERY line and overwrite — the deliberate re-snapshot
-    // after switching to a better model. Kept opt-in so a model change never
-    // silently re-pays for the whole corpus.
+    //   enrich pull [--limit N]  → the recipes still needing reading, JSON on stdout
+    //   enrich push              → reads readings JSON on stdin, stores + derives
     if std::env::args().nth(1).as_deref() == Some("enrich") {
-        let refresh = std::env::args().nth(2).as_deref() == Some("--refresh");
         let database = db::open().await?;
         let conn = database.connect()?;
         db::migrate(&conn).await?;
-        match enrich::OpenAiCompatExtractor::from_env() {
-            Some(extractor) => {
-                let run_id = runs::begin(&conn, if refresh { "refresh" } else { "enrich" }).await?;
-                let outcome = enrich::enrich(&conn, &extractor, refresh, run_id).await;
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(DEFAULT_PULL_LIMIT);
+                let recipes = enrich::pending(&conn, limit).await?;
+                // stdout is the worker's input: the pending recipes as JSON.
+                println!("{}", serde_json::to_string(&recipes)?);
+            }
+            Some("push") => {
+                use std::io::Read;
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input)?;
+                let items = parse_submissions(&input)?;
+                // Provenance for the readings: which model the worker used, from its
+                // environment. The skill does not hardcode a model id.
+                let model = std::env::var("ENRICH_MODEL")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(|| "claude".to_string());
+                let run_id = runs::begin(&conn, "enrich").await?;
+                let outcome = enrich::submit(&conn, items, &model, run_id).await;
                 let status = if outcome.is_ok() {
                     runs::COMPLETED
                 } else {
@@ -241,16 +282,20 @@ async fn main() -> anyhow::Result<()> {
                 let report = outcome?;
                 tracing::info!(
                     run_id,
-                    refresh,
-                    missing = report.missing,
-                    enriched = report.enriched,
-                    failed = report.failed,
-                    "enrich complete"
+                    accepted = report.accepted,
+                    derived = report.derived,
+                    rejected = report.rejected.len(),
+                    "enrich push complete"
                 );
+                // stdout is the run's result: accepted / derived / rejected.
+                println!("{}", serde_json::to_string(&report)?);
             }
-            None => tracing::warn!(
-                "LLM_BASE_URL/LLM_MODEL are not set — enrich is a no-op; lines stay unenriched"
-            ),
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend enrich pull [--limit N] | recipe-backend enrich push"
+                );
+                std::process::exit(2);
+            }
         }
         return Ok(());
     }
@@ -270,19 +315,12 @@ async fn main() -> anyhow::Result<()> {
     if ingest_key.is_none() {
         tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
     }
-    // The enrichment extractor (#11) is optional the same way: missing it costs
-    // structured readings, not the service. Warn and serve; ingest/enrich degrade.
-    let extractor = enrich::OpenAiCompatExtractor::from_env();
-    if extractor.is_none() {
-        tracing::warn!("LLM_BASE_URL/LLM_MODEL are not set — ingredient enrichment is disabled; recipes keep raw measures only");
-    }
     let state = AppState {
         http: proxy::build_client()?,
         db: conn.clone(),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
-        extractor,
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -341,9 +379,6 @@ mod tests {
                 secure: false,
             },
             ingest_key,
-            // Enrichment is exercised in enrich.rs against a fixture extractor;
-            // the router tests are about the auth gate, so they need no LLM.
-            extractor: None,
         };
         (app(state), conn)
     }

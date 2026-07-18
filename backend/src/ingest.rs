@@ -1,18 +1,22 @@
-//! `POST /api/ingest` — pull every source's catalog into the corpus, enrich the
-//! new lines, and derive.
+//! `POST /api/ingest` — pull every source's catalog into the corpus and derive.
 //!
 //! This used to take a client-supplied URL and ingest that one document —
 //! "ingest is what a search does". It no longer does: the client hits a **trigger
 //! with no target**, and the server dispatches to every adapter's catalog itself,
 //! fetches, normalizes, and stores. There is no query; search is gone (#49).
 //!
-//! One trigger runs the whole pipeline (#11), under one `run_id` so its writes are
-//! ordered against any concurrent CLI run: `sync` fetches and writes `raw_imports`,
-//! `enrich` reads each recipe's lines into `ingredient_structures` (the only
-//! networked-LLM step; skipped when no endpoint is configured), and `derive`
-//! rebuilds `recipes` from raw + readings. Each stage writes one table — the write
-//! path is decoupled. The sync engine lives in [`crate::sync`], behind
-//! [`sync::Fetcher`]/[`sync::Sink`] so it can be tested against a fixture.
+//! One trigger runs sync then derive under one `run_id`, so its writes are ordered
+//! against any concurrent CLI run: `sync` fetches and writes `raw_imports`, and
+//! `derive` rebuilds `recipes` from raw (reattaching whatever readings are already
+//! stored). Each stage writes one table. The sync engine lives in [`crate::sync`],
+//! behind [`sync::Fetcher`]/[`sync::Sink`] so it can be tested against a fixture.
+//!
+//! **Enrichment is not part of this path (#59).** Reading ingredient lines into
+//! structure is an LLM job that runs *off* this service — an out-of-band worker
+//! (`recipe-backend enrich pull|push`, driven by the enrich skill) produces the
+//! readings, and the next `derive` reattaches them. There is no model here, no
+//! provider credential, and no enrich step in the request: the trigger only syncs
+//! and derives.
 //!
 //! **Machine-gated, not session-gated**: `Authorization: Bearer <INGEST_API_KEY>`
 //! (see [`crate::auth::require_api_key`]). A browser session does not authorize
@@ -23,23 +27,19 @@ use axum::{extract::State, Json};
 use recipe_core::adapters;
 use serde::Serialize;
 
-use crate::{derive, enrich, runs, sync, AppState};
+use crate::{derive, runs, sync, AppState};
 
-/// What the whole ingest pipeline did — each stage's report, so the scheduled job
-/// can log fetch/enrich/derive counts from one response.
+/// What the ingest trigger did — sync's and derive's reports, so the scheduled job
+/// can log fetch/derive counts from one response.
 #[derive(Serialize)]
 pub struct IngestReport {
     sync: sync::SyncReport,
-    /// `None` when no extractor is configured (`LLM_BASE_URL`/`LLM_MODEL` unset) or
-    /// the enrich step errored — the corpus still syncs and derives, just without
-    /// new structured readings. Degrade-not-die.
-    enrich: Option<enrich::EnrichReport>,
     derive: derive::Report,
 }
 
-/// `POST /api/ingest` — trigger a server-driven corpus sync + enrich + derive.
+/// `POST /api/ingest` — trigger a server-driven corpus sync + derive.
 pub async fn ingest(State(state): State<AppState>) -> Json<IngestReport> {
-    // One run for the whole pipeline, so every write it makes is ordered against a
+    // One run for the whole trigger, so every write it makes is ordered against a
     // concurrent CLI `enrich`/`derive` (#11 write-path hardening). Best-effort: if
     // the run row can't be opened, stamp 0 — superseded by any real run — rather
     // than 500 a scheduled trigger.
@@ -52,25 +52,10 @@ pub async fn ingest(State(state): State<AppState>) -> Json<IngestReport> {
     let sink = sync::TursoSink { conn: &state.db };
     let sync = sync::sync(adapters::ADAPTERS, &fetcher, &sink, run_id).await;
 
-    // Enrich the newly-seen lines, if a key is configured. Best-effort: an enrich
-    // error (e.g. the API is down) must not fail the trigger — derive still runs
-    // and reattaches whatever is already cached.
-    let enrich = match state.extractor.as_ref() {
-        // Routine, not a refresh: only recipes with no reading yet. A model-driven
-        // re-snapshot is the deliberate `enrich --refresh`, never the daily path.
-        Some(extractor) => match enrich::enrich(&state.db, extractor, false, run_id).await {
-            Ok(report) => Some(report),
-            Err(e) => {
-                tracing::warn!("enrich step failed, continuing: {e}");
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Derive so `recipes` picks up the readings just stored. Also best-effort: a
-    // failed derive leaves the previous `recipes` in place rather than 500-ing a
-    // scheduled trigger.
+    // Derive so `recipes` reflects the raw just synced (and reattaches whatever
+    // readings the enrich worker has already stored). Best-effort: a failed derive
+    // leaves the previous `recipes` in place rather than 500-ing a scheduled
+    // trigger.
     let derive = derive::derive(&state.db, None, run_id)
         .await
         .unwrap_or_else(|e| {
@@ -84,9 +69,5 @@ pub async fn ingest(State(state): State<AppState>) -> Json<IngestReport> {
         tracing::warn!("could not close run {run_id}: {e}");
     }
 
-    Json(IngestReport {
-        sync,
-        enrich,
-        derive,
-    })
+    Json(IngestReport { sync, derive })
 }
