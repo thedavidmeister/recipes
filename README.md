@@ -176,7 +176,7 @@ verdicts on the vendors.
 
 ```
 crates/recipe-core   normalization — adapters (the gate) + models + per-source normalizers + measure (scale/convert)
-backend/             Axum: sync · derive · enrich pull/push (worker I/O) · corpus store · SSRF-guarded fetching (deploys to Render)
+backend/             Axum: sync · derive · enrich endpoints + worker (pull/push, mcp) · corpus store · SSRF-guarded fetching (deploys to Render)
 frontend/            SvelteKit SPA — TanStack Query · Bits UI · Tailwind (parses nothing)
 frontend/src/app.css design tokens — the one place raw colour/spacing values live
 frontend/.storybook  Storybook — every UI state declared as a story (see below)
@@ -200,13 +200,13 @@ nix develop
 - **Derive:**
   `cargo run --manifest-path backend/Cargo.toml -- derive [<source>]` — rebuild
   `recipes` from `raw_imports` (+ readings), no network
-- **Enrich (worker I/O, #59):**
-  `cargo run --manifest-path backend/Cargo.toml -- enrich pull [--limit N]`
-  prints the recipes that still need reading as JSON; `… -- enrich push` reads
-  readings JSON on stdin, stores them, and re-derives the affected recipes. The
-  reading itself is done by the enrich skill (the `recipes-enrich` plugin), not
-  the binary — these two commands are its only I/O. The skill ships as the
-  `recipes-enrich` plugin in this repo's own marketplace: install it with
+- **Enrich (worker → app, #59):** the worker reaches the app's two machine-gated
+  enrich endpoints and never touches the DB. Two equivalent forms: the **MCP
+  tools** `enrich_pull`/`enrich_push` (served by `cargo run … -- mcp`), which
+  the enrich skill drives, and the **CLI** `… -- enrich pull [--limit N]` /
+  `… -- enrich push` (readings JSON on stdin) for a shell. Both POST to the app,
+  which validates, stores, and re-derives. The reading itself is the skill's job
+  (the `recipes-enrich` plugin), never the binary's. Install the plugin with
   `/plugin marketplace add thedavidmeister/recipes` then
   `/plugin install recipes-enrich@recipes`
 - **Frontend:** `cd frontend && npm ci && npm run dev`

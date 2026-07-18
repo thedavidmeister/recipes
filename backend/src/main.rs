@@ -15,6 +15,7 @@
 //!   recipe-backend derive [<source>]        rebuild `recipes` from `raw_imports`
 //!   recipe-backend enrich pull [--limit N]  GET the app's pending recipes (#59)
 //!   recipe-backend enrich push              POST readings (from stdin) to the app
+//!   recipe-backend mcp                       MCP stdio server: enrich_pull/push tools
 
 mod auth;
 mod db;
@@ -23,6 +24,7 @@ mod enrich;
 mod enrich_api;
 mod error;
 mod ingest;
+mod mcp;
 mod proxy;
 mod recipes;
 mod runs;
@@ -171,6 +173,15 @@ fn cors() -> CorsLayer {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+
+    // `recipe-backend mcp` — the enrichment MCP server (#59). Dispatched before the
+    // default tracing init on purpose: that subscriber writes to stdout, and stdout
+    // is the MCP JSON-RPC channel, so `mcp::serve` installs its own stderr
+    // subscriber instead. Anything on stdout here would corrupt the protocol.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        return mcp::serve().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

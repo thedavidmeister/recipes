@@ -1,0 +1,139 @@
+//! `recipe-backend mcp` — an MCP server exposing the enrichment worker's two
+//! operations as typed tools (#59), so the enrich skill calls them directly instead
+//! of shelling out to the CLI.
+//!
+//! It is the same worker as `enrich pull|push`: a thin stdio server over
+//! [`crate::enrich_api::client`], holding no database connection — only the app's
+//! URL and the machine key, from its environment. The model gets exactly two tools
+//! (`enrich_pull`, `enrich_push`) and can reach the corpus only through the app's
+//! validating endpoints.
+//!
+//! **stdout is the JSON-RPC channel.** Logging must go to **stderr** or it corrupts
+//! the protocol — [`serve`] installs a stderr subscriber, and this is why the `mcp`
+//! subcommand is dispatched before the binary's default (stdout) tracing init.
+
+use rmcp::{
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    tool, tool_handler, tool_router,
+    transport::stdio,
+    ErrorData as McpError, ServerHandler, ServiceExt,
+};
+use tracing_subscriber::EnvFilter;
+
+use crate::enrich_api::client;
+
+#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+struct EnrichPullParams {
+    /// Maximum recipes to return. Omit for the server's default page size; the
+    /// worker loops until the queue is empty regardless.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+struct EnrichPushParams {
+    /// The readings produced from the pulled lines: a JSON array with one entry per
+    /// recipe, each `{ "source", "id", "readings": [StructuredMeasure, ...] }`, the
+    /// readings in ingredient order. See the skill for the StructuredMeasure shape.
+    /// The app validates this before it writes anything.
+    readings: serde_json::Value,
+}
+
+/// The enrichment worker as an MCP server. Holds only the tool router — its config
+/// (the app URL, the key, the model) is read from the environment per call by
+/// [`client`], exactly as the CLI does.
+#[derive(Clone)]
+pub struct Enricher {
+    tool_router: ToolRouter<Enricher>,
+}
+
+impl Default for Enricher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[tool_router]
+impl Enricher {
+    pub fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(
+        name = "enrich_pull",
+        description = "Get the recipes that still need a structured reading of their \
+                       ingredient lines. Returns a JSON array of {source, id, \
+                       ingredients:[{name, measure}]}; an empty array means the queue \
+                       is drained."
+    )]
+    async fn enrich_pull(
+        &self,
+        Parameters(EnrichPullParams { limit }): Parameters<EnrichPullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match client::pull_pending(limit).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            // A failure here (endpoint down, env missing) is the worker's to see and
+            // stop on — surface it as a tool error with the message, not a crash.
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "enrich_pull failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "enrich_push",
+        description = "Submit readings for one or more recipes. The app validates \
+                       each (recipe exists, reading count matches the current \
+                       ingredient list), stores them, and re-derives. Returns \
+                       {accepted, derived, rejected}."
+    )]
+    async fn enrich_push(
+        &self,
+        Parameters(EnrichPushParams { readings }): Parameters<EnrichPushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match client::push_readings(readings).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "enrich_push failed: {e}"
+            ))])),
+        }
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Enricher {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
+                "Recipe corpus enrichment (#59): pull recipes that still need a \
+                 structured reading of their ingredient lines, then push the readings \
+                 back. The app validates and writes; these tools never touch the \
+                 database."
+                    .to_string(),
+            )
+    }
+}
+
+/// Boot the stdio MCP server and block until the client disconnects.
+///
+/// Installs a **stderr** tracing subscriber first: stdout carries the JSON-RPC
+/// protocol, so anything logged there would corrupt it.
+pub async fn serve() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "recipe_backend=info,rmcp=warn".into()),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+
+    tracing::info!("recipes enrich MCP server starting on stdio");
+    let service = Enricher::new().serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}

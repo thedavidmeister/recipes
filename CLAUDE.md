@@ -92,15 +92,20 @@ the model extracts, code converts/scales — never ask the model to do arithmeti
   marketplace** (`.claude-plugin/marketplace.json`), so it versions in lockstep
   with the binary it drives — install via
   `/plugin marketplace add thedavidmeister/recipes` then
-  `/plugin install recipes-enrich@recipes`. The service holds **no** model code,
-  prompt, or provider key — that is surface a recipe API does not need, and
-  keeping it out is the point (#59). `pull`/`push` are **HTTP clients** for the
-  app's two machine-gated endpoints (`GET /api/enrich/pending`,
-  `POST
-  /api/enrich/results`), so the worker — and the model behind it — never
-  touches the database; the app validates and writes every reading. An LLM
-  writing corpus rows directly is exactly what this refuses. Extending _what_
-  gets enriched is a migration + a table, not a widening of the app's surface.
+  `/plugin install recipes-enrich@recipes`. The skill drives two **MCP tools** —
+  `enrich_pull` / `enrich_push`, served by `recipe-backend mcp` (the
+  `enrich
+  pull|push` CLI is the shell equivalent) — thin HTTP clients for the
+  endpoints, so the model calls typed tools, not raw Bash. The service holds
+  **no** model code, prompt, or provider key — that is surface a recipe API does
+  not need, and keeping it out is the point (#59). `pull`/`push` are **HTTP
+  clients** for the app's two machine-gated endpoints
+  (`GET /api/enrich/pending`, `POST
+  /api/enrich/results`), so the worker — and
+  the model behind it — never touches the database; the app validates and writes
+  every reading. An LLM writing corpus rows directly is exactly what this
+  refuses. Extending _what_ gets enriched is a migration + a table, not a
+  widening of the app's surface.
 - **Per recipe, its own table.**
   `ingredient_structures(source, id, structured,
   model, created_at)` holds one

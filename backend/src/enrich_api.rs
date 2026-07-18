@@ -125,9 +125,10 @@ pub mod client {
         }
     }
 
-    /// `recipe-backend enrich pull [--limit N]` — GET the queue, print it as JSON to
-    /// stdout for the skill to read. Prints the app's response body verbatim.
-    pub async fn pull(limit: Option<usize>) -> anyhow::Result<()> {
+    /// GET the pending recipes from the app and return the response body (the JSON
+    /// array). The shared core of the `pull` CLI command and the `enrich_pull` MCP
+    /// tool — neither prints; the caller decides what to do with the body.
+    pub async fn pull_pending(limit: Option<usize>) -> anyhow::Result<String> {
         let target = Target::from_env()?;
         let mut url = format!("{}/api/enrich/pending", target.base_url);
         if let Some(n) = limit {
@@ -143,22 +144,25 @@ pub mod client {
         if !status.is_success() {
             anyhow::bail!("pending request failed ({status}): {body}");
         }
-        println!("{body}");
+        Ok(body)
+    }
+
+    /// `recipe-backend enrich pull [--limit N]` — the CLI form: print what
+    /// [`pull_pending`] returns to stdout, for a Bash-driven skill.
+    pub async fn pull(limit: Option<usize>) -> anyhow::Result<()> {
+        println!("{}", pull_pending(limit).await?);
         Ok(())
     }
 
-    /// `… | recipe-backend enrich push` — read the skill's readings JSON from stdin,
-    /// stamp the model from `ENRICH_MODEL`, POST to the results endpoint, print the
-    /// accepted/derived/rejected summary. The app does the validation and the
-    /// writing; this only forwards.
-    pub async fn push() -> anyhow::Result<()> {
-        use std::io::Read;
+    /// POST a batch of readings to the app and return the response body (the
+    /// accepted/derived/rejected summary). Stamps the model from `ENRICH_MODEL`. The
+    /// shared core of the `push` CLI command and the `enrich_push` MCP tool —
+    /// `readings` is the JSON array of `{source, id, readings}`, supplied on stdin
+    /// (CLI) or as a typed tool argument (MCP). The app validates and writes; this
+    /// only forwards.
+    pub async fn push_readings(readings: Value) -> anyhow::Result<String> {
         let target = Target::from_env()?;
         let model = require_model(std::env::var("ENRICH_MODEL").ok())?;
-
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input)?;
-        let readings = normalize_readings(&input)?;
         let body = json!({ "model": model, "readings": readings });
 
         let resp = reqwest::Client::new()
@@ -172,7 +176,17 @@ pub mod client {
         if !status.is_success() {
             anyhow::bail!("results request failed ({status}): {text}");
         }
-        println!("{text}");
+        Ok(text)
+    }
+
+    /// `… | recipe-backend enrich push` — the CLI form: read the skill's readings
+    /// JSON from stdin, forward via [`push_readings`], print the summary to stdout.
+    pub async fn push() -> anyhow::Result<()> {
+        use std::io::Read;
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        let readings = normalize_readings(&input)?;
+        println!("{}", push_readings(readings).await?);
         Ok(())
     }
 

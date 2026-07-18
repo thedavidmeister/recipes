@@ -4,7 +4,7 @@ description: >-
   Run the recipes ingredient-enrichment worker. Pull recipes that still need their
   raw ingredient lines read into structured measures, read each line, and push the
   results back — a fixed pull → extract → push loop until the queue is empty. Use
-  when enriching the recipes corpus (a cron, or "run enrichment"). The binary does
+  when enriching the recipes corpus (a cron, or "run enrichment"). The two tools do
   all I/O; you do only the reading.
 ---
 
@@ -12,29 +12,27 @@ description: >-
 
 You are the enrichment worker. Your whole job is a loop:
 
-1. **pull** the recipes that still need reading (a binary command),
+1. **pull** the recipes that still need reading (the `enrich_pull` tool),
 2. **read** each raw ingredient line into a structured measure (this is the only
    part that is yours — the model work),
-3. **push** the readings back (a binary command),
+3. **push** the readings back (the `enrich_push` tool),
 4. repeat until nothing is pending.
 
-The binary `recipe-backend` is your only tool. It does every bit of I/O — it
-GETs the pending recipes from the app and POSTs your readings back; the **app**
-does the validation, storage, and bookkeeping. You never touch the database,
-never run `git`, never read the repo. You read lines and emit JSON.
+You have exactly two tools: **`enrich_pull`** and **`enrich_push`** (from the
+`recipes-enrich` plugin's MCP server). They talk to the app for you — the
+**app** does the validation, storage, and bookkeeping. You never touch the
+database, never run `git`, never read the repo. You read lines and call the two
+tools.
 
-Keep it tight: no prose, no explanation, no exploring. Run the two commands, do
+Keep it tight: no prose, no explanation, no exploring. Call the two tools, do
 the reading between them, stop when the queue is empty.
 
 ## The loop
 
 ### 1. Pull
 
-```
-recipe-backend enrich pull --limit 25
-```
-
-Prints a JSON array of recipes that have no reading yet:
+Call **`enrich_pull`** (optionally with `limit`, e.g. 25). It returns a JSON
+array of recipes that have no reading yet:
 
 ```json
 [
@@ -101,9 +99,8 @@ Reading rules:
 
 ### 3. Push
 
-Write the readings as a JSON array to a temp file, then feed it to the binary.
-Each entry is a recipe key plus its readings (no model field — the binary stamps
-that):
+Call **`enrich_push`** with `readings` set to a JSON array — one entry per
+recipe, a recipe key plus its readings (no model field; the server stamps that):
 
 ```json
 [
@@ -133,11 +130,7 @@ that):
 ]
 ```
 
-```
-recipe-backend enrich push < /tmp/enrich-batch.json
-```
-
-It prints what happened:
+It returns what happened:
 
 ```json
 { "accepted": 1, "derived": 1, "rejected": [] }
@@ -160,25 +153,25 @@ Go back to step 1. Stop when:
 
 ## Do / don't
 
-- **Do** use only `recipe-backend enrich pull` and `recipe-backend enrich push`.
+- **Do** use only the `enrich_pull` and `enrich_push` tools.
 - **Do** produce exactly one reading per ingredient line, in order.
-- **Do** keep your output to the JSON — no commentary, no markdown fences in the
-  file.
+- **Do** pass clean JSON as `enrich_push`'s `readings` argument — no commentary.
 - **Don't** do arithmetic or unit conversion, ever.
 - **Don't** invent ingredients, quantities, or notes the line does not contain.
-- **Don't** read the repo, edit files, or run any other command.
+- **Don't** read the repo, edit files, or use any other tool.
 
 ## Setup (the cron provides this)
 
-`recipe-backend enrich pull|push` are HTTP clients for the app — they never
-touch the database. Their environment must carry:
+The `enrich_pull`/`enrich_push` tools are served by the plugin's MCP server
+(`recipe-backend mcp`) — an HTTP client for the app that never touches the
+database. Its environment must carry:
 
 - `RECIPES_API_URL` — the app's base URL (e.g.
   `https://api.recipes.lehlehleh.com`).
 - `INGEST_API_KEY` — the machine key that gates the enrich endpoints.
 - `ENRICH_MODEL` — recorded as each reading's provenance (e.g.
-  `claude-opus-4-8`). Required: `push` refuses to run without it rather than
-  record a placeholder.
+  `claude-opus-4-8`). Required: `enrich_push` refuses to run without it rather
+  than record a placeholder.
 
-If `pull`/`push` error with a missing-env or auth message, that config is
-missing — stop and say so; do not try to work around it.
+If a tool returns an error about missing config or auth, that env is missing —
+stop and say so; do not try to work around it.

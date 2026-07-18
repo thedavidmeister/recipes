@@ -8,5 +8,11 @@
   },
   "homepage": "https://github.com/thedavidmeister/recipes",
   "repository": "https://github.com/thedavidmeister/recipes",
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": {
+    "recipes-enrich": {
+      "command": "recipe-backend",
+      "args": ["mcp"]
+    }
+  }
 }

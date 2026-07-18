@@ -40,6 +40,12 @@ rand = "0.8"
 sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
+# MCP server (#59): `recipe-backend mcp` exposes `enrich pull|push` as typed tools
+# for the enrich skill, so the model calls them directly instead of shelling out.
+# `transport-io` is the stdio transport (not a default feature); `server`/`macros`
+# are default but named for clarity. schemars comes in via rmcp — the mcp module
+# uses `rmcp::schemars` to derive tool schemas, so we don't pin schemars ourselves.
+rmcp = { version = "2.2.0", features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 # Drives the real Router through `oneshot` so the auth gate is tested against
