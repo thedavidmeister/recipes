@@ -12,10 +12,11 @@
 use libsql::Connection;
 use recipe_core::adapters;
 
+use crate::enrich;
 use crate::recipes::upsert;
 
 /// What a derive run did.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Report {
     /// Raw payloads read.
     pub read: usize,
@@ -31,6 +32,12 @@ pub struct Report {
 /// source, so fixing one adapter need not replay the whole corpus.
 pub async fn derive(conn: &Connection, source: Option<&str>) -> anyhow::Result<Report> {
     let mut report = Report::default();
+
+    // The structured cache (#11), loaded once so reattaching a reading onto each
+    // ingredient is an in-memory lookup rather than a query per line. Empty when
+    // nothing has been enriched — every line then just stays `structured: None`,
+    // which is why deriving works with or without enrichment having run.
+    let cache = enrich::load_cache(conn).await?;
 
     let mut rows = match source {
         Some(source) => {
@@ -72,7 +79,10 @@ pub async fn derive(conn: &Connection, source: Option<&str>) -> anyhow::Result<R
             report.skipped += 1;
             continue;
         }
-        for item in ingested {
+        for mut item in ingested {
+            // Reattach the enrichment half. Normalization produces `structured:
+            // None`; `derive` is the join that fills it from the cache.
+            enrich::attach(&cache, &mut item.recipe.ingredients);
             upsert(conn, &item.recipe).await?;
             report.derived += 1;
         }
@@ -196,6 +206,51 @@ mod tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             1,
             "raw must survive a normalizer that cannot read it"
+        );
+    }
+
+    /// Deriving reattaches a cached structured reading onto the matching
+    /// ingredient (#11) and leaves an uncached line `None` — the offline join that
+    /// fills `structured`, no LLM. This is acceptance #1: after derive, a stored
+    /// recipe carries the structured list, with raw preserved beside it.
+    #[tokio::test]
+    async fn derive_reattaches_cached_readings_selectively() {
+        let conn = conn().await;
+        insert_raw(
+            &conn,
+            "1",
+            r#"{"meals":[{"idMeal":"1","strMeal":"Toast","strInstructions":"Toast it.","strIngredient1":"Bread","strMeasure1":"1 slice","strIngredient2":"Butter","strMeasure2":"1 tbsp"}]}"#,
+        )
+        .await;
+        // Only the bread line is cached; butter is not.
+        conn.execute(
+            "INSERT INTO ingredient_structured (name, measure, structured) VALUES ('Bread', '1 slice', ?1)",
+            libsql::params![r#"{"item":"bread","amount":null,"preparation":"toasted","note":null}"#],
+        )
+        .await
+        .unwrap();
+
+        derive(&conn, None).await.unwrap();
+
+        let mut rows = conn
+            .query("SELECT ingredients FROM recipes WHERE id = '1'", ())
+            .await
+            .unwrap();
+        let json: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let ingredients: Vec<recipe_core::Ingredient> = serde_json::from_str(&json).unwrap();
+
+        let bread = &ingredients[0];
+        assert_eq!(bread.measure.as_deref(), Some("1 slice"), "raw preserved");
+        let structured = bread
+            .structured
+            .as_ref()
+            .expect("the cached line gets its reading reattached");
+        assert_eq!(structured.item, "bread");
+        assert_eq!(structured.preparation.as_deref(), Some("toasted"));
+
+        assert_eq!(
+            ingredients[1].structured, None,
+            "a line with no cache entry stays None"
         );
     }
 

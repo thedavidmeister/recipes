@@ -24,6 +24,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_raw_imports.sql")),
     (3, include_str!("../migrations/0003_auth.sql")),
+    (
+        4,
+        include_str!("../migrations/0004_ingredient_structured.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -220,6 +224,7 @@ mod tests {
         for table in [
             "recipes",
             "raw_imports",
+            "ingredient_structured",
             "users",
             "login_completions",
             "sessions",
