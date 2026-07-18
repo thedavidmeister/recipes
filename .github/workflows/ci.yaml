@@ -70,3 +70,29 @@ jobs:
           name: visual-diff
           path: frontend/tests/visual/__diff__/
           if-no-files-found: ignore
+  # Build the backend Docker image, because otherwise nothing here does — it is
+  # built ONLY by Render on deploy (#52). So a change that breaks the image passed
+  # every check and silently build-failed the deploy, twice (#48/#50 added a
+  # workspace crate the dep-cache stub stage did not know about; the backend served
+  # stale code for two merges). This turns that into a red X on the PR.
+  #
+  # `--target build` stops at the compile stage — enough to catch the whole class
+  # (workspace load, dependency resolution, the actual compile, and a crate left as
+  # an empty stub), without paying for the runtime image's apt step. The gha layer
+  # cache reuses the dependency layer across runs, so a source-only change is cheap,
+  # exactly as it is on Render (whose own build reuses that same stub layer).
+  #
+  # Not a rainix reusable: the Dockerfile is specific to this backend, so it stays
+  # here rather than in shared CI.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: build
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
