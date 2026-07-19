@@ -35,8 +35,9 @@ struct EnrichPullParams {
 struct EnrichPushParams {
     /// The readings produced from the pulled lines: a JSON array with one entry per
     /// recipe, each `{ "source", "id", "readings": [StructuredMeasure, ...] }`, the
-    /// readings in ingredient order. See the skill for the StructuredMeasure shape.
-    /// The app validates this before it writes anything.
+    /// readings in ingredient order (see the skill for the StructuredMeasure shape).
+    /// Pass a native JSON array; a JSON-encoded string of one is also accepted. The
+    /// app validates this before it writes anything.
     readings: serde_json::Value,
 }
 
