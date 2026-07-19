@@ -144,7 +144,8 @@ fn map_recipe(node: &Value, url: &str) -> Recipe {
         video_url: node
             .get("video")
             .and_then(|v| v.get("contentUrl").or_else(|| v.get("embedUrl")))
-            .and_then(first_string),
+            .and_then(first_string)
+            .and_then(|s| crate::adapters::http_url(&s)),
     }
 }
 
@@ -162,11 +163,13 @@ fn first_string(value: &Value) -> Option<String> {
     }
 }
 
-/// First URL reachable from `value` (image can be a string, an `ImageObject`
-/// with a `url`, or an array of either).
+/// First **http(s)** URL reachable from `value` (image can be a string, an
+/// `ImageObject` with a `url`, or an array of either). Validating at the leaf
+/// means an array drops a hostile `javascript:` entry and keeps looking for a
+/// usable one, rather than taking the first entry blindly.
 fn first_url(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => crate::adapters::http_url(s),
         Value::Array(items) => items.iter().find_map(first_url),
         Value::Object(map) => map.get("url").and_then(first_url),
         _ => None,
@@ -285,6 +288,48 @@ mod tests {
         assert_eq!(recipe.category.as_deref(), Some("Breakfast"));
         assert_eq!(recipe.area.as_deref(), Some("American"));
         assert_eq!(recipe.tags, vec!["easy", "quick"]);
+    }
+
+    #[test]
+    fn hostile_url_schemes_are_dropped_but_the_recipe_survives() {
+        let html = r#"
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "Recipe",
+          "name": "X",
+          "image": "javascript:alert(1)",
+          "video": { "@type": "VideoObject", "contentUrl": "javascript:alert(2)" },
+          "recipeIngredient": ["1 egg"],
+          "recipeInstructions": "Cook it."
+        }
+        </script>"#;
+
+        let recipe = parse_html(html, "https://example.com/x").expect("a Recipe");
+        // A javascript: image and video are refused; the recipe is still stored.
+        assert_eq!(recipe.image, None);
+        assert_eq!(recipe.video_url, None);
+        assert_eq!(recipe.title, "X");
+        // source_url is the http URL we fetched — unaffected.
+        assert_eq!(recipe.source_url.as_deref(), Some("https://example.com/x"));
+    }
+
+    #[test]
+    fn an_image_array_skips_a_hostile_entry_for_a_usable_one() {
+        let html = r#"
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "Recipe",
+          "name": "X",
+          "image": ["javascript:alert(1)", "https://example.com/ok.jpg"],
+          "recipeIngredient": ["1 egg"],
+          "recipeInstructions": "Cook it."
+        }
+        </script>"#;
+
+        let recipe = parse_html(html, "https://example.com/x").expect("a Recipe");
+        assert_eq!(recipe.image.as_deref(), Some("https://example.com/ok.jpg"));
     }
 
     #[test]

@@ -139,6 +139,22 @@ pub fn is_supported(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Keep a URL only if its scheme is `http`/`https`, else `None`.
+///
+/// A recipe's `image`/`video_url`/`source_url` can be a URL a hostile page
+/// authored — `javascript:`, `data:`, `file:` — and a consumer that renders one
+/// as a link (`<a href>`, `<iframe src>`) is a stored-XSS sink. Cleaning here, as
+/// a recipe is normalized, means no downstream consumer can be handed a dangerous
+/// scheme; sanitizing in one view would leave the corpus itself poisoned for the
+/// next one. A rejected URL costs only that field — the recipe is still stored,
+/// image-less — never the whole record. Anything that does not parse as an
+/// absolute URL (a relative reference, empty string) is dropped too.
+pub(crate) fn http_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let parsed = Url::parse(raw).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then(|| raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +163,32 @@ mod tests {
     fn themealdb_is_supported() {
         let a = adapter_for("www.themealdb.com").expect("themealdb adapter");
         assert_eq!(a.id, "themealdb");
+    }
+
+    #[test]
+    fn http_url_keeps_only_http_and_https() {
+        assert_eq!(
+            http_url("https://example.com/x.jpg").as_deref(),
+            Some("https://example.com/x.jpg")
+        );
+        assert_eq!(
+            http_url("http://example.com/x").as_deref(),
+            Some("http://example.com/x")
+        );
+        // surrounding whitespace is trimmed off a valid URL
+        assert_eq!(
+            http_url("  https://example.com/x  ").as_deref(),
+            Some("https://example.com/x")
+        );
+        // hostile / non-web schemes are refused (the url crate lowercases the
+        // scheme, so the compare is case-insensitive)
+        assert_eq!(http_url("javascript:alert(1)"), None);
+        assert_eq!(http_url("JavaScript:alert(1)"), None);
+        assert_eq!(http_url("data:text/html,<script>alert(1)</script>"), None);
+        assert_eq!(http_url("file:///etc/passwd"), None);
+        // not an absolute URL
+        assert_eq!(http_url("/images/x.jpg"), None);
+        assert_eq!(http_url(""), None);
     }
 
     #[test]
