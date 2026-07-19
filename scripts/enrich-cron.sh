@@ -50,6 +50,23 @@ export RECIPES_API_URL INGEST_API_KEY ENRICH_MODEL
 
 cd "$REPO"
 
+# --- track main ------------------------------------------------------------------
+# The cron builds recipe-backend, the plugin, and the skill from this checkout, so
+# pull the latest merged code first. Only when the tree is clean AND on main, though:
+# this checkout is also used interactively, and the cron must never switch a branch or
+# clobber uncommitted work out from under a session mid-edit. Off-main or dirty => skip
+# with a warning and build the working tree as it stands.
+branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+  log "WARNING: $REPO is dirty; skipping pull, building the working tree as-is"
+elif [ "$branch" != "main" ]; then
+  log "WARNING: $REPO is on '$branch', not main; skipping pull, building it as-is"
+else
+  log "updating $REPO to origin/main"
+  git -C "$REPO" pull --ff-only --quiet origin main \
+    || die "git pull --ff-only failed (has main diverged locally?)"
+fi
+
 # --- recipe-backend on PATH ------------------------------------------------------
 # The MCP server (recipe-backend mcp) and the CLI queue-peek below both need the
 # binary. Build it as a flake package (cached after the first run) and prepend its
