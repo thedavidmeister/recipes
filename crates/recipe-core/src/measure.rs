@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub struct StructuredMeasure {
     /// The ingredient itself, as the model read it (e.g. `"chicken thighs"`).
     /// Never invented — constrained to what the source line named. It can refine a
-    /// messy name: a schema.org line is the whole `"1 cup flour"`, and `item`
+    /// messy name: a raw line might be the whole `"1 cup flour"`, and `item`
     /// pulls `"flour"` out of it.
     pub item: String,
     /// How much, or `None` for a bare ingredient with no stated amount.

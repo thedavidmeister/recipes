@@ -9,7 +9,6 @@
 pub mod adapters;
 pub mod measure;
 pub mod models;
-pub mod schema_org;
 pub mod themealdb;
 
 pub use adapters::{adapter_for, Adapter, IngestError};

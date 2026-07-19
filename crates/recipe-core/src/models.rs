@@ -1,7 +1,7 @@
 //! Normalized recipe types shared across all sources.
 //!
-//! Every source (TheMealDB, arbitrary schema.org pages, future APIs) maps its
-//! own payload onto these types so the frontend sees one consistent shape.
+//! Every source (TheMealDB today, future APIs) maps its own payload onto these
+//! types so the frontend sees one consistent shape.
 
 use serde::{Deserialize, Serialize};
 

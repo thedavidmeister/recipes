@@ -26,7 +26,7 @@ export const NoMeta: Story = {
   args: { recipe: recipe({ category: null, area: null }) },
 };
 
-/** Real schema.org titles run long; check wrapping. */
+/** Real recipe titles run long; check wrapping. */
 export const LongTitle: Story = {
   args: {
     recipe: recipe({
