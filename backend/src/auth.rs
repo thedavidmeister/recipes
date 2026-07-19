@@ -10,7 +10,9 @@
 //! ## The bot logs you in; the site only points at it
 //!
 //! 1. The site shows a link to the bot. Pressing **Start** sends it `/start`
-//!    along with your Telegram id — that id is the login.
+//!    along with your Telegram id — that id is the login. Sending `/login` in an
+//!    already-open chat does the same: Telegram only auto-sends `/start` on the
+//!    first open, so `/login` is the typeable command for signing in again.
 //! 2. The bot replies **to you** with a one-time completion link.
 //! 3. Opening it sets the session cookie **in your browser**.
 //!
@@ -649,7 +651,18 @@ fn verify_webhook_origin(headers: &HeaderMap, expected: &str) -> bool {
     got.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
-/// `POST /api/telegram/webhook` — someone pressed Start.
+/// Does this message ask to sign in? Telegram auto-sends `/start` when the bot is
+/// first opened (or its Start button tapped), so that stays the one-tap path;
+/// `/login` is the typeable alias for signing in again from an existing chat, where
+/// there is no Start button to press. Both mint a fresh completion link. A trailing
+/// deep-link payload (`/start abc`) or a group-style suffix (`/login@thebot`) still
+/// counts.
+fn is_login_command(text: &str) -> bool {
+    let cmd = text.trim_start();
+    cmd.starts_with("/start") || cmd.starts_with("/login")
+}
+
+/// `POST /api/telegram/webhook` — someone pressed Start, or sent `/login`.
 ///
 /// This is where a login begins, and the direction matters: Telegram tells us
 /// *which user* messaged the bot, we mint a completion secret **for that user**,
@@ -679,8 +692,8 @@ pub async fn webhook(
     // Telegram sends a bare `/start` when the deep link carries no payload, which
     // is the normal case here: the link exists to open a chat, not to carry state.
     // A payload would be ignored — there is nothing a caller could usefully say.
-    if !text.trim_start().starts_with("/start") {
-        reply(&state, chat.id, "Send /start to sign in.").await;
+    if !is_login_command(&text) {
+        reply(&state, chat.id, "Send /login to sign in.").await;
         return Ok(StatusCode::OK);
     }
 
@@ -834,6 +847,23 @@ mod tests {
             HeaderValue::from_static("s3cret"),
         );
         assert!(verify_webhook_origin(&headers, "s3cret"));
+    }
+
+    /// `/login` is an alias of `/start` (both sign in); a deep-link payload or an
+    /// `@mention` suffix still counts; anything else does not.
+    #[test]
+    fn login_command_accepts_start_and_login() {
+        assert!(is_login_command("/start"));
+        assert!(is_login_command("/login"));
+        assert!(is_login_command("  /login"), "Telegram may pad");
+        assert!(is_login_command("/start deadbeef"), "deep-link payload");
+        assert!(
+            is_login_command("/login@lehlehlehbot"),
+            "group @mention suffix"
+        );
+        assert!(!is_login_command("/help"));
+        assert!(!is_login_command("hello"));
+        assert!(!is_login_command("start"), "a slash is required");
     }
 
     #[test]

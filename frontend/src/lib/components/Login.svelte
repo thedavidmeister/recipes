@@ -50,8 +50,9 @@
     </a>
 
     <p class="mt-4 text-sm text-stone-500">
-      Press <span class="font-medium">Start</span> in Telegram and the bot will send
-      you a link back. Open it and you're in.
+      Press <span class="font-medium">Start</span> in Telegram — or send
+      <span class="font-medium">/login</span> if you've messaged the bot before — and
+      it will send you a link back. Open it and you're in.
     </p>
     <p class="mt-3 text-xs text-stone-400">
       Open the bot's link on this device — it signs in the browser you open it
