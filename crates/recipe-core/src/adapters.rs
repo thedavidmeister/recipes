@@ -16,7 +16,7 @@
 use url::Url;
 
 use crate::models::Recipe;
-use crate::{schema_org, themealdb};
+use crate::themealdb;
 
 /// A normalized recipe together with the raw payload it came from.
 ///
@@ -36,8 +36,8 @@ pub struct Ingested {
     /// runs the ingest path, not a parallel one.
     pub raw: String,
     /// The URL this was fetched from, carried so the store does not have to be
-    /// told separately (and cannot be told wrongly). `derive` replays it, since
-    /// schema.org reads a recipe's id and source_url off its URL.
+    /// told separately (and cannot be told wrongly). `derive` replays it as the
+    /// URL handed to `normalize`.
     pub fetched_from: String,
 }
 
@@ -57,8 +57,7 @@ pub struct Adapter {
     pub normalize: fn(url: &Url, body: &str) -> Vec<Ingested>,
     /// The URLs this source can be pulled from — its whole catalog, for a
     /// server-driven sync (#49). A sync fetches each, `normalize`s it, and stores
-    /// what comes back. Empty for a source that lists nothing (schema.org, until
-    /// a domain is allowlisted into it).
+    /// what comes back. Empty for a source that lists nothing.
     ///
     /// This is *self-contained* — no crawl: for TheMealDB the 26 `search.php?f=`
     /// letter queries each already return complete recipes, so the catalog is a
@@ -67,20 +66,12 @@ pub struct Adapter {
 }
 
 /// Every supported source, in match order.
-pub const ADAPTERS: &[Adapter] = &[
-    Adapter {
-        id: themealdb::SOURCE,
-        handles: themealdb::handles,
-        normalize: themealdb::normalize_document,
-        catalog: themealdb::catalog,
-    },
-    Adapter {
-        id: schema_org::SOURCE,
-        handles: schema_org::handles,
-        normalize: schema_org::normalize_document,
-        catalog: schema_org::catalog,
-    },
-];
+pub const ADAPTERS: &[Adapter] = &[Adapter {
+    id: themealdb::SOURCE,
+    handles: themealdb::handles,
+    normalize: themealdb::normalize_document,
+    catalog: themealdb::catalog,
+}];
 
 /// The adapter claiming `host`, if any.
 pub fn adapter_for(host: &str) -> Option<&'static Adapter> {
@@ -139,6 +130,22 @@ pub fn is_supported(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Keep a URL only if its scheme is `http`/`https`, else `None`.
+///
+/// A recipe's `image`/`video_url`/`source_url` can be a URL a hostile page
+/// authored — `javascript:`, `data:`, `file:` — and a consumer that renders one
+/// as a link (`<a href>`, `<iframe src>`) is a stored-XSS sink. Cleaning here, as
+/// a recipe is normalized, means no downstream consumer can be handed a dangerous
+/// scheme; sanitizing in one view would leave the corpus itself poisoned for the
+/// next one. A rejected URL costs only that field — the recipe is still stored,
+/// image-less — never the whole record. Anything that does not parse as an
+/// absolute URL (a relative reference, empty string) is dropped too.
+pub(crate) fn http_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let parsed = Url::parse(raw).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then(|| raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +154,32 @@ mod tests {
     fn themealdb_is_supported() {
         let a = adapter_for("www.themealdb.com").expect("themealdb adapter");
         assert_eq!(a.id, "themealdb");
+    }
+
+    #[test]
+    fn http_url_keeps_only_http_and_https() {
+        assert_eq!(
+            http_url("https://example.com/x.jpg").as_deref(),
+            Some("https://example.com/x.jpg")
+        );
+        assert_eq!(
+            http_url("http://example.com/x").as_deref(),
+            Some("http://example.com/x")
+        );
+        // surrounding whitespace is trimmed off a valid URL
+        assert_eq!(
+            http_url("  https://example.com/x  ").as_deref(),
+            Some("https://example.com/x")
+        );
+        // hostile / non-web schemes are refused (the url crate lowercases the
+        // scheme, so the compare is case-insensitive)
+        assert_eq!(http_url("javascript:alert(1)"), None);
+        assert_eq!(http_url("JavaScript:alert(1)"), None);
+        assert_eq!(http_url("data:text/html,<script>alert(1)</script>"), None);
+        assert_eq!(http_url("file:///etc/passwd"), None);
+        // not an absolute URL
+        assert_eq!(http_url("/images/x.jpg"), None);
+        assert_eq!(http_url(""), None);
     }
 
     #[test]
@@ -200,15 +233,6 @@ mod tests {
         );
     }
 
-    /// schema.org is kept but demoted — it is no longer the way in. It claims no
-    /// host until domains are explicitly allowlisted into it.
-    #[test]
-    fn schema_org_claims_nothing_by_default() {
-        for host in ["example.com", "www.themealdb.com", "recipes.test"] {
-            assert!(!(schema_org::handles)(host));
-        }
-    }
-
     #[test]
     fn themealdb_document_normalizes_through_the_registry() {
         let json = r#"{"meals":[{"idMeal":"1","strMeal":"Toast","strInstructions":"Toast it.","strIngredient1":"Bread","strMeasure1":"1 slice"}]}"#;
@@ -223,12 +247,10 @@ mod tests {
     }
 
     /// The catalog a server-driven sync (#49) pulls: TheMealDB enumerates a–z,
-    /// schema.org lists nothing, and every catalogued URL is a host the same
-    /// adapter claims — so the sync only ever fetches supported sources.
+    /// and every catalogued URL is a host the same adapter claims — so the sync
+    /// only ever fetches supported sources.
     #[test]
     fn catalogs_are_supported_and_bounded() {
-        assert!(schema_org::catalog().is_empty(), "schema.org lists nothing");
-
         let themealdb = themealdb::catalog();
         // a-z *and* 0-9: a meal really does start with a digit ("15-minute
         // chicken & halloumi burgers"), so an a-z-only catalog drops it.

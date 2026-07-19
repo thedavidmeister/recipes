@@ -84,14 +84,16 @@ impl Meal {
             id: self.id,
             source: SOURCE.to_string(),
             title: self.title,
-            image: self.thumb,
+            image: self.thumb.and_then(|s| crate::adapters::http_url(&s)),
             category: self.category,
             area: self.area,
             tags,
             ingredients,
             instructions: self.instructions.unwrap_or_default(),
-            source_url: self.source_url.filter(|s| !s.is_empty()),
-            video_url: self.youtube.filter(|s| !s.is_empty()),
+            // http(s) only — strSource/strYoutube/strMealThumb are third-party data
+            // we do not control. http_url also subsumes the old empty-string filter.
+            source_url: self.source_url.and_then(|s| crate::adapters::http_url(&s)),
+            video_url: self.youtube.and_then(|s| crate::adapters::http_url(&s)),
         }
     }
 }
@@ -287,5 +289,43 @@ mod tests {
     fn empty_response_normalizes_to_empty() {
         assert!(normalize_meals(r#"{"meals":null}"#).is_empty());
         assert!(normalize_meal(r#"{"meals":null}"#).is_none());
+    }
+
+    #[test]
+    fn hostile_url_schemes_are_dropped() {
+        // strMealThumb/strYoutube/strSource are third-party; a javascript:/data:/file:
+        // URL in any is refused, but the meal still normalizes.
+        let json = r#"{"meals":[{
+            "idMeal":"1","strMeal":"X","strInstructions":"Cook.",
+            "strMealThumb":"javascript:alert(1)","strYoutube":"data:text/html,x",
+            "strSource":"file:///etc/passwd",
+            "strIngredient1":"Bread","strMeasure1":"1"
+        }]}"#;
+        let recipe = normalize_meal(json).expect("a recipe");
+        assert_eq!(recipe.image, None);
+        assert_eq!(recipe.video_url, None);
+        assert_eq!(recipe.source_url, None);
+        assert_eq!(recipe.title, "X");
+    }
+
+    #[test]
+    fn valid_http_urls_pass_through() {
+        let json = r#"{"meals":[{
+            "idMeal":"1","strMeal":"X","strInstructions":"Cook.",
+            "strMealThumb":"https://img/x.jpg",
+            "strYoutube":"https://www.youtube.com/watch?v=abc",
+            "strSource":"http://example.com/recipe",
+            "strIngredient1":"Bread","strMeasure1":"1"
+        }]}"#;
+        let recipe = normalize_meal(json).expect("a recipe");
+        assert_eq!(recipe.image.as_deref(), Some("https://img/x.jpg"));
+        assert_eq!(
+            recipe.video_url.as_deref(),
+            Some("https://www.youtube.com/watch?v=abc")
+        );
+        assert_eq!(
+            recipe.source_url.as_deref(),
+            Some("http://example.com/recipe")
+        );
     }
 }

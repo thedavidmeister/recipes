@@ -146,8 +146,8 @@ async fn normalize_and_upsert(
     };
 
     // A payload is a document for its own adapter, so deriving runs the ingest path
-    // rather than a parallel one. schema.org reads a recipe's id and source_url off
-    // the URL, so pass the URL it was fetched at.
+    // rather than a parallel one. `normalize` takes the URL it was fetched at; when a
+    // stored row carries none, synthesize a stand-in from source + id.
     let url = source_url.unwrap_or_else(|| format!("https://{source}/{id}"));
     let Ok(parsed) = url::Url::parse(&url) else {
         report.skipped += 1;
