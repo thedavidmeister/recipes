@@ -323,6 +323,9 @@ mod tests {
             recipe.video_url.as_deref(),
             Some("https://www.youtube.com/watch?v=abc")
         );
-        assert_eq!(recipe.source_url.as_deref(), Some("http://example.com/recipe"));
+        assert_eq!(
+            recipe.source_url.as_deref(),
+            Some("http://example.com/recipe")
+        );
     }
 }
