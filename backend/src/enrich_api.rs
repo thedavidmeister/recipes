@@ -168,6 +168,7 @@ pub mod client {
     /// (CLI) or as a typed tool argument (MCP). The app validates and writes; this
     /// only forwards.
     pub async fn push_readings(readings: Value) -> anyhow::Result<String> {
+        let readings = normalize_readings(readings)?;
         let target = Target::from_env()?;
         let model = require_model(std::env::var("ENRICH_MODEL").ok())?;
         let body = json!({ "model": model, "readings": readings });
@@ -192,27 +193,42 @@ pub mod client {
         use std::io::Read;
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input)?;
-        let readings = normalize_readings(&input)?;
-        println!("{}", push_readings(readings).await?);
+        // Hand the raw stdin through as a string; normalize_readings parses it — the
+        // same coercion it applies to the MCP tool's stringified argument.
+        println!("{}", push_readings(Value::String(input)).await?);
         Ok(())
     }
 
-    /// The skill emits either a bare array of `{source, id, readings}` or a
-    /// `{ "readings": [...] }` object wrapping it — accept both and return the array.
-    /// Pure, so the one-wrapper tolerance is tested directly.
-    fn normalize_readings(input: &str) -> anyhow::Result<Value> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Ok(json!([]));
-        }
-        match serde_json::from_str::<Value>(trimmed)? {
+    /// Coerce whatever a caller supplied into the readings array the endpoint wants.
+    /// Accepts a native array; a `{ "readings": [...] }` object wrapping one; or a
+    /// JSON **string** holding either of those. The string case is not an edge case:
+    /// an MCP model routinely encodes a nested-array argument as a string, and the
+    /// CLI hands its stdin through here as a string too. Empty or null ⇒ `[]`. Pure,
+    /// so every shape is tested directly.
+    fn normalize_readings(readings: Value) -> anyhow::Result<Value> {
+        match readings {
+            Value::Null => Ok(json!([])),
             arr @ Value::Array(_) => Ok(arr),
             Value::Object(mut map) => map
                 .remove("readings")
                 .filter(Value::is_array)
                 .ok_or_else(|| anyhow::anyhow!("push input object has no `readings` array")),
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Ok(json!([]));
+                }
+                match serde_json::from_str::<Value>(trimmed)? {
+                    // One decode only: a value that decodes to another string is
+                    // malformed, not something to keep peeling.
+                    Value::String(_) => {
+                        anyhow::bail!("push readings decoded to a string, expected an array")
+                    }
+                    decoded => normalize_readings(decoded),
+                }
+            }
             _ => anyhow::bail!(
-                "push input must be a JSON array or an object with a `readings` array"
+                "push readings must be a JSON array or an object with a `readings` array"
             ),
         }
     }
@@ -243,24 +259,45 @@ pub mod client {
             );
         }
 
-        /// The push input accepts a bare array or a `{readings:[...]}` wrapper, and
-        /// rejects anything else.
+        /// The push input accepts a native array, a `{readings:[...]}` wrapper, or a
+        /// JSON-encoded string of either (what the MCP model sends), and rejects
+        /// anything else.
         #[test]
-        fn normalize_readings_accepts_array_or_wrapper() {
-            assert_eq!(normalize_readings("").unwrap(), json!([]));
+        fn normalize_readings_accepts_array_wrapper_or_stringified() {
+            let arr = json!([{"source":"s","id":"1","readings":[]}]);
+
+            // Empty and null both mean "nothing to submit".
+            assert_eq!(normalize_readings(json!("")).unwrap(), json!([]));
+            assert_eq!(normalize_readings(Value::Null).unwrap(), json!([]));
+
+            // A native array passes through; a {readings:[...]} object unwraps.
+            assert_eq!(normalize_readings(arr.clone()).unwrap(), arr);
             assert_eq!(
-                normalize_readings(r#"[{"source":"s","id":"1","readings":[]}]"#).unwrap(),
-                json!([{"source":"s","id":"1","readings":[]}])
+                normalize_readings(json!({ "readings": arr.clone() })).unwrap(),
+                arr
+            );
+
+            // The regression: a JSON-encoded string of the array (an MCP model
+            // stringifies its nested-array argument) is parsed back to the array —
+            // and a stringified wrapper is parsed then unwrapped.
+            assert_eq!(
+                normalize_readings(json!(r#"[{"source":"s","id":"1","readings":[]}]"#)).unwrap(),
+                arr
             );
             assert_eq!(
-                normalize_readings(r#"{"readings":[{"source":"s","id":"1","readings":[]}]}"#)
-                    .unwrap(),
-                json!([{"source":"s","id":"1","readings":[]}])
+                normalize_readings(json!(
+                    r#"{"readings":[{"source":"s","id":"1","readings":[]}]}"#
+                ))
+                .unwrap(),
+                arr
             );
-            // An object without a `readings` array, or a scalar, is an error.
-            assert!(normalize_readings(r#"{"nope":1}"#).is_err());
-            assert!(normalize_readings("42").is_err());
-            assert!(normalize_readings("not json").is_err());
+
+            // An object without a `readings` array, a bare scalar, a non-JSON string,
+            // and a doubly-encoded string are all errors.
+            assert!(normalize_readings(json!({ "nope": 1 })).is_err());
+            assert!(normalize_readings(json!(42)).is_err());
+            assert!(normalize_readings(json!("not json")).is_err());
+            assert!(normalize_readings(json!("\"still a string\"")).is_err());
         }
     }
 }
