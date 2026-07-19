@@ -1,7 +1,9 @@
 <script lang="ts">
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
+  import { goto } from "$app/navigation";
   import { getWalk } from "$lib/walk";
   import { ApiError } from "$lib/client";
+  import { createSession } from "$lib/session";
   import type { WalkStatus } from "$lib/types";
   import Walk from "$lib/components/Walk.svelte";
 
@@ -45,7 +47,33 @@
   function again() {
     queryClient.invalidateQueries({ queryKey: ["walk"] });
   }
+
+  // Start a shared session (#20) and hand off to its live room. Deciding together
+  // is still picking — the multiplayer mode of this same wander.
+  let starting = $state(false);
+  async function decideTogether() {
+    starting = true;
+    try {
+      const channel = await createSession();
+      await goto(`/pick/${channel}`);
+    } catch {
+      // A failed start (a lapsed session, say) just re-enables the button; the
+      // walk below keeps working solo.
+      starting = false;
+    }
+  }
 </script>
+
+<div class="flex items-center justify-between gap-4 pt-6">
+  <p class="font-display text-sm text-stone-500">Deciding with others?</p>
+  <button
+    onclick={decideTogether}
+    disabled={starting}
+    class="rounded-pill font-display inline-flex items-center gap-2 bg-pesto-500 px-4 py-2 text-sm font-medium text-cream-50 transition-colors hover:bg-pesto-500/90 disabled:opacity-50"
+  >
+    {starting ? "Starting…" : "Decide together"}
+  </button>
+</div>
 
 <Walk
   {status}

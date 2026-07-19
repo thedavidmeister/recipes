@@ -111,6 +111,34 @@ export interface WalkStop {
  */
 export type WalkStatus = "pending" | "error" | "ready";
 
+// ---- cook-decider (#20) ----------------------------------------------------
+
+/**
+ * Render state of a decider session's swipe view.
+ * - `connecting` — opening the room's socket for the first time.
+ * - `reconnecting` — the socket dropped (Render's 5-min idle close, or a spin-down);
+ *   the client is re-opening and will rehydrate the tally.
+ * - `swiping` — a card is up to vote on.
+ * - `empty` — nothing left to swipe right now (waiting for peers to surface more).
+ * - `error` — the room could not be reached.
+ */
+export type SessionStatus =
+  | "connecting"
+  | "reconnecting"
+  | "swiping"
+  | "empty"
+  | "error";
+
+/** The two ways a session decides its winners (#20), selectable in the results. */
+export type WinCondition = "plurality" | "consensus";
+
+/** A voted-on recipe with its running tally — the row the winners view ranks. */
+export interface Winner {
+  card: RecipeCard;
+  yes: number;
+  no: number;
+}
+
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */
 export interface ModelCount {
   model: string;
