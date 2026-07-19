@@ -29,6 +29,7 @@ mod mcp;
 mod proxy;
 mod recipes;
 mod runs;
+mod session;
 mod sync;
 mod walk;
 
@@ -63,6 +64,11 @@ pub struct AppState {
     /// views (the health dashboard). `None` means no admin — the views 403 for
     /// everyone, fail-closed like the ingest key. See [`auth::is_admin`].
     pub admin_id: Option<String>,
+    /// The live cook-decider rooms (#20) — one `tokio::broadcast` channel per
+    /// session. This is the only *stateful* part of the backend, and deliberately
+    /// **not authoritative**: Turso holds every vote, so a lost process rehydrates
+    /// on reconnect. See [`session`].
+    pub rooms: session::Rooms,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -104,6 +110,11 @@ pub fn app(state: AppState) -> Router {
         // The `pick` engine (#47): a variety-first wander over the corpus. A
         // person-facing read, so it is session-gated like the rest.
         .route("/walk", get(walk::walk))
+        // Cook-decider (#20): start a session, then join its live room over a WS.
+        // Both session-gated — the room needs to know who is voting, and joining is
+        // never anonymous (#25).
+        .route("/session", post(session::create))
+        .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
         .route("/admin/health", get(admin::health))
@@ -290,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
         admin_id: auth::admin_id_from_env(),
+        rooms: session::rooms(),
     };
 
     // Expired rows are already refused on read, so this only reclaims space.
@@ -350,6 +362,7 @@ mod tests {
             ingest_key,
             // The test sessions below log in as "4242", so make that the admin.
             admin_id: Some("4242".into()),
+            rooms: session::rooms(),
         };
         (app(state), conn)
     }
@@ -739,6 +752,39 @@ mod tests {
         let (app, _conn) = test_app().await;
         let res = app.oneshot(walk_req(None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn session_create_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/session")
+            .header("content-type", "application/json");
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::from("{}")).unwrap()
+    }
+
+    /// Starting a decider session is session-gated like the rest — joining is never
+    /// anonymous (#25).
+    #[tokio::test]
+    async fn session_create_requires_a_session() {
+        let (app, _conn) = test_app().await;
+        let res = app.oneshot(session_create_req(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_create_with_a_session_mints_a_channel() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(session_create_req(Some(&format!(
+                "recipes_session={token}"
+            ))))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     /// With a session it reaches the handler and returns a walk. Empty here because
