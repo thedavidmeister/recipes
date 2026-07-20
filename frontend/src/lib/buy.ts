@@ -81,7 +81,13 @@ function checksKey(source: string, id: string): string {
 export function loadChecks(source: string, id: string): number[] {
   try {
     const raw = localStorage.getItem(checksKey(source, id));
-    return raw ? (JSON.parse(raw) as number[]) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    // localStorage is user-writable, so a non-array (corrupt or legacy) value must
+    // not reach the caller — the buy page iterates this result. Keep only numbers.
+    return Array.isArray(parsed)
+      ? parsed.filter((n): n is number => typeof n === "number")
+      : [];
   } catch {
     return [];
   }
