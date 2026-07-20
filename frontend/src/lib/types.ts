@@ -5,9 +5,10 @@ export interface Ingredient {
   name: string;
   measure: string | null;
   // A model's structured reading of this line (#11), produced by the off-service
-  // enrich worker (#59) and reattached at derive. Absent until that worker has
-  // read the recipe — the raw name/measure stay the source of truth, so fall back
-  // to them when this is absent rather than treating a missing reading as an error.
+  // enrich worker (#59) and reattached at derive. This reading is what the GUI
+  // renders — the raw name/measure are the worker's input, not a display form, so
+  // the app never falls back to them. Absent until the worker has read the recipe;
+  // enrichment is an addition to the corpus, not a gate on it.
   structured?: StructuredMeasure | null;
 }
 
@@ -127,6 +128,46 @@ export interface Match {
   card: RecipeCard;
   /** How many said yes — equals the participant count for a match. */
   yes: number;
+}
+
+// ---- buy (#36) -------------------------------------------------------------
+
+/** Render state of the buy list. */
+export type BuyStatus = "pending" | "error" | "ready";
+
+/**
+ * A consensus recipe from a pick, with the ingredients to buy for it. `buy` is
+ * the arc after `pick` (#36): what the group agreed on, and what it needs.
+ * `source`/`id` key the persisted checklist (what's already in the basket).
+ *
+ * Ingredients are the structured reading (#11) — `item` + measured `amount`, never
+ * the raw measure. `buy` shows what to get and how much; preparation ("finely
+ * diced") is a `cook` concern, not a shopping one.
+ */
+export interface BuyRecipe {
+  source: string;
+  id: string;
+  title: string;
+  ingredients: StructuredMeasure[];
+}
+
+// ---- cook (#36) ------------------------------------------------------------
+
+/** Render state of the cook view. */
+export type CookStatus = "pending" | "error" | "ready";
+
+/**
+ * The picked recipe in full, for cooking (#36) — the step after `buy`. The
+ * instructions are the star; the ingredients ride along as a reference.
+ *
+ * Ingredients are the structured reading (#11) — `item`, `amount`, and the
+ * `preparation` that `buy` omits ("thinly sliced"). Never the raw measure.
+ */
+export interface CookRecipe {
+  title: string;
+  image: string | null;
+  ingredients: StructuredMeasure[];
+  instructions: string;
 }
 
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */

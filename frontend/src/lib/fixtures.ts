@@ -1,14 +1,22 @@
 import type {
+  Amount,
+  BuyRecipe,
+  CookRecipe,
   HealthStats,
-  Match,
   Recipe,
   RecipeCard,
+  StructuredMeasure,
   WalkStop,
 } from "$lib/types";
 
 // Real TheMealDB records (verified against the live API), shaped the way
 // recipe-core normalizes them. Real data keeps stories honest: invented ids and
 // image URLs render as unrelated meals.
+
+/** An exact quantity with an optional unit — the common `Amount` in a reading (#11). */
+function exact(value: number, unit: string | null = null): Amount {
+  return { kind: "quantified", quantity: { kind: "exact", value }, unit, size: null };
+}
 
 /** TheMealDB 52795 — the base fixture; override fields per story. */
 export function recipe(over: Partial<Recipe> = {}): Recipe {
@@ -20,13 +28,56 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
     category: "Chicken",
     area: "India",
     tags: [],
+    // Raw name/measure as the source gave them, each with the enrich worker's
+    // structured reading (#11) — what the GUI actually renders. "5 thinly sliced"
+    // reads as amount 5 + preparation "thinly sliced": a quantity and a process,
+    // never one measure string.
     ingredients: [
-      { name: "Chicken", measure: "1.2 kg" },
-      { name: "Onion", measure: "5 thinly sliced" },
-      { name: "Tomatoes", measure: "2 finely chopped" },
-      { name: "Garlic", measure: "8 cloves chopped" },
-      { name: "Ginger paste", measure: "1 tbsp" },
-      { name: "Vegetable oil", measure: "¼ cup" },
+      {
+        name: "Chicken",
+        measure: "1.2 kg",
+        structured: { item: "Chicken", amount: exact(1.2, "kg"), preparation: null, note: null },
+      },
+      {
+        name: "Onion",
+        measure: "5 thinly sliced",
+        structured: { item: "Onion", amount: exact(5), preparation: "thinly sliced", note: null },
+      },
+      {
+        name: "Tomatoes",
+        measure: "2 finely chopped",
+        structured: { item: "Tomatoes", amount: exact(2), preparation: "finely chopped", note: null },
+      },
+      {
+        name: "Garlic",
+        measure: "8 cloves chopped",
+        structured: { item: "Garlic", amount: exact(8, "cloves"), preparation: "chopped", note: null },
+      },
+      {
+        name: "Ginger paste",
+        measure: "1 tbsp",
+        structured: { item: "Ginger paste", amount: exact(1, "tbsp"), preparation: null, note: null },
+      },
+      {
+        name: "Vegetable oil",
+        measure: "¼ cup",
+        structured: { item: "Vegetable oil", amount: exact(0.25, "cup"), preparation: null, note: null },
+      },
+      {
+        name: "Salt",
+        measure: "To taste",
+        structured: {
+          item: "Salt",
+          amount: { kind: "qualitative", text: "to taste" },
+          preparation: null,
+          note: null,
+        },
+      },
+      {
+        name: "Coriander Leaves",
+        measure: "Garnish",
+        structured: { item: "Coriander Leaves", amount: null, preparation: null, note: "to garnish" },
+      },
     ],
     instructions:
       "Take a large pot or wok, big enough to cook all the chicken, and heat the oil in it. Once the oil is hot, add sliced onions.",
@@ -136,8 +187,33 @@ export function recipeCards(): RecipeCard[] {
   return walkStops().map((stop) => stop.recipe);
 }
 
-/** Consensus matches for the pick view — recipes everyone (here, all 3) said yes to. */
-export function matches(): Match[] {
-  const cards = recipeCards();
-  return [{ card: cards[0], yes: 3 }];
+/** The structured readings the base fixture carries — what `buy`/`cook` render (#11). */
+function readings(): StructuredMeasure[] {
+  return recipe()
+    .ingredients.map((i) => i.structured)
+    .filter((s): s is StructuredMeasure => !!s);
+}
+
+/** The consensus recipe's ingredients, for the buy list (the base recipe fixture). */
+export function buyRecipe(): BuyRecipe {
+  const r = recipe();
+  return { source: r.source, id: r.id, title: r.title, ingredients: readings() };
+}
+
+/** The picked recipe in full, for the cook view — multi-step method to render. */
+export function cookRecipe(): CookRecipe {
+  const r = recipe();
+  return {
+    title: r.title,
+    image: r.image,
+    ingredients: readings(),
+    instructions: [
+      "Heat the oil in a large pot and add the sliced onions.",
+      "Once golden, stir in the ginger paste and garlic and fry for a minute.",
+      "Add the tomatoes and cook until they break down into a sauce.",
+      "Add the chicken and brown it on all sides.",
+      "Pour in a cup of water, cover, and simmer for 30 minutes.",
+      "Finish with fresh coriander and serve.",
+    ].join("\n"),
+  };
 }
