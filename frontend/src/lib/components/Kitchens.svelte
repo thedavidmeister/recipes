@@ -46,7 +46,8 @@
     onRemovePantry,
   }: Props = $props();
 
-  // Split the selector so it's clear which kitchens you own vs are a guest in.
+  // Split the selector so your own kitchens are clearly apart from a friend's — the
+  // ones you're a guest in, that someone invited you to.
   const owned = $derived(kitchens.filter((k) => k.role === "owner"));
   const guest = $derived(kitchens.filter((k) => k.role !== "owner"));
 
@@ -123,7 +124,7 @@
     {#if kitchens.length}
       <div class="mb-4">
         {@render picker("Your kitchens", owned)}
-        {@render picker("Shared with you", guest)}
+        {@render picker("Friends' kitchens", guest)}
       </div>
     {/if}
 
