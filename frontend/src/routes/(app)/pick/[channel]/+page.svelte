@@ -35,10 +35,15 @@
   let voterIds = $state<string[]>([]); // distinct voters seen live
   let serverParticipants = $state(0); // authoritative count from the last tally
 
-  // Dedupe only (never rendered), so a plain Set is fine.
+  // Dedupe only (never rendered), so plain Sets are fine. `queued` guards the deck
+  // (a recipe is queued once); `pulling` guards in-flight card fetches so a failing
+  // fetch is not re-issued on every tally frame.
   const queued = new Set<string>();
+  const pulling = new Set<string>();
 
-  const key = (s: string, i: string) => `${s}:${i}`;
+  // Encode the (source, id) key unambiguously — a bare `${s}:${i}` would collide if
+  // a future source or id ever held a colon, silently merging two recipes' tallies.
+  const key = (s: string, i: string) => JSON.stringify([s, i]);
 
   function rememberCard(card: RecipeCard) {
     const k = key(card.source, card.id);
@@ -50,10 +55,19 @@
   async function pull(source: string, id: string, toDeck: boolean) {
     const k = key(source, id);
     if (cardMap[k] && !toDeck) return;
-    const card = await fetchCard(source, id);
-    if (!card) return;
-    rememberCard(card);
-    if (toDeck) deck = [...deck, card];
+    if (pulling.has(k)) return; // one fetch in flight per key
+    pulling.add(k);
+    try {
+      const card = await fetchCard(source, id);
+      if (!card) return;
+      rememberCard(card);
+      if (toDeck) deck = [...deck, card];
+    } catch {
+      // A Turso read failed; leave the card unresolved so a later tally/vote can
+      // retry, instead of crashing on an unhandled rejection.
+    } finally {
+      pulling.delete(k);
+    }
   }
 
   // ---- the endless deck ----

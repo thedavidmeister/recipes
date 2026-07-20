@@ -14,7 +14,7 @@
     status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
-    /** Recipes everyone in the pick said yes to — the pick(s), newest first. */
+    /** Recipes everyone in the pick said yes to — the pick(s). */
     matches?: Match[];
     /** How many people are in this pick (distinct voters). */
     participants?: number;
