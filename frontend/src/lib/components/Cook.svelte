@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { CookRecipe, CookStatus } from "$lib/types";
+  import type { CookRecipe, CookStatus, StructuredMeasure } from "$lib/types";
+  import { formatAmount } from "$lib/measure";
 
   /**
    * `cook` (#36): the picked recipe in full, to follow while cooking.
@@ -7,6 +8,9 @@
    * The step after `buy` — the **method** is the star (big, numbered steps), with
    * the ingredients riding along as a compact reference. Presentational only: the
    * page owns the query (the recipe is the pick's stashed decision), this renders.
+   *
+   * Each ingredient is the structured reading (#11): `item`, its measured `amount`,
+   * and the `preparation` `buy` omits ("thinly sliced"). Never the raw measure.
    */
   interface Props {
     status: CookStatus;
@@ -16,6 +20,13 @@
   }
 
   let { status, recipe, error }: Props = $props();
+
+  /** The reference line for one ingredient: "5 · thinly sliced" trails the item. */
+  function detail(ing: StructuredMeasure): string {
+    return [formatAmount(ing.amount), ing.preparation]
+      .filter(Boolean)
+      .join(" · ");
+  }
 
   // Split the instructions into steps — one per non-blank line.
   const steps = $derived(
@@ -76,8 +87,8 @@
           <li
             class="rounded-pill border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-600"
           >
-            {ing.name}{#if ing.measure}<span class="text-stone-400">
-                · {ing.measure}</span
+            {ing.item}{#if detail(ing)}<span class="text-stone-400">
+                · {detail(ing)}</span
               >{/if}
           </li>
         {/each}

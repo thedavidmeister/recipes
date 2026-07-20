@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { BuyRecipe, BuyStatus } from "$lib/types";
+  import type { BuyRecipe, BuyStatus, StructuredMeasure } from "$lib/types";
+  import { formatAmount } from "$lib/measure";
 
   /**
    * `buy` (#36): the shopping **checklist** for the pick's consensus recipe.
@@ -7,6 +8,10 @@
    * The step after `pick` — what the group agreed on, and what it needs. Each row
    * ticks off as you shop; the page owns the ticked state (persisted per recipe,
    * so it survives a reload mid-shop) and this renders. Every state is a story.
+   *
+   * Each line is the structured reading (#11): the `item` to get, and how much —
+   * the measured `amount`, or the `note` when a line states no quantity ("for
+   * frying"). Never the raw measure; preparation belongs to `cook`.
    */
   interface Props {
     status: BuyStatus;
@@ -23,6 +28,11 @@
   const ticked = $derived(
     recipe ? recipe.ingredients.filter((_, i) => checked[i]).length : 0,
   );
+
+  /** How much to get: the measured amount, or the note when there's no quantity. */
+  function howMuch(ing: StructuredMeasure): string {
+    return formatAmount(ing.amount) || ing.note || "";
+  }
 </script>
 
 <div class="pt-6">
@@ -95,9 +105,9 @@
                 ? 'text-stone-400 line-through'
                 : 'text-stone-900'}"
             >
-              {ing.name}
+              {ing.item}
             </span>
-            {#if ing.measure}
+            {#if howMuch(ing)}
               <span
                 class="rounded-pill flex-none bg-plum-100 px-3 py-1 text-sm {checked[
                   i
@@ -105,7 +115,7 @@
                   ? 'text-stone-400'
                   : 'text-stone-600'}"
               >
-                {ing.measure}
+                {howMuch(ing)}
               </span>
             {/if}
           </label>

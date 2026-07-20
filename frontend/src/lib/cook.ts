@@ -1,6 +1,6 @@
 import { turso } from "./turso";
 import { consensusRef } from "./buy";
-import type { CookRecipe } from "./types";
+import type { CookRecipe, Ingredient, StructuredMeasure } from "./types";
 
 /**
  * `cook` (#36) — the picked recipe in full, for following along.
@@ -20,15 +20,16 @@ export async function getCookRecipe(): Promise<CookRecipe | null> {
   const row = rs.rows[0];
   if (!row) return null;
 
-  let ingredients: CookRecipe["ingredients"] = [];
+  // The structured reading (#11) — item, amount, and preparation — never the raw
+  // measure. A line with no reading yet is dropped rather than shown raw.
+  let ingredients: StructuredMeasure[] = [];
   try {
-    const parsed = JSON.parse(String(row.ingredients)) as {
-      name: string;
-      measure: string | null;
-    }[];
+    const parsed = JSON.parse(String(row.ingredients)) as Ingredient[];
     ingredients = parsed
-      .filter((i) => i.name && i.name.trim() !== "")
-      .map((i) => ({ name: i.name, measure: i.measure ?? null }));
+      .map((i) => i.structured)
+      .filter(
+        (s): s is StructuredMeasure => !!s && !!s.item && s.item.trim() !== "",
+      );
   } catch {
     // Malformed ingredients JSON: still show the recipe + its steps.
   }

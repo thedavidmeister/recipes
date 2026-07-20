@@ -1,5 +1,5 @@
 import { turso } from "./turso";
-import type { BuyRecipe } from "./types";
+import type { BuyRecipe, Ingredient, StructuredMeasure } from "./types";
 
 /**
  * `buy` (#36) — the ingredients for the pick's consensus recipe.
@@ -53,16 +53,18 @@ export async function getBuyList(): Promise<BuyRecipe | null> {
   const row = rs.rows[0];
   const title = row ? String(row.title) : ref.title;
 
-  let ingredients: BuyRecipe["ingredients"] = [];
+  // The list is the structured reading (#11), never the raw measure — the reading
+  // is what `buy` renders. A line with no reading yet is dropped rather than shown
+  // raw; `pick` serves read recipes, so a decided one carries readings throughout.
+  let ingredients: StructuredMeasure[] = [];
   if (row) {
     try {
-      const parsed = JSON.parse(String(row.ingredients)) as {
-        name: string;
-        measure: string | null;
-      }[];
+      const parsed = JSON.parse(String(row.ingredients)) as Ingredient[];
       ingredients = parsed
-        .filter((i) => i.name && i.name.trim() !== "")
-        .map((i) => ({ name: i.name, measure: i.measure ?? null }));
+        .map((i) => i.structured)
+        .filter(
+          (s): s is StructuredMeasure => !!s && !!s.item && s.item.trim() !== "",
+        );
     } catch {
       // Malformed ingredients JSON: show the recipe with no lines rather than fail.
     }
