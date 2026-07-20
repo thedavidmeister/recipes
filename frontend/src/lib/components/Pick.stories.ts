@@ -1,11 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
-import Decider from "./Decider.svelte";
+import Pick from "./Pick.svelte";
 import { recipeCards } from "$lib/fixtures";
 
 const meta = {
-  title: "recipes/Decider",
-  component: Decider,
-} satisfies Meta<typeof Decider>;
+  title: "recipes/Pick",
+  component: Pick,
+} satisfies Meta<typeof Pick>;
 export default meta;
 
 type Story = StoryObj<typeof meta>;
@@ -13,7 +13,7 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, mid-session. */
+/** A card up to vote on, mid-pick. */
 export const Swiping: Story = {
   args: {
     status: "swiping",
@@ -24,7 +24,7 @@ export const Swiping: Story = {
   },
 };
 
-/** Joining: the socket is opening and the tally is loading. */
+/** Starting: the socket is opening and the tally is loading. */
 export const Connecting: Story = {
   args: { status: "connecting", shareUrl: share },
 };

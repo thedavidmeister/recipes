@@ -100,36 +100,25 @@ export interface WalkStop {
   recipe: RecipeCard;
 }
 
-/**
- * Render state for the `pick` walk. The page owns the query; the `Walk` component
- * owns rendering, and takes this so every state is a Storybook story rather than
- * something you race the network to see.
- *
- * - `pending` — the first walk is loading.
- * - `error` — the walk could not be fetched.
- * - `ready` — a walk is in hand (possibly empty, if the corpus is).
- */
-export type WalkStatus = "pending" | "error" | "ready";
-
-// ---- cook-decider (#20) ----------------------------------------------------
+// ---- pick (#20) ------------------------------------------------------------
 
 /**
- * Render state of a decider session's swipe view.
- * - `connecting` — opening the room's socket for the first time.
+ * Render state of a pick's swipe view.
+ * - `connecting` — starting the pick / opening the room's socket for the first time.
  * - `reconnecting` — the socket dropped (Render's 5-min idle close, or a spin-down);
  *   the client is re-opening and will rehydrate the tally.
  * - `swiping` — a card is up to vote on.
  * - `empty` — nothing left to swipe right now (waiting for peers to surface more).
  * - `error` — the room could not be reached.
  */
-export type SessionStatus =
+export type PickStatus =
   | "connecting"
   | "reconnecting"
   | "swiping"
   | "empty"
   | "error";
 
-/** The two ways a session decides its winners (#20), selectable in the results. */
+/** The two ways a pick decides its winners (#20), selectable in the results. */
 export type WinCondition = "plurality" | "consensus";
 
 /** A voted-on recipe with its running tally — the row the winners view ranks. */

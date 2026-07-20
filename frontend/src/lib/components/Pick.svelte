@@ -1,25 +1,26 @@
 <script lang="ts">
-  import type { RecipeCard, SessionStatus } from "$lib/types";
+  import type { PickStatus, RecipeCard } from "$lib/types";
 
   /**
-   * The cook-decider swipe view (#20) — the multiplayer mode of `pick`.
+   * The pick swipe view (#20).
    *
-   * One card at a time: yes keeps it, pass drops it, and the tally is the group's
-   * running decision. Presentational only — the page owns the WS client, the deck,
-   * and the silent peer-injection (a recipe anyone votes on appears in everyone's
-   * deck). Every state — joining, reconnecting, a card to swipe, all caught up, a
-   * dropped room — is a Storybook story, not something you race the socket to reach.
+   * A pick is one card at a time: yes keeps it, pass drops it, and the tally is
+   * the group's running decision — everyone in a pick shares it live. Presentational
+   * only: the page owns the socket, the deck, and the silent peer-injection (a
+   * recipe anyone votes on appears in everyone's deck). Every state — joining,
+   * reconnecting, a card to swipe, all caught up, a dropped room — is a Storybook
+   * story, not something you race the socket to reach.
    */
   interface Props {
-    status: SessionStatus;
+    status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
     /** Recipes with at least one yes so far — the size of "the running". */
     inTheRunning?: number;
-    /** How many people are deciding (distinct voters). */
+    /** How many people are in this pick (distinct voters). */
     participants?: number;
     error?: string;
-    /** The shareable link that invites others into this session. */
+    /** The shareable link that invites others into this pick. */
     shareUrl?: string;
     /** `true` right after the link was copied — flips the Invite button's label. */
     copied?: boolean;
@@ -50,7 +51,7 @@
   <header class="mb-6 flex items-center justify-between gap-4">
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"></span>
-      Decide together
+      Pick
     </p>
     {#if shareUrl}
       <button
@@ -64,7 +65,7 @@
 
   {#if status === "error"}
     <div class="rounded-card border border-paprika-500/30 bg-paprika-100 p-6">
-      <p class="font-display text-stone-900">The session dropped.</p>
+      <p class="font-display text-stone-900">The pick dropped.</p>
       <p class="mt-1 text-sm text-stone-600">
         {error ?? "Could not reach the room."}
       </p>
@@ -73,7 +74,7 @@
     <div
       class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
     >
-      <p class="font-display text-stone-900">Joining the session…</p>
+      <p class="font-display text-stone-900">Starting a pick…</p>
       <p class="mt-1 text-sm text-stone-600">Catching up on the votes so far.</p>
     </div>
   {:else}

@@ -3,17 +3,18 @@ import { turso } from "./turso";
 import type { RecipeCard } from "./types";
 
 /**
- * The cook-decider client (#20) — the multiplayer half of `pick`.
+ * The live, shared machinery of `pick` (#20).
  *
- * Three things live here: starting a session, fetching a single card for
- * peer-injection, and the live [`DeciderClient`] over the backend's WebSocket
- * (`/api/session/{channel}/ws`). The backend is the source of truth (Turso); this
- * is a thin live layer that reconnects and rehydrates, so a dropped socket — or
- * Render's spin-down — is a blip, not lost votes.
+ * A pick is a swipe-and-vote everyone in it shares. Three things live here:
+ * starting a pick, fetching a single card for peer-injection, and the live
+ * [`PickClient`] over the backend's WebSocket (`/api/session/{channel}/ws`). The
+ * backend is the source of truth (Turso); this is a thin live layer that reconnects
+ * and rehydrates, so a dropped socket — or Render's spin-down — is a blip, not lost
+ * votes.
  */
 
-/** `POST /api/session` — start a session, returning its shareable channel id. */
-export async function createSession(filter?: string): Promise<string> {
+/** `POST /api/session` — start a pick, returning its shareable channel id. */
+export async function createPick(filter?: string): Promise<string> {
   const res = await apiFetch("/api/session", {
     method: "POST",
     body: JSON.stringify({ filter: filter ?? null }),
@@ -23,7 +24,7 @@ export async function createSession(filter?: string): Promise<string> {
       res.status,
       res.status === 401
         ? "Your session has expired."
-        : `could not start a session (${res.status})`,
+        : `could not start a pick (${res.status})`,
     );
   }
   const body = (await res.json()) as { channel_id: string };
@@ -60,7 +61,7 @@ export async function fetchCard(
   };
 }
 
-/** A recipe's running tally in a session — mirrors the backend `TallyRow`. */
+/** A recipe's running tally in a pick — mirrors the backend `TallyRow`. */
 export interface TallyRow {
   source: string;
   id: string;
@@ -77,7 +78,7 @@ export type ServerMsg =
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
 
 /** How the page reacts to the socket — wired to Svelte `$state` at the call site. */
-export interface DeciderHandlers {
+export interface PickHandlers {
   /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
   onTally: (participants: number, votes: TallyRow[]) => void;
   /** One live vote from any peer (including this client's own echo). */
@@ -91,7 +92,7 @@ export interface DeciderHandlers {
 }
 
 /**
- * A resilient WebSocket to a session's room.
+ * A resilient WebSocket to a pick's room.
  *
  * Reconnects with exponential backoff (a dropped socket after Render's 5-min idle
  * close, or a full spin-down, is expected), and the server re-sends the whole tally
@@ -99,7 +100,7 @@ export interface DeciderHandlers {
  * on each `onTally`. Callback-based rather than reactive so the reactivity lives in
  * the page (the framework-native place), and this stays a plain, testable client.
  */
-export class DeciderClient {
+export class PickClient {
   private ws: WebSocket | null = null;
   private stopped = false;
   private backoffMs = 500;
@@ -107,7 +108,7 @@ export class DeciderClient {
 
   constructor(
     private readonly channel: string,
-    private readonly handlers: DeciderHandlers,
+    private readonly handlers: PickHandlers,
   ) {}
 
   /** Open the socket (and keep it open across drops until [`stop`]). */

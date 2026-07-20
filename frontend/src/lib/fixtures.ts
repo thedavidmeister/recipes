@@ -131,13 +131,13 @@ export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
   };
 }
 
-/** A deck of real recipe cards for the decider swipe view — the walk's meals. */
+/** A deck of real recipe cards for the pick swipe view — the walk's meals. */
 export function recipeCards(): RecipeCard[] {
   return walkStops().map((stop) => stop.recipe);
 }
 
 /**
- * A session's candidates with running tallies, for the winners view — over three
+ * A pick's candidates with running tallies, for the winners view — over three
  * participants, so the first is both the plurality leader and the consensus pick
  * (everyone said yes), and the rest fall away under consensus.
  */

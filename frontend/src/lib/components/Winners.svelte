@@ -2,12 +2,12 @@
   import type { WinCondition, Winner } from "$lib/types";
 
   /**
-   * The cook-decider results (#20): the group's pick, ranked.
+   * A pick's results (#20): what to cook, ranked.
    *
    * Two win conditions, selectable — **plurality** (most yeses win) and
    * **consensus** (only what everyone said yes to). Both read off the same tally
    * the page maintains, so the toggle is a pure view over `candidates`;
-   * presentational, so an empty-consensus session is a story, not a race.
+   * presentational, so an empty-consensus pick is a story, not a race.
    */
   interface Props {
     condition: WinCondition;

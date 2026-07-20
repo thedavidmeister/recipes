@@ -4,26 +4,21 @@
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
   import { ApiError } from "$lib/client";
-  import { DeciderClient, fetchCard, type ConnStatus } from "$lib/session";
-  import type {
-    RecipeCard,
-    SessionStatus,
-    WinCondition,
-    Winner,
-  } from "$lib/types";
-  import Decider from "$lib/components/Decider.svelte";
+  import { PickClient, fetchCard, type ConnStatus } from "$lib/pick";
+  import type { PickStatus, RecipeCard, WinCondition, Winner } from "$lib/types";
+  import Pick from "$lib/components/Pick.svelte";
   import Winners from "$lib/components/Winners.svelte";
 
   /**
-   * A live cook-decider session (#20) — the multiplayer mode of `pick`.
+   * A pick (#20): a live, shared swipe-and-vote over the corpus.
    *
    * The page owns the socket, the deck, and the cross-pollination; the components
-   * render. Each client walks the corpus **independently** for its starting deck,
-   * but every vote (mine or a peer's) arrives over the room and, if it names a
-   * recipe I have not queued, that recipe is fetched and slipped silently into my
-   * deck — so the group diverges to explore yet converges on every candidate. Turso
-   * is the truth: the server re-sends the whole tally on every (re)connect, so a
-   * dropped socket just replaces the tally, never loses a vote.
+   * render. Each client walks the corpus **independently** for its deck, but every
+   * vote (mine or a peer's) arrives over the room and, if it names a recipe I have
+   * not queued, that recipe is fetched and slipped silently into my deck — so the
+   * pick diverges to explore yet converges on every candidate. Turso is the truth:
+   * the server re-sends the whole tally on every (re)connect, so a dropped socket
+   * just replaces the tally, never loses a vote. This URL is the shareable invite.
    */
   const channel = $derived(page.params.channel ?? "");
   const queryClient = useQueryClient();
@@ -36,7 +31,7 @@
     retry: false,
   }));
 
-  // ---- session state (reactive so the tally + winners re-derive) ----
+  // ---- pick state (reactive so the tally + winners re-derive) ----
   let conn = $state<ConnStatus>("connecting");
   let view = $state<"swipe" | "winners">("swipe");
   let condition = $state<WinCondition>("plurality");
@@ -70,10 +65,10 @@
     if (toDeck) deck = [...deck, card];
   }
 
-  let client: DeciderClient | null = null;
+  let client: PickClient | null = null;
 
   onMount(() => {
-    client = new DeciderClient(channel, {
+    client = new PickClient(channel, {
       onStatus: (s) => (conn = s),
       onTally: (participants, votes) => {
         serverParticipants = participants;
@@ -135,7 +130,7 @@
   );
   const inTheRunning = $derived(Object.values(yes).filter((c) => c > 0).length);
 
-  const status = $derived<SessionStatus>(
+  const status = $derived<PickStatus>(
     conn === "connecting"
       ? "connecting"
       : conn === "reconnecting"
@@ -185,7 +180,7 @@
     onBack={() => (view = "swipe")}
   />
 {:else}
-  <Decider
+  <Pick
     {status}
     card={current}
     {inTheRunning}
