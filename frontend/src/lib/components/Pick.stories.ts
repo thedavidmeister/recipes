@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Pick from "./Pick.svelte";
-import { matches, recipeCards } from "$lib/fixtures";
+import { recipeCards } from "$lib/fixtures";
 
 const meta = {
   title: "recipes/Pick",
@@ -13,7 +13,7 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, no match yet. */
+/** A card up to vote on, no consensus yet. */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
 };
@@ -36,20 +36,6 @@ export const Reconnecting: Story = {
 /** The deck ran low — a pick is endless, so it's fetching more (never "caught up"). */
 export const FindingMore: Story = {
   args: { status: "loading", participants: 3, shareUrl: share },
-};
-
-/**
- * Consensus: everyone said yes to a recipe — that's the pick, surfaced inline
- * while the swipe keeps going for another.
- */
-export const Matched: Story = {
-  args: {
-    status: "swiping",
-    card: cards[1],
-    matches: matches(),
-    participants: 3,
-    shareUrl: share,
-  },
 };
 
 /** Right after copying the invite link. */

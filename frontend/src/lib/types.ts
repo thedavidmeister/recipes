@@ -129,6 +129,20 @@ export interface Match {
   yes: number;
 }
 
+// ---- buy (#36) -------------------------------------------------------------
+
+/** Render state of the buy list. */
+export type BuyStatus = "pending" | "error" | "ready";
+
+/**
+ * A consensus recipe from a pick, with the ingredients to buy for it. `buy` is
+ * the arc after `pick` (#36): what the group agreed on, and what it needs.
+ */
+export interface BuyRecipe {
+  title: string;
+  ingredients: { name: string; measure: string | null }[];
+}
+
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */
 export interface ModelCount {
   model: string;

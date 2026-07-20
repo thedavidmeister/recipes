@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { useQueryClient } from "@tanstack/svelte-query";
+  import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
   import { ApiError } from "$lib/client";
   import { PickClient, fetchCard, type ConnStatus } from "$lib/pick";
+  import { stashConsensus } from "$lib/buy";
   import type { Match, PickStatus, RecipeCard } from "$lib/types";
   import Pick from "$lib/components/Pick.svelte";
 
@@ -24,7 +26,7 @@
   const channel = $derived(page.params.channel ?? "");
   const queryClient = useQueryClient();
 
-  // ---- pick state (reactive so the tally + matches re-derive) ----
+  // ---- pick state (reactive so the tally + consensus re-derive) ----
   let conn = $state<ConnStatus>("connecting");
   let copied = $state(false);
 
@@ -137,10 +139,14 @@
     }
   }
 
-  // Prefetch before the deck runs low, sized to the swiper — the buffer stays
-  // ahead of the swiping so the next card is always ready.
+  // The pick's decision: the one recipe everyone agreed on (consensus needs 2+).
+  // Sticky — once decided, the pick is done and the swipe gives way to the result.
+  let decided = $state<Match | undefined>();
+
+  // Prefetch before the deck runs low, sized to the swiper — the buffer stays ahead
+  // of the swiping so the next card is always ready. Stops once the pick is decided.
   $effect(() => {
-    if (deck.length < bufferTarget && !refilling && !dry) void refill();
+    if (deck.length < bufferTarget && !refilling && !dry && !decided) void refill();
   });
 
   let client: PickClient | null = null;
@@ -183,9 +189,9 @@
     Math.max(serverParticipants, voterIds.length, 1),
   );
 
-  // The pick: recipes everyone in the room said yes to. Consensus needs a group —
-  // a solo swiper has no match until someone else joins and agrees.
-  const matches = $derived<Match[]>(
+  // Consensus: recipes everyone in the room said yes to. Needs a group — a solo
+  // swiper has none until someone else joins and agrees.
+  const consensus = $derived<Match[]>(
     participants < 2
       ? []
       : Object.keys(yes)
@@ -196,6 +202,20 @@
           })
           .filter((m): m is Match => m !== null),
   );
+
+  // A pick decides on the first recipe to reach consensus (consensus means one).
+  // Stash it and go straight to `buy` — the ingredients for what everyone agreed on.
+  $effect(() => {
+    if (!decided && consensus.length) {
+      decided = consensus[0];
+      stashConsensus({
+        source: decided.card.source,
+        id: decided.card.id,
+        title: decided.card.title,
+      });
+      void goto("/buy");
+    }
+  });
 
   const status = $derived<PickStatus>(
     conn === "reconnecting"
@@ -224,12 +244,12 @@
       copied = false;
     }
   }
+
 </script>
 
 <Pick
   {status}
   card={current}
-  {matches}
   {participants}
   shareUrl={page.url.href}
   {copied}

@@ -1,6 +1,6 @@
 import type {
+  BuyRecipe,
   HealthStats,
-  Match,
   Recipe,
   RecipeCard,
   WalkStop,
@@ -136,8 +136,14 @@ export function recipeCards(): RecipeCard[] {
   return walkStops().map((stop) => stop.recipe);
 }
 
-/** Consensus matches for the pick view — recipes everyone (here, all 3) said yes to. */
-export function matches(): Match[] {
-  const cards = recipeCards();
-  return [{ card: cards[0], yes: 3 }];
+/** The consensus recipe's ingredients, for the buy list (the base recipe fixture). */
+export function buyRecipe(): BuyRecipe {
+  const r = recipe();
+  return {
+    title: r.title,
+    ingredients: r.ingredients.map((i) => ({
+      name: i.name,
+      measure: i.measure,
+    })),
+  };
 }

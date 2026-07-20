@@ -1,21 +1,19 @@
 <script lang="ts">
-  import type { Match, PickStatus, RecipeCard } from "$lib/types";
+  import type { PickStatus, RecipeCard } from "$lib/types";
 
   /**
-   * The pick swipe view (#20) — an endless, shared swipe focused on **consensus**.
+   * The pick swipe view (#20) — an endless, shared swipe for **consensus**.
    *
-   * A pick keeps serving cards until the group finds a recipe everyone says yes to
-   * — a **match**, which is the pick. Matches surface **inline** the moment they
-   * happen; there is no separate results screen and no plurality. Presentational
-   * only: the page owns the socket, the deck (which refills endlessly), and the
-   * cross-pollination. Every state is a Storybook story.
+   * A pick keeps serving cards until everyone agrees on **one** recipe; the instant
+   * that happens the page whisks everyone straight to `buy` (its ingredients), so
+   * this view is purely the swipe. Presentational only: the page owns the socket,
+   * the deck (which refills endlessly), and the cross-pollination. Every state is a
+   * Storybook story.
    */
   interface Props {
     status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
-    /** Recipes everyone in the pick said yes to — the pick(s). */
-    matches?: Match[];
     /** How many people are in this pick (distinct voters). */
     participants?: number;
     error?: string;
@@ -29,7 +27,6 @@
   let {
     status,
     card,
-    matches = [],
     participants = 1,
     error,
     shareUrl,
@@ -41,8 +38,6 @@
   const meta = $derived(
     card ? [card.category, card.area].filter(Boolean).join(" · ") : "",
   );
-  const cardMeta = (c: RecipeCard) =>
-    [c.category, c.area].filter(Boolean).join(" · ");
 </script>
 
 <div class="pt-6">
@@ -83,41 +78,6 @@
         <span class="size-2 rounded-full bg-honey-500" aria-hidden="true"></span>
         Reconnecting…
       </p>
-    {/if}
-
-    {#if matches.length}
-      <!-- The pick: consensus. Everyone in the room said yes to these. -->
-      <section class="rounded-card mb-5 border border-pesto-500 bg-pesto-100 p-5">
-        <p class="font-display flex items-center gap-2 font-medium text-pesto-500">
-          <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"
-          ></span>
-          {matches.length === 1
-            ? "It's a match — everyone's in"
-            : "Everyone's in on these"}
-        </p>
-        <ul class="mt-3 flex flex-col gap-3">
-          {#each matches as m (`${m.card.source}:${m.card.id}`)}
-            <li class="flex items-center gap-3">
-              {#if m.card.image}
-                <img
-                  src={m.card.image}
-                  alt={m.card.title}
-                  class="rounded-card size-14 flex-none object-cover"
-                  loading="lazy"
-                />
-              {/if}
-              <div class="min-w-0">
-                <p class="font-display truncate font-medium text-stone-900">
-                  {m.card.title}
-                </p>
-                {#if cardMeta(m.card)}
-                  <p class="truncate text-sm text-stone-500">{cardMeta(m.card)}</p>
-                {/if}
-              </div>
-            </li>
-          {/each}
-        </ul>
-      </section>
     {/if}
 
     {#if !card}
@@ -169,9 +129,7 @@
 
     <footer class="mt-6 border-t border-stone-200 pt-4">
       <p class="text-sm text-stone-500">
-        {participants} deciding · {matches.length
-          ? "keep swiping for another match"
-          : "swipe to find something everyone likes"}
+        {participants} deciding · swipe to find something everyone likes
       </p>
     </footer>
   {/if}
