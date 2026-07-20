@@ -28,10 +28,16 @@ die() { log "ERROR: $*"; exit 1; }
 
 # --- PATH bootstrap: cron runs with a minimal environment ------------------------
 # Make nix available, then rely on the login profile for claude. Adjust here if your
-# install lives elsewhere.
+# install lives elsewhere. Cron's environment omits USER, which the nix profile reads;
+# under this script's `set -u` that unset read aborts the run before anything drains.
+# Set USER from the real uid, and relax nounset only across the profile source (it is
+# not written to tolerate `set -u`).
+export USER="${USER:-$(id -un)}"
 if [ -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+  set +u
   # shellcheck source=/dev/null
   . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+  set -u
 fi
 command -v claude >/dev/null 2>&1 || die "claude not on PATH (cron PATH is minimal; add its dir)"
 command -v nix >/dev/null 2>&1 || die "nix not on PATH"
