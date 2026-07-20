@@ -27,6 +27,7 @@ mod enrich;
 mod enrich_api;
 mod error;
 mod ingest;
+mod kitchens;
 mod mcp;
 mod proxy;
 mod recipes;
@@ -127,6 +128,19 @@ pub fn app(state: AppState) -> Router {
         // configured admin inside the handler ([`admin::health`]).
         .route("/admin/health", get(admin::health))
         .route("/auth/logout", post(auth::logout))
+        // Kitchens (#72): the durable shared space that scopes the meal flow. All
+        // person-facing and session-gated; the handlers narrow to membership inside.
+        .route("/kitchens", get(kitchens::list).post(kitchens::create))
+        .route("/kitchens/join", post(kitchens::join))
+        .route("/kitchens/{id}", get(kitchens::get))
+        .route(
+            "/kitchens/{id}/equipment",
+            post(kitchens::add_equipment).delete(kitchens::remove_equipment),
+        )
+        .route(
+            "/kitchens/{id}/pantry",
+            post(kitchens::add_pantry).delete(kitchens::remove_pantry),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
@@ -177,7 +191,7 @@ pub fn app(state: AppState) -> Router {
 /// startup crash rather than a bad response.
 fn cors() -> CorsLayer {
     let base = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([axum::http::header::CONTENT_TYPE])
         .allow_credentials(true);
 

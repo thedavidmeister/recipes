@@ -3,6 +3,8 @@ import type {
   BuyRecipe,
   CookRecipe,
   HealthStats,
+  KitchenDetail,
+  KitchenSummary,
   Recipe,
   RecipeCard,
   StructuredMeasure,
@@ -229,5 +231,29 @@ export function cookRecipe(): CookRecipe {
     image: r.image,
     ingredients: readings(),
     steps: recipeSteps(),
+  };
+}
+
+/** The kitchens a user belongs to (#72), for the kitchens view. */
+export function kitchenList(): KitchenSummary[] {
+  return [
+    { id: "k1", name: "Home", role: "owner" },
+    { id: "k2", name: "Beach house", role: "guest" },
+  ];
+}
+
+/** One kitchen in full — owner + a guest, stocked with equipment and a pantry (#72). */
+export function kitchenDetail(): KitchenDetail {
+  return {
+    id: "k1",
+    name: "Home",
+    role: "owner",
+    invite_token: "a1b2c3d4e5f6a7b8",
+    members: [
+      { telegram_user_id: "4242", username: "dave", role: "owner" },
+      { telegram_user_id: "9317", username: null, role: "guest" },
+    ],
+    equipment: ["Blender", "Cast-iron pan", "Oven", "Stand mixer"],
+    pantry: ["Basmati rice", "Eggs", "Olive oil", "Soy sauce"],
   };
 }
