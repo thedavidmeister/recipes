@@ -1,8 +1,8 @@
-//! Cook-decider sessions (#20): the multiplayer mode of `pick`.
+//! Pick (#20): a live, shared swipe/vote over the corpus.
 //!
-//! A group opens a shared session and swipes yes/no through recipe cards; the app
-//! tallies the yeses into "winners" — the group's decision. Everyone walks the
-//! corpus **independently** (their own order), but a vote **cross-pollinates**:
+//! People in a pick swipe yes/no through recipe cards; the app tallies the yeses
+//! into "winners" — what to cook. Everyone walks the corpus **independently**
+//! (their own order), but a vote **cross-pollinates**:
 //! when anyone votes a recipe it is broadcast to the room, and every peer's client
 //! silently slips that recipe into its own deck. So the group diverges for
 //! discovery yet converges on every candidate anyone surfaced — which is what makes
@@ -244,7 +244,7 @@ async fn socket_loop(
 async fn session_exists(conn: &Connection, channel: &str) -> anyhow::Result<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM decider_sessions WHERE channel_id = ?1",
+            "SELECT 1 FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
         .await?;
@@ -259,7 +259,7 @@ pub async fn create_session(
     filter: Option<&str>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO decider_sessions (channel_id, created_by, filter) VALUES (?1, ?2, ?3)",
+        "INSERT INTO pick_sessions (channel_id, created_by, filter) VALUES (?1, ?2, ?3)",
         libsql::params![channel_id, created_by, filter],
     )
     .await?;
