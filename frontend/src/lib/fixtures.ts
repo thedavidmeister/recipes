@@ -1,5 +1,6 @@
 import type {
   BuyRecipe,
+  CookRecipe,
   HealthStats,
   Recipe,
   RecipeCard,
@@ -140,10 +141,33 @@ export function recipeCards(): RecipeCard[] {
 export function buyRecipe(): BuyRecipe {
   const r = recipe();
   return {
+    source: r.source,
+    id: r.id,
     title: r.title,
     ingredients: r.ingredients.map((i) => ({
       name: i.name,
       measure: i.measure,
     })),
+  };
+}
+
+/** The picked recipe in full, for the cook view — multi-step method to render. */
+export function cookRecipe(): CookRecipe {
+  const r = recipe();
+  return {
+    title: r.title,
+    image: r.image,
+    ingredients: r.ingredients.map((i) => ({
+      name: i.name,
+      measure: i.measure,
+    })),
+    instructions: [
+      "Heat the oil in a large pot and add the sliced onions.",
+      "Once golden, stir in the ginger paste and garlic and fry for a minute.",
+      "Add the tomatoes and cook until they break down into a sauce.",
+      "Add the chicken and brown it on all sides.",
+      "Pour in a cup of water, cover, and simmer for 30 minutes.",
+      "Finish with fresh coriander and serve.",
+    ].join("\n"),
   };
 }

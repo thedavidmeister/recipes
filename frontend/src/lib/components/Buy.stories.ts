@@ -10,9 +10,9 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The shopping list for the picked recipe — name + measure per ingredient. */
+/** The shopping checklist for the picked recipe — a couple already ticked off. */
 export const Ready: Story = {
-  args: { status: "ready", recipe: buyRecipe() },
+  args: { status: "ready", recipe: buyRecipe(), checked: { 0: true, 2: true } },
 };
 
 /** Loading the list. */
@@ -27,7 +27,10 @@ export const NoPick: Story = {
 
 /** The picked recipe has no ingredients listed. */
 export const NoIngredients: Story = {
-  args: { status: "ready", recipe: { title: "Toast", ingredients: [] } },
+  args: {
+    status: "ready",
+    recipe: { source: "themealdb", id: "1", title: "Toast", ingredients: [] },
+  },
 };
 
 /** The list could not be loaded. */

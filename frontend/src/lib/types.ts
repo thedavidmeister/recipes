@@ -137,10 +137,29 @@ export type BuyStatus = "pending" | "error" | "ready";
 /**
  * A consensus recipe from a pick, with the ingredients to buy for it. `buy` is
  * the arc after `pick` (#36): what the group agreed on, and what it needs.
+ * `source`/`id` key the persisted checklist (what's already in the basket).
  */
 export interface BuyRecipe {
+  source: string;
+  id: string;
   title: string;
   ingredients: { name: string; measure: string | null }[];
+}
+
+// ---- cook (#36) ------------------------------------------------------------
+
+/** Render state of the cook view. */
+export type CookStatus = "pending" | "error" | "ready";
+
+/**
+ * The picked recipe in full, for cooking (#36) — the step after `buy`. The
+ * instructions are the star; the ingredients ride along as a reference.
+ */
+export interface CookRecipe {
+  title: string;
+  image: string | null;
+  ingredients: { name: string; measure: string | null }[];
+  instructions: string;
 }
 
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */

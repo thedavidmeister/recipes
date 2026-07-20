@@ -2,20 +2,27 @@
   import type { BuyRecipe, BuyStatus } from "$lib/types";
 
   /**
-   * `buy` (#36): the shopping list for the pick's consensus recipe.
+   * `buy` (#36): the shopping **checklist** for the pick's consensus recipe.
    *
-   * The step after `pick` in the meal arc — what the group agreed on, and what it
-   * needs. Presentational only: the page owns the query (the recipe is read from
-   * the pick's stashed decision), this renders. Every state is a Storybook story.
+   * The step after `pick` — what the group agreed on, and what it needs. Each row
+   * ticks off as you shop; the page owns the ticked state (persisted per recipe,
+   * so it survives a reload mid-shop) and this renders. Every state is a story.
    */
   interface Props {
     status: BuyStatus;
     /** The consensus recipe + its ingredients, or `null` if no pick has decided. */
     recipe?: BuyRecipe | null;
     error?: string;
+    /** Which ingredient indices are ticked off (in the basket). */
+    checked?: Record<number, boolean>;
+    onToggle?: (index: number) => void;
   }
 
-  let { status, recipe, error }: Props = $props();
+  let { status, recipe, error, checked = {}, onToggle }: Props = $props();
+
+  const ticked = $derived(
+    recipe ? recipe.ingredients.filter((_, i) => checked[i]).length : 0,
+  );
 </script>
 
 <div class="pt-6">
@@ -42,9 +49,10 @@
     <ul class="flex flex-col gap-2" aria-hidden="true">
       {#each Array(8) as _, i (i)}
         <li
-          class="rounded-card flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3"
+          class="rounded-card flex items-center gap-3 border border-stone-200 bg-cream-100 px-4 py-3"
         >
-          <span class="rounded-pill h-4 w-40 bg-stone-100"></span>
+          <span class="size-5 flex-none rounded-md bg-stone-100"></span>
+          <span class="rounded-pill h-4 flex-1 bg-stone-100"></span>
           <span class="rounded-pill h-4 w-16 bg-stone-100"></span>
         </li>
       {/each}
@@ -67,19 +75,40 @@
       <p class="mt-1 text-sm text-stone-600">No ingredients listed for it yet.</p>
     </div>
   {:else}
+    <p class="mb-3 text-sm text-stone-500">
+      {ticked} of {recipe.ingredients.length} in the basket
+    </p>
     <ul class="flex flex-col gap-2">
       {#each recipe.ingredients as ing, i (i)}
-        <li
-          class="rounded-card flex items-center justify-between gap-4 border border-stone-200 bg-cream-100 px-4 py-3"
-        >
-          <span class="font-display text-stone-900">{ing.name}</span>
-          {#if ing.measure}
+        <li>
+          <label
+            class="rounded-card flex cursor-pointer items-center gap-3 border border-stone-200 bg-cream-100 px-4 py-3"
+          >
+            <input
+              type="checkbox"
+              checked={!!checked[i]}
+              onchange={() => onToggle?.(i)}
+              class="size-5 flex-none accent-plum-500"
+            />
             <span
-              class="rounded-pill flex-none bg-plum-100 px-3 py-1 text-sm text-stone-600"
+              class="font-display flex-1 {checked[i]
+                ? 'text-stone-400 line-through'
+                : 'text-stone-900'}"
             >
-              {ing.measure}
+              {ing.name}
             </span>
-          {/if}
+            {#if ing.measure}
+              <span
+                class="rounded-pill flex-none bg-plum-100 px-3 py-1 text-sm {checked[
+                  i
+                ]
+                  ? 'text-stone-400'
+                  : 'text-stone-600'}"
+              >
+                {ing.measure}
+              </span>
+            {/if}
+          </label>
         </li>
       {/each}
     </ul>

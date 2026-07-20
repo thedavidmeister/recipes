@@ -28,7 +28,8 @@ export function stashConsensus(ref: ConsensusRef): void {
   }
 }
 
-function consensusRef(): ConsensusRef | null {
+/** The recipe the last pick decided on, if any — shared by `buy` and `cook`. */
+export function consensusRef(): ConsensusRef | null {
   try {
     const raw = localStorage.getItem(KEY);
     return raw ? (JSON.parse(raw) as ConsensusRef) : null;
@@ -66,5 +67,29 @@ export async function getBuyList(): Promise<BuyRecipe | null> {
       // Malformed ingredients JSON: show the recipe with no lines rather than fail.
     }
   }
-  return { title, ingredients };
+  return { source: ref.source, id: ref.id, title, ingredients };
+}
+
+/** localStorage key for one recipe's shopping checklist (ticked ingredient indices). */
+function checksKey(source: string, id: string): string {
+  return `recipes:buy-checks:${JSON.stringify([source, id])}`;
+}
+
+/** Which ingredient indices are already ticked off for this recipe. */
+export function loadChecks(source: string, id: string): number[] {
+  try {
+    const raw = localStorage.getItem(checksKey(source, id));
+    return raw ? (JSON.parse(raw) as number[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the ticked indices so the checklist survives a reload mid-shop. */
+export function saveChecks(source: string, id: string, indices: number[]): void {
+  try {
+    localStorage.setItem(checksKey(source, id), JSON.stringify(indices));
+  } catch {
+    // No storage: ticks just won't survive a reload.
+  }
 }
