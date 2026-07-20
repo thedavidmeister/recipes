@@ -41,6 +41,24 @@ export type Quantity =
   | { kind: "exact"; value: number }
   | { kind: "range"; low: number; high: number };
 
+/** Whether a step is mise en place or active cooking (#76). Mirrors `StepKind`. */
+export type StepKind = "prep" | "cook";
+
+/**
+ * One node in a recipe's method DAG (#74/#75/#76), the model's reading of the
+ * instructions. Mirrors `recipe_core::StructuredStep`. `id` is 0-based; `after`
+ * holds the ids of the steps that must finish first (`[]` = can start now), so
+ * parallel-vs-sequential is derived from the edges. `seconds` is a timer's duration
+ * when the step is timed.
+ */
+export interface StructuredStep {
+  id: number;
+  text: string;
+  kind: StepKind;
+  seconds: number | null;
+  after: number[];
+}
+
 export interface Recipe {
   id: string;
   source: string;
@@ -51,6 +69,9 @@ export interface Recipe {
   tags: string[];
   ingredients: Ingredient[];
   instructions: string;
+  /** The model's reading of `instructions` into a step DAG (#74/#75/#76), attached
+   * at derive. Empty until the step-reading worker has read the recipe. */
+  steps: StructuredStep[];
   source_url: string | null;
   video_url: string | null;
 }
@@ -157,17 +178,18 @@ export interface BuyRecipe {
 export type CookStatus = "pending" | "error" | "ready";
 
 /**
- * The picked recipe in full, for cooking (#36) — the step after `buy`. The
- * instructions are the star; the ingredients ride along as a reference.
+ * The picked recipe in full, for cooking (#36) — the step after `buy`. The method
+ * is the star; the ingredients ride along as a reference.
  *
- * Ingredients are the structured reading (#11) — `item`, `amount`, and the
- * `preparation` that `buy` omits ("thinly sliced"). Never the raw measure.
+ * Both halves are the structured reading, never raw: ingredients are the measure
+ * reading (#11), and `steps` is the method read into a DAG (#74/#75/#76) — a timer
+ * per timed step, and the dependencies that say what runs in parallel.
  */
 export interface CookRecipe {
   title: string;
   image: string | null;
   ingredients: StructuredMeasure[];
-  instructions: string;
+  steps: StructuredStep[];
 }
 
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */

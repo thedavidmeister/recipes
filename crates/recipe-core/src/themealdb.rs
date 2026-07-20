@@ -90,6 +90,9 @@ impl Meal {
             tags,
             ingredients,
             instructions: self.instructions.unwrap_or_default(),
+            // Empty at ingest — the step-reading worker fills it later, like the
+            // ingredient `structured` field.
+            steps: Vec::new(),
             // http(s) only — strSource/strYoutube/strMealThumb are third-party data
             // we do not control. http_url also subsumes the old empty-string filter.
             source_url: self.source_url.and_then(|s| crate::adapters::http_url(&s)),

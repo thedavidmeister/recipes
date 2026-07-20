@@ -12,10 +12,11 @@
 use std::collections::HashMap;
 
 use libsql::Connection;
-use recipe_core::{adapters, StructuredMeasure};
+use recipe_core::{adapters, StructuredMeasure, StructuredStep};
 
 use crate::enrich;
 use crate::recipes::upsert;
+use crate::steps;
 
 /// What a derive run did.
 #[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -44,6 +45,9 @@ pub async fn derive(
     // nothing has been enriched — recipes then just keep `structured: None`, which
     // is why deriving works with or without enrichment having run.
     let readings = enrich::load(conn).await?;
+    // The step readings (#74/#75/#76), loaded once too — attached the same way, and
+    // empty when nothing has been step-read (recipes then keep `steps: []`).
+    let step_readings = steps::load(conn).await?;
 
     let mut rows = match source {
         Some(source) => {
@@ -72,6 +76,7 @@ pub async fn derive(
             &raw,
             source_url,
             &readings,
+            &step_readings,
             run_id,
             &mut report,
         )
@@ -94,6 +99,7 @@ pub async fn derive_recipes(
     let mut report = Report::default();
     // One load for the batch, same as `derive` — reattaching is then in-memory.
     let readings = enrich::load(conn).await?;
+    let step_readings = steps::load(conn).await?;
 
     for (source, id) in recipes {
         let mut rows = conn
@@ -116,6 +122,7 @@ pub async fn derive_recipes(
             &raw,
             source_url,
             &readings,
+            &step_readings,
             run_id,
             &mut report,
         )
@@ -137,6 +144,7 @@ async fn normalize_and_upsert(
     raw: &str,
     source_url: Option<String>,
     readings: &HashMap<(String, String), Vec<StructuredMeasure>>,
+    step_readings: &HashMap<(String, String), Vec<StructuredStep>>,
     run_id: i64,
     report: &mut Report,
 ) -> anyhow::Result<()> {
@@ -167,6 +175,13 @@ async fn normalize_and_upsert(
             &item.recipe.source,
             &item.recipe.id,
             &mut item.recipe.ingredients,
+        );
+        // The step-reading half (#74/#75/#76): the same join, filling `recipe.steps`.
+        steps::attach(
+            step_readings,
+            &item.recipe.source,
+            &item.recipe.id,
+            &mut item.recipe.steps,
         );
         upsert(conn, &item.recipe, run_id).await?;
         report.derived += 1;

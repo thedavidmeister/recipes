@@ -6,6 +6,7 @@ import type {
   Recipe,
   RecipeCard,
   StructuredMeasure,
+  StructuredStep,
   WalkStop,
 } from "$lib/types";
 
@@ -16,6 +17,25 @@ import type {
 /** An exact quantity with an optional unit — the common `Amount` in a reading (#11). */
 function exact(value: number, unit: string | null = null): Amount {
   return { kind: "quantified", quantity: { kind: "exact", value }, unit, size: null };
+}
+
+/**
+ * The Chicken Handi method read into a step DAG (#74/#75/#76): three prep roots, a
+ * parallel cook stage (fry the onions **while** blending the tomatoes), then the
+ * sequential finish. Three steps are timed (fry 5:00, bloom 1:00, simmer 30:00).
+ */
+export function recipeSteps(): StructuredStep[] {
+  return [
+    { id: 0, text: "Thinly slice the onions", kind: "prep", seconds: null, after: [] },
+    { id: 1, text: "Chop the garlic and ginger", kind: "prep", seconds: null, after: [] },
+    { id: 2, text: "Finely chop the tomatoes", kind: "prep", seconds: null, after: [] },
+    { id: 3, text: "Fry the onions until golden", kind: "cook", seconds: 300, after: [0] },
+    { id: 4, text: "Meanwhile, blend the tomatoes into a purée", kind: "cook", seconds: null, after: [2] },
+    { id: 5, text: "Stir the garlic, ginger, and tomato purée into the onions", kind: "cook", seconds: 60, after: [3, 4, 1] },
+    { id: 6, text: "Add the chicken and brown it all over", kind: "cook", seconds: null, after: [5] },
+    { id: 7, text: "Pour in a cup of water, cover, and simmer", kind: "cook", seconds: 1800, after: [6] },
+    { id: 8, text: "Finish with fresh coriander and serve", kind: "cook", seconds: null, after: [7] },
+  ];
 }
 
 /** TheMealDB 52795 — the base fixture; override fields per story. */
@@ -81,6 +101,7 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
     ],
     instructions:
       "Take a large pot or wok, big enough to cook all the chicken, and heat the oil in it. Once the oil is hot, add sliced onions.",
+    steps: recipeSteps(),
     source_url: null,
     video_url: "https://www.youtube.com/watch?v=IO0issT0Rmc",
     ...over,
@@ -200,20 +221,13 @@ export function buyRecipe(): BuyRecipe {
   return { source: r.source, id: r.id, title: r.title, ingredients: readings() };
 }
 
-/** The picked recipe in full, for the cook view — multi-step method to render. */
+/** The picked recipe in full, for the cook view — the step DAG to render (#74). */
 export function cookRecipe(): CookRecipe {
   const r = recipe();
   return {
     title: r.title,
     image: r.image,
     ingredients: readings(),
-    instructions: [
-      "Heat the oil in a large pot and add the sliced onions.",
-      "Once golden, stir in the ginger paste and garlic and fry for a minute.",
-      "Add the tomatoes and cook until they break down into a sauce.",
-      "Add the chicken and brown it on all sides.",
-      "Pour in a cup of water, cover, and simmer for 30 minutes.",
-      "Finish with fresh coriander and serve.",
-    ].join("\n"),
+    steps: recipeSteps(),
   };
 }

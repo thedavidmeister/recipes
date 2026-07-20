@@ -1,6 +1,11 @@
 import { turso } from "./turso";
 import { consensusRef } from "./buy";
-import type { CookRecipe, Ingredient, StructuredMeasure } from "./types";
+import type {
+  CookRecipe,
+  Ingredient,
+  StructuredMeasure,
+  StructuredStep,
+} from "./types";
 
 /**
  * `cook` (#36) — the picked recipe in full, for following along.
@@ -14,7 +19,7 @@ export async function getCookRecipe(): Promise<CookRecipe | null> {
   if (!ref) return null;
 
   const rs = await turso().execute({
-    sql: "SELECT title, image, ingredients, instructions FROM recipes WHERE source = ? AND id = ? LIMIT 1",
+    sql: "SELECT title, image, ingredients, steps FROM recipes WHERE source = ? AND id = ? LIMIT 1",
     args: [ref.source, ref.id],
   });
   const row = rs.rows[0];
@@ -31,13 +36,22 @@ export async function getCookRecipe(): Promise<CookRecipe | null> {
         (s): s is StructuredMeasure => !!s && !!s.item && s.item.trim() !== "",
       );
   } catch {
-    // Malformed ingredients JSON: still show the recipe + its steps.
+    // Malformed ingredients JSON: still show whatever steps read.
+  }
+
+  // The method read into a step DAG (#74/#75/#76) — what `cook` renders, never the
+  // raw instructions. Empty until the step-reading worker has read the recipe.
+  let steps: StructuredStep[] = [];
+  try {
+    steps = JSON.parse(String(row.steps ?? "[]")) as StructuredStep[];
+  } catch {
+    // Malformed steps JSON: show the ingredients, no method.
   }
 
   return {
     title: String(row.title),
     image: row.image == null ? null : String(row.image),
     ingredients,
-    instructions: String(row.instructions ?? ""),
+    steps,
   };
 }

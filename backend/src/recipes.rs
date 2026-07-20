@@ -81,10 +81,11 @@ pub(crate) async fn store_raw(
 pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> anyhow::Result<()> {
     let tags = serde_json::to_string(&recipe.tags)?;
     let ingredients = serde_json::to_string(&recipe.ingredients)?;
+    let steps = serde_json::to_string(&recipe.steps)?;
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -96,6 +97,8 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
                                 THEN excluded.ingredients ELSE recipes.ingredients END,
             instructions = CASE WHEN trim(excluded.instructions) <> ''
                                 THEN excluded.instructions ELSE recipes.instructions END,
+            steps        = CASE WHEN json_array_length(excluded.steps) > 0
+                                THEN excluded.steps ELSE recipes.steps END,
             source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
             video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch(),
@@ -113,6 +116,7 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             recipe.instructions.clone(),
             recipe.source_url.clone(),
             recipe.video_url.clone(),
+            steps,
             run_id,
         ],
     )
@@ -140,6 +144,7 @@ mod tests {
                 structured: None,
             }],
             instructions: "Boil.".into(),
+            steps: Vec::new(),
             source_url: None,
             video_url: None,
         }
@@ -157,6 +162,7 @@ mod tests {
             tags: vec![],
             ingredients: vec![],
             instructions: String::new(),
+            steps: Vec::new(),
             source_url: None,
             video_url: None,
         }

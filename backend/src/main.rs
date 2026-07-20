@@ -15,7 +15,9 @@
 //!   recipe-backend derive [<source>]        rebuild `recipes` from `raw_imports`
 //!   recipe-backend enrich pull [--limit N]  GET the app's pending recipes (#59)
 //!   recipe-backend enrich push              POST readings (from stdin) to the app
-//!   recipe-backend mcp                       MCP stdio server: enrich_pull/push tools
+//!   recipe-backend steps pull [--limit N]   GET the app's pending methods (#74)
+//!   recipe-backend steps push               POST step DAGs (from stdin) to the app
+//!   recipe-backend mcp                       MCP stdio server: enrich/step pull/push tools
 
 mod admin;
 mod auth;
@@ -30,6 +32,8 @@ mod proxy;
 mod recipes;
 mod runs;
 mod session;
+mod step_api;
+mod steps;
 mod sync;
 mod walk;
 
@@ -95,6 +99,10 @@ pub fn app(state: AppState) -> Router {
         // the worker, never a model) is what writes the corpus.
         .route("/enrich/pending", get(enrich_api::pending))
         .route("/enrich/results", post(enrich_api::results))
+        // The step-reading queue (#74/#75/#76): the same machine-gated shape for
+        // reading a recipe's method into a step DAG.
+        .route("/enrich/steps/pending", get(step_api::pending))
+        .route("/enrich/steps/results", post(step_api::results))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -272,6 +280,31 @@ async fn main() -> anyhow::Result<()> {
             _ => {
                 eprintln!(
                     "usage: recipe-backend enrich pull [--limit N] | recipe-backend enrich push"
+                );
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+
+    // The step-reading queue's worker side (#74/#75/#76) — the same shape as `enrich`,
+    // a different path. `steps pull` GETs the recipes still needing a step reading;
+    // `steps push` POSTs the step DAGs read from stdin.
+    if std::env::args().nth(1).as_deref() == Some("steps") {
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                step_api::client::pull(limit).await?;
+            }
+            Some("push") => step_api::client::push().await?,
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend steps pull [--limit N] | recipe-backend steps push"
                 );
                 std::process::exit(2);
             }

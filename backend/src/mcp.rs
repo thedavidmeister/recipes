@@ -22,6 +22,7 @@ use rmcp::{
 use tracing_subscriber::EnvFilter;
 
 use crate::enrich_api::client;
+use crate::step_api::client as step_client;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EnrichPullParams {
@@ -38,6 +39,24 @@ struct EnrichPushParams {
     /// readings in ingredient order (see the skill for the StructuredMeasure shape).
     /// Pass a native JSON array; a JSON-encoded string of one is also accepted. The
     /// app validates this before it writes anything.
+    readings: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StepPullParams {
+    /// Maximum recipes to return. Omit for the server's default page size; the
+    /// worker loops until the queue is empty regardless.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StepPushParams {
+    /// The step readings produced from the pulled methods: a JSON array with one entry
+    /// per recipe, each `{ "source", "id", "steps": [StructuredStep, ...] }` (see the
+    /// skill for the StructuredStep shape: id, text, kind, seconds, after). Pass a
+    /// native JSON array; a JSON-encoded string of one is also accepted. The app
+    /// validates the graph before it writes anything.
     readings: serde_json::Value,
 }
 
@@ -104,6 +123,44 @@ impl Enricher {
             Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
             Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "enrich_push failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "step_pull",
+        description = "Get the recipes that still need a structured reading of their \
+                       method. Returns a JSON array of {source, id, instructions, \
+                       ingredients:[{name, measure, preparation}]}; an empty array \
+                       means the queue is drained."
+    )]
+    async fn step_pull(
+        &self,
+        Parameters(StepPullParams { limit }): Parameters<StepPullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match step_client::pull_pending(limit).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "step_pull failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "step_push",
+        description = "Submit step readings for one or more recipes: each a DAG of \
+                       {id, text, kind, seconds, after}. The app validates the graph \
+                       (0-based ids, edges point to earlier steps), stores it, and \
+                       re-derives. Returns {accepted, derived, rejected}."
+    )]
+    async fn step_push(
+        &self,
+        Parameters(StepPushParams { readings }): Parameters<StepPushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match step_client::push_readings(readings).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "step_push failed: {e}"
             ))])),
         }
     }
