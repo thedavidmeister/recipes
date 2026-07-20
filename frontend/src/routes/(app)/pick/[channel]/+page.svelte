@@ -57,10 +57,31 @@
   }
 
   // ---- the endless deck ----
+  // A pick never runs dry: prefetch well before the last card, and size the buffer
+  // to the swiper — ~2x their recent swipes-per-minute — so a fast swiper is fed a
+  // deeper queue and a browser a shallow one, and "Finding more…" is a rare bridge.
   let refilling = $state(false);
   let loadedOnce = $state(false);
   let dry = $state(false); // nothing fresh right now — back off, don't busy-loop
-  const REFILL_AT = 4;
+
+  // Recent swipe times (plain — logic only, never rendered) → a live rate.
+  const swipeTimes: number[] = [];
+  let spm = $state(12); // swipes/minute; a modest default until we have a rate
+
+  function recordSwipe() {
+    const now = Date.now();
+    swipeTimes.push(now);
+    while (swipeTimes.length && now - swipeTimes[0] >= 90_000) swipeTimes.shift();
+    if (swipeTimes.length >= 3) {
+      const spanMin =
+        (swipeTimes[swipeTimes.length - 1] - swipeTimes[0]) / 60_000;
+      if (spanMin > 0) spm = (swipeTimes.length - 1) / spanMin;
+    }
+  }
+
+  // How many cards to keep ahead of the swiper: 2x their rate, bounded. A walk
+  // yields at most MAX_LEN (30) per call, so a deeper buffer just costs one more.
+  const bufferTarget = $derived(Math.min(40, Math.max(10, Math.round(2 * spm))));
 
   function backoff() {
     dry = true;
@@ -72,9 +93,9 @@
     refilling = true;
     try {
       let added = false;
-      // A walk is a different journey each call; a few tries surface fresh cards
-      // even as the queued set grows.
-      for (let tries = 0; tries < 3 && !added; tries++) {
+      // Top up toward the buffer target. A walk is a different journey each call,
+      // so a couple of fetches surface fresh cards even as `queued` grows.
+      for (let fetches = 0; deck.length < bufferTarget && fetches < 3; fetches++) {
         const stops = await getWalk(30);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
@@ -84,10 +105,9 @@
           rememberCard(s.recipe);
           fresh.push(s.recipe);
         }
-        if (fresh.length) {
-          deck = [...deck, ...fresh];
-          added = true;
-        }
+        if (!fresh.length) break; // this walk surfaced nothing new
+        deck = [...deck, ...fresh];
+        added = true;
       }
       loadedOnce = true;
       if (!added) backoff();
@@ -103,9 +123,10 @@
     }
   }
 
-  // Keep the deck fed — a pick is endless.
+  // Prefetch before the deck runs low, sized to the swiper — the buffer stays
+  // ahead of the swiping so the next card is always ready.
   $effect(() => {
-    if (deck.length < REFILL_AT && !refilling && !dry) void refill();
+    if (deck.length < bufferTarget && !refilling && !dry) void refill();
   });
 
   let client: PickClient | null = null;
@@ -175,6 +196,7 @@
   function vote(y: boolean) {
     const c = current;
     if (!c) return;
+    recordSwipe();
     queued.add(key(c.source, c.id));
     client?.vote(c.source, c.id, y); // the echoed vote updates the tally
     deck = deck.slice(1);
