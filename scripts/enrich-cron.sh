@@ -82,50 +82,75 @@ backend_bin="$(nix build "$REPO#recipe-backend" --no-link --print-out-paths)" ||
 export PATH="$backend_bin/bin:$PATH"
 
 PLUGIN_DIR="$REPO/plugins/recipes-enrich"
-SKILL_FILE="$PLUGIN_DIR/skills/enrich/SKILL.md"
-[ -f "$SKILL_FILE" ] || die "missing skill file $SKILL_FILE"
 
 # Plugin MCP tool names are mcp__plugin_<plugin>_<server>__<tool> (verified against
-# Claude Code 2.1.x with --plugin-dir). Allow-list only these two: the worker needs
-# nothing else, and print mode never prompts.
-ALLOWED="mcp__plugin_recipes-enrich_recipes-enrich__enrich_pull,mcp__plugin_recipes-enrich_recipes-enrich__enrich_push"
+# Claude Code 2.1.x with --plugin-dir). The one MCP server exposes both readings'
+# tools; each skill allow-lists only its own two — the worker needs nothing else, and
+# print mode never prompts.
+ING_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__enrich_pull,mcp__plugin_recipes-enrich_recipes-enrich__enrich_push"
+STEP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__step_pull,mcp__plugin_recipes-enrich_recipes-enrich__step_push"
 
-PROMPT="Drain the recipes enrichment queue now. Loop: call enrich_pull, read each \
-returned recipe ingredient lines into StructuredMeasure readings, then call \
-enrich_push with them; repeat until enrich_pull returns an empty array. Use only the \
+ING_PROMPT="Drain the recipes ingredient enrichment queue now. Loop: call enrich_pull, \
+read each returned recipe's ingredient lines into StructuredMeasure readings, then \
+call enrich_push; repeat until enrich_pull returns an empty array. Use only the \
 enrich_pull and enrich_push tools."
+STEP_PROMPT="Drain the recipes step-reading queue now. Loop: call step_pull, read each \
+returned recipe's method into a StructuredStep DAG (segment it, time the timed steps, \
+map the dependencies, extract prep from the ingredients), then call step_push; repeat \
+until step_pull returns an empty array. Use only the step_pull and step_push tools."
 
-# --- drain loop ------------------------------------------------------------------
-# Peek the queue cheaply via the CLI (a read-only pull; it does not consume). If it
-# is empty, stop. Otherwise run one bounded Claude session, which itself loops until
-# the queue drains or the timeout hits; the outer loop just re-runs for any
-# remainder, so a large backfill drains over several sessions instead of one
-# unbounded one.
-for batch in $(seq 1 "$MAX_BATCHES"); do
-  # A failed peek (backend down, bad key) must NOT read as an empty queue, or the
-  # cron would exit "drained" and hide the outage from monitoring; fail loudly.
-  pending="$(recipe-backend enrich pull --limit 1)" \
-    || die "queue peek failed; backend unreachable or misconfigured"
-  if [ "$pending" = "[]" ]; then
-    log "queue empty; drained after $((batch - 1)) session(s)"
-    exit 0
-  fi
+# --- drain one queue -------------------------------------------------------------
+# Peek the queue cheaply via the CLI (a read-only pull; it does not consume). While
+# non-empty, run bounded Claude sessions — each loops internally until the queue
+# drains or the wall-clock cap — so a large backfill drains over several sessions
+# rather than one unbounded one. Args: <kind> <skill-file> <allowed-tools> <prompt>,
+# where <kind> is both the CLI subcommand (`enrich`|`steps`) and the log label.
+#
+# Returns 0 only when the queue fully drained; 1 when it hit MAX_BATCHES with work
+# still pending. The caller uses that to gate the steps drain on ingredients being
+# *complete* — see the call site.
+drain_queue() {
+  local kind="$1" skill_file="$2" allowed="$3" prompt="$4"
+  [ -f "$skill_file" ] || die "missing skill file $skill_file"
+  local batch rc pending
+  for batch in $(seq 1 "$MAX_BATCHES"); do
+    # A failed peek (backend down, bad key) must NOT read as an empty queue, or the
+    # cron would exit "drained" and hide the outage from monitoring; fail loudly.
+    pending="$(recipe-backend "$kind" pull --limit 1)" \
+      || die "$kind queue peek failed; backend unreachable or misconfigured"
+    if [ "$pending" = "[]" ]; then
+      log "$kind queue empty; drained after $((batch - 1)) session(s)"
+      return 0
+    fi
+    log "$kind session $batch: draining (model=$MODEL)"
+    # A timeout (exit 124) is expected mid-backfill, so continue to the next batch;
+    # any other non-zero exit is a real failure worth stopping on (the next cron
+    # retries).
+    rc=0
+    timeout "$SESSION_TIMEOUT" claude -p "$prompt" \
+      --plugin-dir "$PLUGIN_DIR" \
+      --append-system-prompt "$(< "$skill_file")" \
+      --model "$MODEL" \
+      --allowedTools "$allowed" || rc=$?
+    if [ "$rc" -eq 124 ]; then
+      log "$kind session $batch hit the ${SESSION_TIMEOUT}s cap; continuing"
+    elif [ "$rc" -ne 0 ]; then
+      die "$kind claude session $batch failed (exit $rc); next cron run will retry"
+    fi
+  done
+  log "$kind hit MAX_BATCHES=$MAX_BATCHES; remainder waits for the next run"
+  return 1
+}
 
-  log "session $batch: draining (model=$MODEL)"
-  # A session loops internally until the queue drains or the wall-clock cap. A
-  # timeout (exit 124) is expected mid-backfill, so continue to the next batch; any
-  # other non-zero exit is a real failure worth stopping on (the next cron retries).
-  rc=0
-  timeout "$SESSION_TIMEOUT" claude -p "$PROMPT" \
-    --plugin-dir "$PLUGIN_DIR" \
-    --append-system-prompt "$(< "$SKILL_FILE")" \
-    --model "$MODEL" \
-    --allowedTools "$ALLOWED" || rc=$?
-  if [ "$rc" -eq 124 ]; then
-    log "session $batch hit the ${SESSION_TIMEOUT}s cap; continuing"
-  elif [ "$rc" -ne 0 ]; then
-    die "claude session $batch failed (exit $rc); next cron run will retry"
-  fi
-done
-
-log "hit MAX_BATCHES=$MAX_BATCHES; any remainder waits for the next run"
+# Ingredients first, and only step-read once they are *fully* drained: the step
+# reading pulls hidden prep out of each ingredient's preparation (#76), and a step
+# reading is a one-time capture — a recipe read before its ingredients are enriched
+# would miss that prep permanently. So if ingredients hit MAX_BATCHES with a backlog
+# left, defer steps to the next run rather than read methods against un-enriched
+# ingredients.
+if drain_queue enrich "$PLUGIN_DIR/skills/enrich/SKILL.md" "$ING_TOOLS" "$ING_PROMPT"; then
+  drain_queue steps "$PLUGIN_DIR/skills/enrich-steps/SKILL.md" "$STEP_TOOLS" "$STEP_PROMPT" \
+    || true # a steps backlog just waits for the next run; not a failure
+else
+  log "ingredients not fully drained this run; deferring the step reading"
+fi

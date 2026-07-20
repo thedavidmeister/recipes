@@ -243,6 +243,7 @@ mod tests {
                 structured: None,
             }],
             instructions: "Cook it.".to_string(),
+            steps: Vec::new(),
             source_url: None,
             video_url: None,
         };

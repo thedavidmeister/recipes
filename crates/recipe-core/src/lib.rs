@@ -9,8 +9,10 @@
 pub mod adapters;
 pub mod measure;
 pub mod models;
+pub mod step;
 pub mod themealdb;
 
 pub use adapters::{adapter_for, Adapter, IngestError};
 pub use measure::{Amount, Quantity, Size, StructuredMeasure};
 pub use models::{Ingredient, Recipe};
+pub use step::{StepKind, StructuredStep};

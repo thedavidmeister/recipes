@@ -108,14 +108,16 @@ pub mod client {
         require("ENRICH_MODEL", value)
     }
 
-    /// Where the app lives + the machine key, from the worker's environment.
-    struct Target {
-        base_url: String,
-        api_key: String,
+    /// Where the app lives + the machine key, from the worker's environment. Shared
+    /// with the step-reading client ([`crate::step_api`]) — both talk to the same app
+    /// with the same machine key.
+    pub(crate) struct Target {
+        pub(crate) base_url: String,
+        pub(crate) api_key: String,
     }
 
     impl Target {
-        fn from_env() -> anyhow::Result<Self> {
+        pub(crate) fn from_env() -> anyhow::Result<Self> {
             let base_url = require("RECIPES_API_URL", std::env::var("RECIPES_API_URL").ok())?;
             let api_key = require("INGEST_API_KEY", std::env::var("INGEST_API_KEY").ok())?;
             Ok(Self {
@@ -129,7 +131,7 @@ pub mod client {
     /// fails the pull/push instead of blocking the worker forever (CodeRabbit, PR
     /// #60). The `push` timeout has to cover the app's store + re-derive, so it is
     /// generous rather than tight.
-    fn http() -> anyhow::Result<reqwest::Client> {
+    pub(crate) fn http() -> anyhow::Result<reqwest::Client> {
         Ok(reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(60))
@@ -204,8 +206,9 @@ pub mod client {
     /// JSON **string** holding either of those. The string case is not an edge case:
     /// an MCP model routinely encodes a nested-array argument as a string, and the
     /// CLI hands its stdin through here as a string too. Empty or null ⇒ `[]`. Pure,
-    /// so every shape is tested directly.
-    fn normalize_readings(readings: Value) -> anyhow::Result<Value> {
+    /// so every shape is tested directly. Shared with the step-reading push, whose
+    /// batch is the same `{ "readings": [...] }` shape (each entry carrying `steps`).
+    pub(crate) fn normalize_readings(readings: Value) -> anyhow::Result<Value> {
         match readings {
             Value::Null => Ok(json!([])),
             arr @ Value::Array(_) => Ok(arr),

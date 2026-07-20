@@ -1,58 +1,59 @@
 <script lang="ts">
-  import type { CookRecipe, CookStatus, StructuredMeasure } from "$lib/types";
+  import type {
+    CookRecipe,
+    CookStatus,
+    StructuredMeasure,
+    StructuredStep,
+  } from "$lib/types";
   import { formatAmount } from "$lib/measure";
+  import { cookStages, formatClock, type StepTimer } from "$lib/steps";
 
   /**
    * `cook` (#36): the picked recipe in full, to follow while cooking.
    *
-   * The step after `buy`. Three parts from the structured reading (#11): the
-   * ingredients (`item` + measured `amount`), the **prep** — each ingredient's
-   * `preparation` ("thinly sliced"), a process, gathered into its own mise-en-place
-   * section rather than buried in the ingredient line — and the **method**, the big
-   * numbered steps. Presentational only: the page owns the query, this renders.
+   * The method is the model's step reading (#74/#75/#76), rendered as a graph, not a
+   * newline split: the ingredients (item + amount), a **prep** lane (mise en place),
+   * and the **method** as stages where a stage holding more than one step runs in
+   * parallel. Timed steps carry a timer.
+   *
+   * Presentational: the page owns the query and the live timer machinery (ticking,
+   * alerts, persistence) and passes `timers` per step id, so every state — idle,
+   * running, done — is a deterministic story rather than a live clock.
    */
   interface Props {
     status: CookStatus;
     /** The picked recipe in full, or `null` if no pick has decided yet. */
     recipe?: CookRecipe | null;
     error?: string;
+    /** Live timer state per step id (seconds left + whether it fired); absent = idle. */
+    timers?: Record<number, StepTimer>;
+    onStartTimer?: (id: number) => void;
+    onDismissTimer?: (id: number) => void;
   }
 
-  let { status, recipe, error }: Props = $props();
+  let {
+    status,
+    recipe,
+    error,
+    timers = {},
+    onStartTimer,
+    onDismissTimer,
+  }: Props = $props();
 
   /** The amount reference for one ingredient — "5", "¼ cup"; empty when unmeasured. */
   function amountOf(ing: StructuredMeasure): string {
     return formatAmount(ing.amount);
   }
 
-  // Mise en place: the ingredients that need a preparation before cooking. The
-  // preparation is a process, so it earns its own section instead of trailing the
-  // ingredient — the split `buy`/`cook` are built on.
-  const prep = $derived(
-    recipe
-      ? recipe.ingredients.filter(
-          (i): i is StructuredMeasure & { preparation: string } =>
-            typeof i.preparation === "string" && i.preparation.trim() !== "",
-        )
-      : [],
-  );
-
-  // Split the instructions into steps — one per non-blank line.
-  const steps = $derived(
-    recipe
-      ? recipe.instructions
-          .split(/\r?\n+/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [],
-  );
+  // The prep lane (mise en place) and the cooking stages, off the step DAG.
+  const prep = $derived(recipe ? recipe.steps.filter((s) => s.kind === "prep") : []);
+  const stages = $derived(recipe ? cookStages(recipe.steps) : []);
 </script>
 
 <div class="pt-6">
   <header class="mb-6">
     <p class="font-display flex items-center gap-2 text-stone-600">
-      <span class="size-2.5 rounded-full bg-paprika-500" aria-hidden="true"
-      ></span>
+      <span class="size-2.5 rounded-full bg-paprika-500" aria-hidden="true"></span>
       Cook
     </p>
   </header>
@@ -68,9 +69,7 @@
     <div class="rounded-card mb-5 aspect-video w-full bg-stone-100" aria-hidden="true"></div>
     <div class="rounded-pill h-6 w-56 bg-stone-100" aria-hidden="true"></div>
   {:else if !recipe}
-    <div
-      class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
-    >
+    <div class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center">
       <p class="font-display text-stone-900">Nothing to cook yet.</p>
       <p class="mt-1 text-sm text-stone-600">
         Pick something first — once the group agrees on a recipe, the method shows
@@ -93,9 +92,7 @@
     {#if recipe.ingredients.length}
       <ul class="mt-4 flex flex-wrap gap-2">
         {#each recipe.ingredients as ing, i (i)}
-          <li
-            class="rounded-pill border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-600"
-          >
+          <li class="rounded-pill border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-600">
             {ing.item}{#if amountOf(ing)}<span class="text-stone-400">
                 · {amountOf(ing)}</span
               >{/if}
@@ -104,42 +101,99 @@
       </ul>
     {/if}
 
-    <!-- Prep — each ingredient's process, the mise en place before the method. -->
-    {#if prep.length}
+    {#if recipe.steps.length === 0}
+      <p class="mt-8 text-stone-500">This recipe's method hasn't been read yet.</p>
+    {:else}
+      {#if prep.length}
+        <!-- Prep — mise en place, done ahead and in parallel. -->
+        <h2 class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600">
+          <span class="size-2 rounded-full bg-paprika-500" aria-hidden="true"></span>
+          Prep
+        </h2>
+        <ul class="flex flex-col gap-3">
+          {#each prep as step (step.id)}
+            <li class="flex flex-wrap items-center gap-3">
+              <span class="font-display flex-1 text-stone-900">{step.text}</span>
+              {@render timer(step)}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      <!-- The method — the emphasis of `cook`, as stages; a stage of more than one
+           step runs in parallel. -->
       <h2 class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600">
         <span class="size-2 rounded-full bg-paprika-500" aria-hidden="true"></span>
-        Prep
+        Method
       </h2>
-      <ul class="flex flex-col gap-2">
-        {#each prep as ing, i (i)}
-          <li class="flex items-baseline gap-2">
-            <span class="font-display text-stone-900">{ing.item}</span>
-            <span class="text-stone-500">— {ing.preparation}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    <!-- The method — the emphasis of `cook`. -->
-    <h2 class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600">
-      <span class="size-2 rounded-full bg-paprika-500" aria-hidden="true"></span>
-      Method
-    </h2>
-    {#if steps.length}
       <ol class="flex flex-col gap-5">
-        {#each steps as step, i (i)}
+        {#each stages as stage, i (stage.depth)}
           <li class="flex gap-4">
             <span
               class="font-display flex size-8 flex-none items-center justify-center rounded-full border-2 border-paprika-500 text-sm font-medium text-paprika-500"
             >
               {i + 1}
             </span>
-            <p class="flex-1 text-lg leading-relaxed text-stone-900">{step}</p>
+            <div class="flex-1">
+              {#if stage.steps.length > 1}
+                <p class="mb-2 text-sm text-paprika-500">At the same time</p>
+              {/if}
+              <ul class="flex flex-col gap-3">
+                {#each stage.steps as step (step.id)}
+                  <li class="flex flex-wrap items-center gap-3">
+                    <p class="flex-1 text-lg leading-relaxed text-stone-900">
+                      {step.text}
+                    </p>
+                    {@render timer(step)}
+                  </li>
+                {/each}
+              </ul>
+            </div>
           </li>
         {/each}
       </ol>
-    {:else}
-      <p class="text-stone-500">No method listed for this recipe.</p>
     {/if}
   {/if}
 </div>
+
+<!-- One step's timer: a Start control, a live countdown, or a done flag. -->
+{#snippet timer(step: StructuredStep)}
+  {#if step.seconds != null}
+    {@const t = timers[step.id]}
+    {#if t?.done}
+      <span
+        class="rounded-pill flex-none bg-paprika-500 px-3 py-1 text-sm font-medium text-cream-50"
+      >
+        Done · time's up
+      </span>
+      <button
+        type="button"
+        class="text-sm text-stone-500 underline"
+        onclick={() => onDismissTimer?.(step.id)}
+      >
+        Dismiss
+      </button>
+    {:else if t}
+      <span
+        class="rounded-pill flex-none bg-paprika-100 px-3 py-1 text-sm font-medium text-paprika-500 tabular-nums"
+      >
+        {formatClock(t.remaining)}
+      </span>
+      <button
+        type="button"
+        class="text-sm text-stone-500 underline"
+        onclick={() => onDismissTimer?.(step.id)}
+      >
+        Stop
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="rounded-pill flex-none border border-paprika-500 px-3 py-1 text-sm font-medium text-paprika-500"
+        onclick={() => onStartTimer?.(step.id)}
+      >
+        Start {formatClock(step.seconds)}
+      </button>
+    {/if}
+  {/if}
+{/snippet}

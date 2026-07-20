@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::measure::StructuredMeasure;
+use crate::step::StructuredStep;
 
 /// A single ingredient line. `measure` is the quantity/unit when the source
 /// provides it separately (TheMealDB does); free-text sources fold it into
@@ -50,6 +51,17 @@ pub struct Recipe {
     pub tags: Vec<String>,
     pub ingredients: Vec<Ingredient>,
     pub instructions: String,
+    /// The model's structured reading of `instructions` into a step DAG (#74/#75/
+    /// #76), attached at derive from the `step_structures` capture — what `cook`
+    /// renders. `instructions` above stays the source of truth (the reading's
+    /// input), exactly as `Ingredient::measure` does beside `structured`.
+    ///
+    /// Empty until the step-reading worker runs (or when it hasn't read this
+    /// recipe): `#[serde(default)]` so rows stored before this field existed still
+    /// deserialize; `skip_serializing_if` so an un-read recipe stores as it did
+    /// before, no churn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StructuredStep>,
     /// Canonical URL of the recipe on its origin site, when known.
     pub source_url: Option<String>,
     pub video_url: Option<String>,
