@@ -64,7 +64,7 @@ pub struct AppState {
     /// views (the health dashboard). `None` means no admin — the views 403 for
     /// everyone, fail-closed like the ingest key. See [`auth::is_admin`].
     pub admin_id: Option<String>,
-    /// The live cook-decider rooms (#20) — one `tokio::broadcast` channel per
+    /// The live pick rooms (#20) — one `tokio::broadcast` channel per
     /// session. This is the only *stateful* part of the backend, and deliberately
     /// **not authoritative**: Turso holds every vote, so a lost process rehydrates
     /// on reconnect. See [`session`].
@@ -110,7 +110,7 @@ pub fn app(state: AppState) -> Router {
         // The `pick` engine (#47): a variety-first wander over the corpus. A
         // person-facing read, so it is session-gated like the rest.
         .route("/walk", get(walk::walk))
-        // Cook-decider (#20): start a session, then join its live room over a WS.
+        // Pick (#20): start a pick, then join its live room over a WS.
         // Both session-gated — the room needs to know who is voting, and joining is
         // never anonymous (#25).
         .route("/session", post(session::create))
@@ -765,7 +765,7 @@ mod tests {
         b.body(Body::from("{}")).unwrap()
     }
 
-    /// Starting a decider session is session-gated like the rest — joining is never
+    /// Starting a pick is session-gated like the rest — joining is never
     /// anonymous (#25).
     #[tokio::test]
     async fn session_create_requires_a_session() {

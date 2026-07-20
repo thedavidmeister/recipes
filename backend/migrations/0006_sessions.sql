@@ -1,5 +1,7 @@
--- Cook-decider sessions (#20): a group swipes recipes yes/no and the app tallies
--- the winners. Two tables.
+-- Pick (#20): people swipe recipes yes/no and the app tallies the winners. Two
+-- tables. (The first is created as `decider_sessions` here and renamed to
+-- `pick_sessions` in migration 0007 — the SQL name is kept so a fresh DB replays
+-- create-then-rename in order.)
 --
 -- Turso is the source of truth; the WebSocket room in the backend is only a
 -- live-push accelerator (see session.rs). So a lost process — Render's 15-min
@@ -8,12 +10,11 @@
 -- for subsequent live votes. This is the entire reason votes are persisted rather
 -- than kept in RAM.
 
--- A decider session: a shareable channel a group votes in. `filter` is the
--- optional JSON scope that seeds each participant's feed (category / area / tag /
--- ingredient); NULL means the whole corpus. `channel_id` is a random token —
--- joining is still auth-session-gated (#25), so it names a session rather than
--- granting access. Named `decider_sessions`, not `sessions`: the latter is already
--- the auth login-session table (migration 0003).
+-- A pick: a shareable channel people vote in. `filter` is the optional JSON scope
+-- that seeds each participant's feed (category / area / tag / ingredient); NULL
+-- means the whole corpus. `channel_id` is a random token — joining is still
+-- auth-session-gated (#25), so it names a pick rather than granting access. Not
+-- named `sessions`: that is already the auth login-session table (migration 0003).
 CREATE TABLE IF NOT EXISTS decider_sessions (
     channel_id  TEXT PRIMARY KEY,
     created_by  TEXT NOT NULL,        -- the telegram_user_id that started it
