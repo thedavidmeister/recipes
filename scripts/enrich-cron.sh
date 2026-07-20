@@ -105,6 +105,10 @@ until step_pull returns an empty array. Use only the step_pull and step_push too
 # drains or the wall-clock cap — so a large backfill drains over several sessions
 # rather than one unbounded one. Args: <kind> <skill-file> <allowed-tools> <prompt>,
 # where <kind> is both the CLI subcommand (`enrich`|`steps`) and the log label.
+#
+# Returns 0 only when the queue fully drained; 1 when it hit MAX_BATCHES with work
+# still pending. The caller uses that to gate the steps drain on ingredients being
+# *complete* — see the call site.
 drain_queue() {
   local kind="$1" skill_file="$2" allowed="$3" prompt="$4"
   [ -f "$skill_file" ] || die "missing skill file $skill_file"
@@ -134,10 +138,19 @@ drain_queue() {
       die "$kind claude session $batch failed (exit $rc); next cron run will retry"
     fi
   done
-  log "$kind hit MAX_BATCHES=$MAX_BATCHES; any remainder waits for the next run"
+  log "$kind hit MAX_BATCHES=$MAX_BATCHES; remainder waits for the next run"
+  return 1
 }
 
-# Ingredients first — the step reading uses each ingredient's preparation to pull
-# hidden prep into steps (#76) — then the method's step DAG.
-drain_queue enrich "$PLUGIN_DIR/skills/enrich/SKILL.md" "$ING_TOOLS" "$ING_PROMPT"
-drain_queue steps "$PLUGIN_DIR/skills/enrich-steps/SKILL.md" "$STEP_TOOLS" "$STEP_PROMPT"
+# Ingredients first, and only step-read once they are *fully* drained: the step
+# reading pulls hidden prep out of each ingredient's preparation (#76), and a step
+# reading is a one-time capture — a recipe read before its ingredients are enriched
+# would miss that prep permanently. So if ingredients hit MAX_BATCHES with a backlog
+# left, defer steps to the next run rather than read methods against un-enriched
+# ingredients.
+if drain_queue enrich "$PLUGIN_DIR/skills/enrich/SKILL.md" "$ING_TOOLS" "$ING_PROMPT"; then
+  drain_queue steps "$PLUGIN_DIR/skills/enrich-steps/SKILL.md" "$STEP_TOOLS" "$STEP_PROMPT" \
+    || true # a steps backlog just waits for the next run; not a failure
+else
+  log "ingredients not fully drained this run; deferring the step reading"
+fi

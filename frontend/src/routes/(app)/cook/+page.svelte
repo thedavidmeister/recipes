@@ -153,6 +153,10 @@
       gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
       osc.start();
       osc.stop(ctx.currentTime + 0.6);
+      // Release the context when the tone ends: a browser caps concurrent hardware
+      // AudioContexts (Chrome at 6), so leaking one per alert would eventually throw
+      // and silence the beep.
+      osc.onended = () => void ctx.close();
     } catch {
       // No audio context — silent.
     }
