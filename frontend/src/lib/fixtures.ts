@@ -1,4 +1,10 @@
-import type { HealthStats, Recipe, WalkStop } from "$lib/types";
+import type {
+  HealthStats,
+  Match,
+  Recipe,
+  RecipeCard,
+  WalkStop,
+} from "$lib/types";
 
 // Real TheMealDB records (verified against the live API), shaped the way
 // recipe-core normalizes them. Real data keeps stories honest: invented ids and
@@ -123,4 +129,15 @@ export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
     running: 0,
     ...over,
   };
+}
+
+/** A deck of real recipe cards for the pick swipe view — the walk's meals. */
+export function recipeCards(): RecipeCard[] {
+  return walkStops().map((stop) => stop.recipe);
+}
+
+/** Consensus matches for the pick view — recipes everyone (here, all 3) said yes to. */
+export function matches(): Match[] {
+  const cards = recipeCards();
+  return [{ card: cards[0], yes: 3 }];
 }
