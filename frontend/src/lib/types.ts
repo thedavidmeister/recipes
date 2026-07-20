@@ -104,28 +104,29 @@ export interface WalkStop {
 
 /**
  * Render state of a pick's swipe view.
- * - `connecting` — starting the pick / opening the room's socket for the first time.
+ * - `connecting` — starting the pick: opening the socket + loading the first deck.
  * - `reconnecting` — the socket dropped (Render's 5-min idle close, or a spin-down);
  *   the client is re-opening and will rehydrate the tally.
  * - `swiping` — a card is up to vote on.
- * - `empty` — nothing left to swipe right now (waiting for peers to surface more).
+ * - `loading` — the deck ran low; fetching more from the walk. A pick is **endless**
+ *   until you decide (there is no "caught up"), so this is a brief bridge, not a stop.
  * - `error` — the room could not be reached.
  */
 export type PickStatus =
   | "connecting"
   | "reconnecting"
   | "swiping"
-  | "empty"
+  | "loading"
   | "error";
 
-/** The two ways a pick decides its winners (#20), selectable in the results. */
-export type WinCondition = "plurality" | "consensus";
-
-/** A voted-on recipe with its running tally — the row the winners view ranks. */
-export interface Winner {
+/**
+ * A **match** (#20): a recipe everyone in the pick said yes to. Consensus is the
+ * whole point — a match is the pick, surfaced inline the moment it happens.
+ */
+export interface Match {
   card: RecipeCard;
+  /** How many said yes — equals the participant count for a match. */
   yes: number;
-  no: number;
 }
 
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */

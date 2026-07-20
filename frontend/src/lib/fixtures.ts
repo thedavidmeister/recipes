@@ -1,9 +1,9 @@
 import type {
   HealthStats,
+  Match,
   Recipe,
   RecipeCard,
   WalkStop,
-  Winner,
 } from "$lib/types";
 
 // Real TheMealDB records (verified against the live API), shaped the way
@@ -136,17 +136,8 @@ export function recipeCards(): RecipeCard[] {
   return walkStops().map((stop) => stop.recipe);
 }
 
-/**
- * A pick's candidates with running tallies, for the winners view — over three
- * participants, so the first is both the plurality leader and the consensus pick
- * (everyone said yes), and the rest fall away under consensus.
- */
-export function winners(): Winner[] {
+/** Consensus matches for the pick view — recipes everyone (here, all 3) said yes to. */
+export function matches(): Match[] {
   const cards = recipeCards();
-  return [
-    { card: cards[0], yes: 3, no: 0 },
-    { card: cards[1], yes: 3, no: 1 },
-    { card: cards[2], yes: 2, no: 1 },
-    { card: cards[3], yes: 1, no: 2 },
-  ];
+  return [{ card: cards[0], yes: 3 }];
 }

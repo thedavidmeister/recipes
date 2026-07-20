@@ -1,40 +1,31 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { createQuery, useQueryClient } from "@tanstack/svelte-query";
+  import { useQueryClient } from "@tanstack/svelte-query";
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
   import { ApiError } from "$lib/client";
   import { PickClient, fetchCard, type ConnStatus } from "$lib/pick";
-  import type { PickStatus, RecipeCard, WinCondition, Winner } from "$lib/types";
+  import type { Match, PickStatus, RecipeCard } from "$lib/types";
   import Pick from "$lib/components/Pick.svelte";
-  import Winners from "$lib/components/Winners.svelte";
 
   /**
-   * A pick (#20): a live, shared swipe-and-vote over the corpus.
+   * A pick (#20): an endless, shared swipe over the corpus, focused on **consensus**.
    *
-   * The page owns the socket, the deck, and the cross-pollination; the components
-   * render. Each client walks the corpus **independently** for its deck, but every
-   * vote (mine or a peer's) arrives over the room and, if it names a recipe I have
-   * not queued, that recipe is fetched and slipped silently into my deck — so the
-   * pick diverges to explore yet converges on every candidate. Turso is the truth:
-   * the server re-sends the whole tally on every (re)connect, so a dropped socket
-   * just replaces the tally, never loses a vote. This URL is the shareable invite.
+   * The page owns the socket, the deck, and the cross-pollination; `Pick` renders.
+   * Each client walks the corpus **independently** for its deck, which **refills
+   * endlessly** — a pick never runs out until the group finds a **match** (a recipe
+   * everyone said yes to). Every vote (mine or a peer's) arrives over the room and,
+   * if it names a recipe I have not queued, is fetched and slipped silently into my
+   * deck — so the pick diverges to explore yet converges on every candidate. Turso
+   * is the truth: the server re-sends the whole tally on every (re)connect, so a
+   * dropped socket just replaces the tally, never loses a vote. This URL is the
+   * shareable invite.
    */
   const channel = $derived(page.params.channel ?? "");
   const queryClient = useQueryClient();
 
-  // The starting deck: a walk over the corpus (its own order for this client).
-  const walk = createQuery(() => ({
-    queryKey: ["walk", channel],
-    queryFn: () => getWalk(),
-    staleTime: Infinity,
-    retry: false,
-  }));
-
-  // ---- pick state (reactive so the tally + winners re-derive) ----
+  // ---- pick state (reactive so the tally + matches re-derive) ----
   let conn = $state<ConnStatus>("connecting");
-  let view = $state<"swipe" | "winners">("swipe");
-  let condition = $state<WinCondition>("plurality");
   let copied = $state(false);
 
   let deck = $state<RecipeCard[]>([]); // my swipe queue
@@ -54,8 +45,8 @@
     if (!cardMap[k]) cardMap = { ...cardMap, [k]: card };
   }
 
-  // Fetch a card the tally references but this client has not walked to, so the
-  // winners view can render it. Optionally slip it into the deck (peer-injection).
+  // Fetch a card the tally references but this client has not walked to, so a match
+  // can render it. Optionally slip it into the deck (peer-injection).
   async function pull(source: string, id: string, toDeck: boolean) {
     const k = key(source, id);
     if (cardMap[k] && !toDeck) return;
@@ -64,6 +55,58 @@
     rememberCard(card);
     if (toDeck) deck = [...deck, card];
   }
+
+  // ---- the endless deck ----
+  let refilling = $state(false);
+  let loadedOnce = $state(false);
+  let dry = $state(false); // nothing fresh right now — back off, don't busy-loop
+  const REFILL_AT = 4;
+
+  function backoff() {
+    dry = true;
+    setTimeout(() => (dry = false), 3000);
+  }
+
+  async function refill() {
+    if (refilling) return;
+    refilling = true;
+    try {
+      let added = false;
+      // A walk is a different journey each call; a few tries surface fresh cards
+      // even as the queued set grows.
+      for (let tries = 0; tries < 3 && !added; tries++) {
+        const stops = await getWalk(30);
+        const fresh: RecipeCard[] = [];
+        for (const s of stops) {
+          const k = key(s.recipe.source, s.recipe.id);
+          if (queued.has(k)) continue;
+          queued.add(k);
+          rememberCard(s.recipe);
+          fresh.push(s.recipe);
+        }
+        if (fresh.length) {
+          deck = [...deck, ...fresh];
+          added = true;
+        }
+      }
+      loadedOnce = true;
+      if (!added) backoff();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        // A lapsed session — drop back to login, the only real recovery.
+        queryClient.invalidateQueries({ queryKey: ["session"] });
+      } else {
+        backoff();
+      }
+    } finally {
+      refilling = false;
+    }
+  }
+
+  // Keep the deck fed — a pick is endless.
+  $effect(() => {
+    if (deck.length < REFILL_AT && !refilling && !dry) void refill();
+  });
 
   let client: PickClient | null = null;
 
@@ -88,8 +131,8 @@
         const k = key(source, id);
         if (vote) yes = { ...yes, [k]: (yes[k] ?? 0) + 1 };
         else no = { ...no, [k]: (no[k] ?? 0) + 1 };
-        // Cross-pollinate: a recipe a peer voted, that I have not queued, joins
-        // my deck silently.
+        // Cross-pollinate: a recipe a peer voted, that I have not queued, joins my
+        // deck silently.
         if (!queued.has(k)) {
           queued.add(k);
           void pull(source, id, true);
@@ -100,57 +143,33 @@
     return () => client?.stop();
   });
 
-  // Seed the deck from the walk once, skipping anything already in play.
-  let seeded = false;
-  $effect(() => {
-    const stops = walk.data;
-    if (seeded || !stops) return;
-    seeded = true;
-    const fresh: RecipeCard[] = [];
-    for (const stop of stops) {
-      const k = key(stop.recipe.source, stop.recipe.id);
-      if (queued.has(k)) continue;
-      queued.add(k);
-      rememberCard(stop.recipe);
-      fresh.push(stop.recipe);
-    }
-    deck = [...deck, ...fresh];
-  });
-
-  // A lapsed session 401s the walk — drop back to login, the only real recovery.
-  $effect(() => {
-    if (walk.error instanceof ApiError && walk.error.status === 401) {
-      queryClient.invalidateQueries({ queryKey: ["session"] });
-    }
-  });
-
   const current = $derived(deck[0]);
   const participants = $derived(
     Math.max(serverParticipants, voterIds.length, 1),
   );
-  const inTheRunning = $derived(Object.values(yes).filter((c) => c > 0).length);
 
-  const status = $derived<PickStatus>(
-    conn === "connecting"
-      ? "connecting"
-      : conn === "reconnecting"
-        ? "reconnecting"
-        : walk.isError && deck.length === 0
-          ? "error"
-          : walk.isPending && deck.length === 0
-            ? "connecting"
-            : current
-              ? "swiping"
-              : "empty",
+  // The pick: recipes everyone in the room said yes to. Consensus needs a group —
+  // a solo swiper has no match until someone else joins and agrees.
+  const matches = $derived<Match[]>(
+    participants < 2
+      ? []
+      : Object.keys(yes)
+          .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
+          .map((k) => {
+            const card = cardMap[k];
+            return card ? { card, yes: yes[k] ?? 0 } : null;
+          })
+          .filter((m): m is Match => m !== null),
   );
 
-  const candidates = $derived<Winner[]>(
-    Array.from(new Set([...Object.keys(yes), ...Object.keys(no)]))
-      .map((k) => {
-        const card = cardMap[k];
-        return card ? { card, yes: yes[k] ?? 0, no: no[k] ?? 0 } : null;
-      })
-      .filter((w): w is Winner => w !== null),
+  const status = $derived<PickStatus>(
+    conn === "reconnecting"
+      ? "reconnecting"
+      : current
+        ? "swiping"
+        : conn === "connecting" || !loadedOnce
+          ? "connecting"
+          : "loading",
   );
 
   function vote(y: boolean) {
@@ -171,25 +190,13 @@
   }
 </script>
 
-{#if view === "winners"}
-  <Winners
-    {condition}
-    {participants}
-    {candidates}
-    onCondition={(c) => (condition = c)}
-    onBack={() => (view = "swipe")}
-  />
-{:else}
-  <Pick
-    {status}
-    card={current}
-    {inTheRunning}
-    {participants}
-    error={walk.error instanceof Error ? walk.error.message : undefined}
-    shareUrl={page.url.href}
-    {copied}
-    onVote={vote}
-    onShare={share}
-    onWinners={() => (view = "winners")}
-  />
-{/if}
+<Pick
+  {status}
+  card={current}
+  {matches}
+  {participants}
+  shareUrl={page.url.href}
+  {copied}
+  onVote={vote}
+  onShare={share}
+/>

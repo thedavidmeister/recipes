@@ -1,50 +1,48 @@
 <script lang="ts">
-  import type { PickStatus, RecipeCard } from "$lib/types";
+  import type { Match, PickStatus, RecipeCard } from "$lib/types";
 
   /**
-   * The pick swipe view (#20).
+   * The pick swipe view (#20) — an endless, shared swipe focused on **consensus**.
    *
-   * A pick is one card at a time: yes keeps it, pass drops it, and the tally is
-   * the group's running decision — everyone in a pick shares it live. Presentational
-   * only: the page owns the socket, the deck, and the silent peer-injection (a
-   * recipe anyone votes on appears in everyone's deck). Every state — joining,
-   * reconnecting, a card to swipe, all caught up, a dropped room — is a Storybook
-   * story, not something you race the socket to reach.
+   * A pick keeps serving cards until the group finds a recipe everyone says yes to
+   * — a **match**, which is the pick. Matches surface **inline** the moment they
+   * happen; there is no separate results screen and no plurality. Presentational
+   * only: the page owns the socket, the deck (which refills endlessly), and the
+   * cross-pollination. Every state is a Storybook story.
    */
   interface Props {
     status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
-    /** Recipes with at least one yes so far — the size of "the running". */
-    inTheRunning?: number;
+    /** Recipes everyone in the pick said yes to — the pick(s), newest first. */
+    matches?: Match[];
     /** How many people are in this pick (distinct voters). */
     participants?: number;
     error?: string;
     /** The shareable link that invites others into this pick. */
     shareUrl?: string;
-    /** `true` right after the link was copied — flips the Invite button's label. */
     copied?: boolean;
     onVote?: (yes: boolean) => void;
     onShare?: () => void;
-    onWinners?: () => void;
   }
 
   let {
     status,
     card,
-    inTheRunning = 0,
+    matches = [],
     participants = 1,
     error,
     shareUrl,
     copied = false,
     onVote,
     onShare,
-    onWinners,
   }: Props = $props();
 
   const meta = $derived(
     card ? [card.category, card.area].filter(Boolean).join(" · ") : "",
   );
+  const cardMeta = (c: RecipeCard) =>
+    [c.category, c.area].filter(Boolean).join(" · ");
 </script>
 
 <div class="pt-6">
@@ -87,13 +85,48 @@
       </p>
     {/if}
 
-    {#if status === "empty" || !card}
+    {#if matches.length}
+      <!-- The pick: consensus. Everyone in the room said yes to these. -->
+      <section class="rounded-card mb-5 border border-pesto-500 bg-pesto-100 p-5">
+        <p class="font-display flex items-center gap-2 font-medium text-pesto-500">
+          <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"
+          ></span>
+          {matches.length === 1
+            ? "It's a match — everyone's in"
+            : "Everyone's in on these"}
+        </p>
+        <ul class="mt-3 flex flex-col gap-3">
+          {#each matches as m (`${m.card.source}:${m.card.id}`)}
+            <li class="flex items-center gap-3">
+              {#if m.card.image}
+                <img
+                  src={m.card.image}
+                  alt={m.card.title}
+                  class="rounded-card size-14 flex-none object-cover"
+                  loading="lazy"
+                />
+              {/if}
+              <div class="min-w-0">
+                <p class="font-display truncate font-medium text-stone-900">
+                  {m.card.title}
+                </p>
+                {#if cardMeta(m.card)}
+                  <p class="truncate text-sm text-stone-500">{cardMeta(m.card)}</p>
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    {#if !card}
       <div
         class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
       >
-        <p class="font-display text-stone-900">You're all caught up.</p>
+        <p class="font-display text-stone-900">Finding more recipes…</p>
         <p class="mt-1 text-sm text-stone-600">
-          Waiting for the others — anything they vote on lands in your deck.
+          A pick keeps going until everyone agrees — the next card is on its way.
         </p>
       </div>
     {:else}
@@ -134,19 +167,12 @@
       </div>
     {/if}
 
-    <footer
-      class="mt-6 flex items-center justify-between gap-4 border-t border-stone-200 pt-4"
-    >
+    <footer class="mt-6 border-t border-stone-200 pt-4">
       <p class="text-sm text-stone-500">
-        {inTheRunning} in the running · {participants} deciding
+        {participants} deciding · {matches.length
+          ? "keep swiping for another match"
+          : "swipe to find something everyone likes"}
       </p>
-      <button
-        onclick={() => onWinners?.()}
-        disabled={inTheRunning === 0}
-        class="rounded-pill font-display border border-stone-200 bg-cream-50 px-4 py-2 text-sm font-medium text-stone-900 transition-colors hover:border-pesto-500 disabled:opacity-50"
-      >
-        See winners
-      </button>
     </footer>
   {/if}
 </div>

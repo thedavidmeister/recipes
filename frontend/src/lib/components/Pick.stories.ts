@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Pick from "./Pick.svelte";
-import { recipeCards } from "$lib/fixtures";
+import { matches, recipeCards } from "$lib/fixtures";
 
 const meta = {
   title: "recipes/Pick",
@@ -13,18 +13,12 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, mid-pick. */
+/** A card up to vote on, no match yet. */
 export const Swiping: Story = {
-  args: {
-    status: "swiping",
-    card: cards[0],
-    inTheRunning: 3,
-    participants: 2,
-    shareUrl: share,
-  },
+  args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
 };
 
-/** Starting: the socket is opening and the tally is loading. */
+/** Starting: the socket is opening and the first deck is loading. */
 export const Connecting: Story = {
   args: { status: "connecting", shareUrl: share },
 };
@@ -34,17 +28,25 @@ export const Reconnecting: Story = {
   args: {
     status: "reconnecting",
     card: cards[1],
-    inTheRunning: 5,
     participants: 3,
     shareUrl: share,
   },
 };
 
-/** All caught up — nothing to swipe until a peer surfaces more. */
-export const CaughtUp: Story = {
+/** The deck ran low — a pick is endless, so it's fetching more (never "caught up"). */
+export const FindingMore: Story = {
+  args: { status: "loading", participants: 3, shareUrl: share },
+};
+
+/**
+ * Consensus: everyone said yes to a recipe — that's the pick, surfaced inline
+ * while the swipe keeps going for another.
+ */
+export const Matched: Story = {
   args: {
-    status: "empty",
-    inTheRunning: 4,
+    status: "swiping",
+    card: cards[1],
+    matches: matches(),
     participants: 3,
     shareUrl: share,
   },
@@ -55,7 +57,6 @@ export const LinkCopied: Story = {
   args: {
     status: "swiping",
     card: cards[2],
-    inTheRunning: 2,
     participants: 2,
     shareUrl: share,
     copied: true,
