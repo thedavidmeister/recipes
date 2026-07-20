@@ -33,7 +33,12 @@ export function stepDepths(steps: StructuredStep[]): Map<number, number> {
     if (visiting.has(id)) return 0;
     visiting.add(id);
     const step = byId.get(id);
-    const d = step && step.after.length ? 1 + Math.max(...step.after.map(of)) : 0;
+    // Guard `after` defensively: the backend validates it, but a malformed row must
+    // degrade (treat the step as a root) rather than throw and blank the whole view.
+    const d =
+      step && Array.isArray(step.after) && step.after.length
+        ? 1 + Math.max(...step.after.map(of))
+        : 0;
     visiting.delete(id);
     depth.set(id, d);
     return d;

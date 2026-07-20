@@ -90,9 +90,14 @@
     const step = recipe.data?.steps.find((s) => s.id === id);
     if (!step || step.seconds == null) return;
     // Ask for Notification permission on the first start (gated behind the tap, never
-    // on load) so a finished timer can fire from another tab.
+    // on load) so a finished timer still notifies while the tab is backgrounded.
     requestNotify();
-    deadlines = { ...deadlines, [id]: Date.now() + step.seconds * 1000 };
+    // Anchor `now` to the start instant, and derive the deadline from the same one:
+    // the 1s tick otherwise leaves `now` lagging Date.now(), flashing seconds+1 on
+    // the first render until the next tick.
+    const start = Date.now();
+    now = start;
+    deadlines = { ...deadlines, [id]: start + step.seconds * 1000 };
     fired = { ...fired, [id]: false };
     persist();
   }

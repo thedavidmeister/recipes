@@ -167,6 +167,21 @@ pub async fn submit(
             });
             continue;
         }
+        // `pending` only offers recipes with a method, so an empty reading is a model
+        // failure, not a real state. Reject it — the recipe re-enters `pending` and is
+        // read again — rather than store `[]`, which would drop it from the queue
+        // forever with nothing captured (and desync `recipes.steps`, which the derive
+        // upsert merges non-empty). This is the step analogue of the ingredient push
+        // rejecting a 0-length reading via its count check.
+        if item.steps.is_empty() {
+            report.rejected.push(Rejection {
+                source: item.source,
+                id: item.id,
+                reason: "empty step reading — a recipe with a method must yield at least one step"
+                    .into(),
+            });
+            continue;
+        }
         if let Err(reason) = step::validate(&item.steps) {
             report.rejected.push(Rejection {
                 source: item.source,
@@ -443,6 +458,32 @@ mod tests {
         let s1 = loaded.get(&("themealdb".into(), "1".into())).unwrap();
         assert_eq!(s1.len(), 2);
         assert_eq!(s1[1].seconds, Some(120));
+    }
+
+    /// An empty step reading for a recipe with a method is rejected, never stored:
+    /// storing `[]` would drop the recipe from `pending` forever with nothing read.
+    #[tokio::test]
+    async fn submit_rejects_an_empty_reading() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", "Chop then fry.", &[ing("Onion", Some("1"))]).await;
+
+        let report = submit(
+            &conn,
+            vec![SubmittedSteps {
+                source: "themealdb".into(),
+                id: "1".into(),
+                steps: vec![],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.accepted, 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert!(load(&conn).await.unwrap().is_empty(), "nothing was stored");
+        // The recipe stays pending — it will be read again next run.
+        assert_eq!(pending(&conn, 25).await.unwrap().len(), 1);
     }
 
     /// Each stored row records which model produced it — provenance for a drifting

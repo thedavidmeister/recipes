@@ -157,6 +157,9 @@ Go back to step 1. Stop when:
 - **Do** pass clean JSON as `step_push`'s `readings` argument — no commentary.
 - **Don't** invent steps the method does not describe, or timers it does not
   state.
+- **Don't** push an empty `steps` array for a recipe — every pending recipe has
+  a method, so it must yield at least one step (the app rejects an empty
+  reading).
 - **Don't** read the repo, edit files, or use any other tool.
 
 ## Setup (the cron provides this)
