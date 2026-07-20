@@ -46,6 +46,10 @@
     onRemovePantry,
   }: Props = $props();
 
+  // Split the selector so it's clear which kitchens you own vs are a guest in.
+  const owned = $derived(kitchens.filter((k) => k.role === "owner"));
+  const guest = $derived(kitchens.filter((k) => k.role !== "owner"));
+
   let newName = $state("");
   let joinToken = $state("");
   let newEquipment = $state("");
@@ -92,23 +96,35 @@
   {:else if status === "pending"}
     <div class="rounded-card h-10 w-full bg-stone-100" aria-hidden="true"></div>
   {:else}
-    <!-- The kitchens you're in, plus creating and joining one. -->
+    <!-- The kitchens you're in — yours and ones you've been invited to, kept
+         clearly apart — plus creating and joining one. -->
+    {#snippet picker(label: string, items: KitchenSummary[])}
+      {#if items.length}
+        <div class="mb-3">
+          <p class="mb-1.5 text-xs text-stone-500">{label}</p>
+          <ul class="flex flex-wrap gap-2">
+            {#each items as k (k.id)}
+              <li>
+                <button
+                  type="button"
+                  onclick={() => onSelect?.(k.id)}
+                  class="rounded-pill px-3 py-1 text-sm {selected?.id === k.id
+                    ? 'bg-cocoa-500 text-cream-50'
+                    : 'border border-stone-200 bg-cream-100 text-stone-700'}"
+                >
+                  {k.name}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    {/snippet}
     {#if kitchens.length}
-      <ul class="mb-4 flex flex-wrap gap-2">
-        {#each kitchens as k (k.id)}
-          <li>
-            <button
-              type="button"
-              onclick={() => onSelect?.(k.id)}
-              class="rounded-pill px-3 py-1 text-sm {selected?.id === k.id
-                ? 'bg-cocoa-500 text-cream-50'
-                : 'border border-stone-200 bg-cream-100 text-stone-700'}"
-            >
-              {k.name}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <div class="mb-4">
+        {@render picker("Your kitchens", owned)}
+        {@render picker("Shared with you", guest)}
+      </div>
     {/if}
 
     <div class="mb-8 flex flex-col gap-2 sm:flex-row">
