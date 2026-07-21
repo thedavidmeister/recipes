@@ -22,13 +22,19 @@
     /** The shareable invite URL for the open kitchen (the page builds it). */
     inviteLink?: string;
     error?: string;
-    onCreate?: (name: string) => void;
-    onJoin?: (token: string) => void;
+    /**
+     * An action that didn't take — a create/join/add/remove that failed, or a
+     * kitchen that wouldn't open. Shown in place, so the picker stays reachable
+     * and the user can carry on somewhere else.
+     */
+    actionError?: string;
+    onCreate?: (name: string) => void | Promise<void>;
+    onJoin?: (token: string) => void | Promise<void>;
     onSelect?: (id: string) => void;
-    onAddEquipment?: (item: string) => void;
-    onRemoveEquipment?: (item: string) => void;
-    onAddPantry?: (item: string) => void;
-    onRemovePantry?: (item: string) => void;
+    onAddEquipment?: (item: string) => void | Promise<void>;
+    onRemoveEquipment?: (item: string) => void | Promise<void>;
+    onAddPantry?: (item: string) => void | Promise<void>;
+    onRemovePantry?: (item: string) => void | Promise<void>;
   }
 
   let {
@@ -37,6 +43,7 @@
     selected,
     inviteLink,
     error,
+    actionError,
     onCreate,
     onJoin,
     onSelect,
@@ -57,12 +64,33 @@
   let newPantry = $state("");
   let copied = $state(false);
 
-  function submit(value: string, run?: (v: string) => void, clear?: () => void) {
+  // Clear the field only once the action has actually landed. Emptying it up front
+  // reads as success, so a failed create/join/add would look like it worked and the
+  // text would be gone. On a failure the page shows `actionError` and what was typed
+  // stays put, ready to send again.
+  async function submit(
+    value: string,
+    run?: (v: string) => void | Promise<void>,
+    clear?: () => void,
+  ) {
     const v = value.trim();
-    if (v) {
-      run?.(v);
-      clear?.();
+    if (!v) return;
+    try {
+      await run?.(v);
+    } catch {
+      return;
     }
+    clear?.();
+  }
+
+  // Removing a chip has no field to keep, so it only needs the catch: the page has
+  // already put the reason on `actionError`, and an uncaught throw here would be an
+  // unhandled rejection.
+  function remove(
+    run: ((item: string) => void | Promise<void>) | undefined,
+    item: string,
+  ) {
+    void Promise.resolve(run?.(item)).catch(() => {});
   }
 
   async function copyInvite() {
@@ -97,6 +125,15 @@
   {:else if status === "pending"}
     <div class="rounded-card h-10 w-full bg-stone-100" aria-hidden="true"></div>
   {:else}
+    {#if actionError}
+      <div
+        role="alert"
+        class="rounded-card mb-4 border border-paprika-500/30 bg-paprika-100 px-4 py-3 text-sm text-stone-700"
+      >
+        {actionError}
+      </div>
+    {/if}
+
     <!-- The kitchens you're in — yours and ones you've been invited to, kept
          clearly apart — plus creating and joining one. -->
     {#snippet picker(label: string, items: KitchenSummary[])}
@@ -133,7 +170,7 @@
         class="flex flex-1 gap-2"
         onsubmit={(e) => {
           e.preventDefault();
-          submit(newName, onCreate, () => (newName = ""));
+          void submit(newName, onCreate, () => (newName = ""));
         }}
       >
         <input
@@ -152,7 +189,7 @@
         class="flex flex-1 gap-2"
         onsubmit={(e) => {
           e.preventDefault();
-          submit(joinToken, onJoin, () => (joinToken = ""));
+          void submit(joinToken, onJoin, () => (joinToken = ""));
         }}
       >
         <input
@@ -228,7 +265,7 @@
                 <button
                   type="button"
                   aria-label={`Remove ${item}`}
-                  onclick={() => onRemoveEquipment?.(item)}
+                  onclick={() => remove(onRemoveEquipment, item)}
                   class="text-stone-400">×</button
                 >
               </li>
@@ -241,7 +278,7 @@
           class="flex gap-2"
           onsubmit={(e) => {
             e.preventDefault();
-            submit(newEquipment, onAddEquipment, () => (newEquipment = ""));
+            void submit(newEquipment, onAddEquipment, () => (newEquipment = ""));
           }}
         >
           <input
@@ -272,7 +309,7 @@
                 <button
                   type="button"
                   aria-label={`Remove ${item}`}
-                  onclick={() => onRemovePantry?.(item)}
+                  onclick={() => remove(onRemovePantry, item)}
                   class="text-stone-400">×</button
                 >
               </li>
@@ -285,7 +322,7 @@
           class="flex gap-2"
           onsubmit={(e) => {
             e.preventDefault();
-            submit(newPantry, onAddPantry, () => (newPantry = ""));
+            void submit(newPantry, onAddPantry, () => (newPantry = ""));
           }}
         >
           <input

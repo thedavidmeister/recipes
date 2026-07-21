@@ -91,6 +91,15 @@ export function stashCurrentKitchen(id: string): void {
   }
 }
 
+/** Forget the open kitchen — it no longer opens, so a reload must not land on it. */
+export function forgetCurrentKitchen(): void {
+  try {
+    localStorage.removeItem(CURRENT_KEY);
+  } catch {
+    // No storage (private mode): nothing was remembered to begin with.
+  }
+}
+
 /** The last-opened kitchen id, if any. */
 export function currentKitchen(): string | null {
   try {

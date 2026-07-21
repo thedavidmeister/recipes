@@ -269,19 +269,26 @@ async fn require_member(
 
 /// Create a kitchen owned by `owner` and seat the owner as its first member. Returns
 /// the new kitchen's id.
+///
+/// Both writes go in one transaction. A kitchen row without its owner's membership row
+/// is a kitchen nobody is in — `list_kitchens` joins `kitchen_members`, so it shows up
+/// for no one, while its `invite_token` is live and would seat a guest into a kitchen
+/// with no owner.
 async fn create_kitchen(conn: &Connection, name: &str, owner: &str) -> anyhow::Result<String> {
     let id = mint(16);
     let token = mint(16);
-    conn.execute(
+    let tx = conn.transaction().await?;
+    tx.execute(
         "INSERT INTO kitchens (id, name, owner_id, invite_token) VALUES (?1, ?2, ?3, ?4)",
         libsql::params![id.clone(), name.to_owned(), owner.to_owned(), token],
     )
     .await?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO kitchen_members (kitchen_id, user_id, role) VALUES (?1, ?2, 'owner')",
         libsql::params![id.clone(), owner.to_owned()],
     )
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
