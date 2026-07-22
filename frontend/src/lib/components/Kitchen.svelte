@@ -16,9 +16,11 @@
     /** The shareable invite URL (the page builds it from the token). */
     inviteLink?: string;
     error?: string;
+    /** Start a meal plan in this kitchen — the lobby is the next page. */
+    onPlan?: () => void;
   }
 
-  let { status, kitchen, inviteLink, error }: Props = $props();
+  let { status, kitchen, inviteLink, error, onPlan }: Props = $props();
 
   let copied = $state(false);
 
@@ -57,6 +59,15 @@
           Yours by default — the kitchen the app works in until you open another.
         </p>
       {/if}
+
+      <button
+        type="button"
+        onclick={onPlan}
+        class="rounded-card font-display bg-cocoa-500 text-cream-50 mt-5 flex w-full items-center justify-between px-4 py-3"
+      >
+        Plan a meal here
+        <span class="text-cream-200 text-sm">→</span>
+      </button>
 
       <ul class="mt-5 flex flex-col gap-2">
         {#if kitchen.role === "owner"}
