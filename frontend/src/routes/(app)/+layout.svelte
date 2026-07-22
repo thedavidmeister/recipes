@@ -11,9 +11,74 @@
   const queryClient = useQueryClient();
 
   const MUSIC_PREFERENCE = "recipes:music";
+  const MUSIC_VOLUME = "recipes:music-volume";
+  const DEFAULT_VOLUME = 0.5;
+  /** How long the track takes to come up to volume, in milliseconds. */
+  const FADE = 2500;
 
   let audio: HTMLAudioElement | undefined = $state();
   let playing = $state(false);
+
+  /**
+   * The remembered level. Read carefully: a missing key must fall through to the
+   * default, and `Number(null)` is `0` — a perfectly valid volume — so an absent
+   * setting would otherwise read as silence and look like the music was broken.
+   */
+  function storedVolume(): number {
+    try {
+      const raw = localStorage.getItem(MUSIC_VOLUME);
+      if (raw === null) return DEFAULT_VOLUME;
+      const level = Number(raw);
+      return Number.isFinite(level) && level >= 0 && level <= 1
+        ? level
+        : DEFAULT_VOLUME;
+    } catch {
+      return DEFAULT_VOLUME;
+    }
+  }
+
+  let volume = $state(storedVolume());
+  let fading: number | undefined;
+
+  function stopFading() {
+    if (fading !== undefined) cancelAnimationFrame(fading);
+    fading = undefined;
+  }
+
+  /**
+   * Come up from silence rather than landing at full volume.
+   *
+   * A loop that starts at its own level is a jolt — the first thing the app does is
+   * shout — and the point of it is atmosphere. Reading `volume` on every frame rather
+   * than capturing it up front means a drag mid-fade ramps toward the new level
+   * instead of finishing to the old one.
+   */
+  function fadeIn(el: HTMLAudioElement) {
+    stopFading();
+    const startedAt = performance.now();
+    el.volume = 0;
+    const step = () => {
+      const through = Math.min(1, (performance.now() - startedAt) / FADE);
+      el.volume = volume * through;
+      fading = through < 1 ? requestAnimationFrame(step) : undefined;
+    };
+    fading = requestAnimationFrame(step);
+  }
+
+  /**
+   * A drag is an instruction about *now*, so it ends any fade in progress rather than
+   * fighting it for control of the same property.
+   */
+  function setVolume(level: number) {
+    volume = level;
+    stopFading();
+    if (audio) audio.volume = level;
+    try {
+      localStorage.setItem(MUSIC_VOLUME, String(level));
+    } catch {
+      // No storage (private mode): the level holds for this visit.
+    }
+  }
 
   /**
    * The music (#88), owned here so it survives every navigation inside the app — the
@@ -43,7 +108,10 @@
     const attempt = () => {
       if (!wanted()) return;
       el.play().then(
-        () => (playing = true),
+        () => {
+          playing = true;
+          fadeIn(el);
+        },
         () => {
           // Refused: no gesture credited yet. The listeners below are the next chance.
         },
@@ -62,14 +130,19 @@
   function toggleMusic() {
     if (!audio) return;
     if (playing) {
+      stopFading();
       audio.pause();
       playing = false;
       localStorage.setItem(MUSIC_PREFERENCE, "off");
       return;
     }
     localStorage.setItem(MUSIC_PREFERENCE, "on");
-    audio.play().then(
-      () => (playing = true),
+    const el = audio;
+    el.play().then(
+      () => {
+        playing = true;
+        fadeIn(el);
+      },
       () => (playing = false),
     );
   }
@@ -110,6 +183,7 @@
   async function signOut() {
     await logout();
     queryClient.clear();
+    stopFading();
     audio?.pause();
     playing = false;
   }
@@ -157,5 +231,5 @@
     {@render children()}
   </div>
 
-  <MusicSwitch {playing} onToggle={toggleMusic} />
+  <MusicSwitch {playing} {volume} onToggle={toggleMusic} onVolume={setVolume} />
 {/if}
