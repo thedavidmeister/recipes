@@ -122,13 +122,9 @@ pub async fn list(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
 ) -> Result<Json<Vec<KitchenSummary>>, AppError> {
-    ensure_primary(
-        &state.db,
-        &user.telegram_user_id,
-        user.username.as_deref(),
-    )
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    ensure_primary(&state.db, &user.telegram_user_id, user.username.as_deref())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     list_kitchens(&state.db, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
@@ -699,7 +695,11 @@ mod tests {
         let id = create_kitchen(&conn, "Home", "u1").await.unwrap();
 
         assert_eq!(
-            membership(&conn, &id, "u1").await.unwrap().map(|(r, _)| r).as_deref(),
+            membership(&conn, &id, "u1")
+                .await
+                .unwrap()
+                .map(|(r, _)| r)
+                .as_deref(),
             Some("owner")
         );
         assert_eq!(membership(&conn, &id, "u2").await.unwrap(), None);
@@ -740,7 +740,11 @@ mod tests {
             Some(id.as_str())
         );
         assert_eq!(
-            membership(&conn, &id, "guest1").await.unwrap().map(|(r, _)| r).as_deref(),
+            membership(&conn, &id, "guest1")
+                .await
+                .unwrap()
+                .map(|(r, _)| r)
+                .as_deref(),
             Some("guest")
         );
 
@@ -756,7 +760,11 @@ mod tests {
         // The owner re-redeeming their own link stays owner (DO NOTHING keeps the row).
         join_by_token(&conn, &token, "owner").await.unwrap();
         assert_eq!(
-            membership(&conn, &id, "owner").await.unwrap().map(|(r, _)| r).as_deref(),
+            membership(&conn, &id, "owner")
+                .await
+                .unwrap()
+                .map(|(r, _)| r)
+                .as_deref(),
             Some("owner")
         );
 
