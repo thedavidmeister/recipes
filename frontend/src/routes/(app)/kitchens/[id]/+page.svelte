@@ -1,7 +1,11 @@
 <script lang="ts">
   import { createQuery } from "@tanstack/svelte-query";
   import { page } from "$app/state";
-  import { getKitchen, stashCurrentKitchen } from "$lib/kitchens";
+  import {
+    getKitchen,
+    stashCurrentKitchen,
+    forgetCurrentKitchen,
+  } from "$lib/kitchens";
   import type { KitchensStatus } from "$lib/types";
   import Kitchen from "$lib/components/Kitchen.svelte";
 
@@ -24,9 +28,17 @@
       : undefined,
   );
 
-  // Remember the kitchen you last opened — the meal flow will scope itself to it.
+  /**
+   * Opening a kitchen is how you switch to it, and only a switch is remembered: land
+   * on your primary and the stored one is cleared, so the app goes back to assuming
+   * the default rather than holding a preference you did not express.
+   *
+   * The meal flow reads this to scope pick/buy/cook to a kitchen (a follow-up to #72).
+   */
   $effect(() => {
-    if (detail.data) stashCurrentKitchen(detail.data.id);
+    if (!detail.data) return;
+    if (detail.data.is_primary) forgetCurrentKitchen();
+    else stashCurrentKitchen(detail.data.id);
   });
 </script>
 

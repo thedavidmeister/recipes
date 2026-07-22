@@ -3,8 +3,12 @@
   import QrCode from "./QrCode.svelte";
 
   /**
-   * One kitchen (#72): who is in it and how to invite someone. Its equipment and its
-   * pantry are their own pages — this only links to them, so the page stays one idea.
+   * One kitchen (#72): who is in it and how to invite someone. Its equipment, its
+   * pantry and its name are their own pages — this only links to them, so the page
+   * stays one idea.
+   *
+   * A primary kitchen says so. It is the one made for you and the one the app assumes,
+   * so the difference between it and a kitchen you opened on purpose is worth naming.
    */
   interface Props {
     status: KitchensStatus;
@@ -48,8 +52,24 @@
           {kitchen.role}
         </span>
       </div>
+      {#if kitchen.is_primary}
+        <p class="mt-1 text-xs text-stone-500">
+          Yours by default — the kitchen the app works in until you open another.
+        </p>
+      {/if}
 
       <ul class="mt-5 flex flex-col gap-2">
+        {#if kitchen.role === "owner"}
+          <li>
+            <a
+              href="/kitchens/{kitchen.id}/name"
+              class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
+            >
+              Rename
+              <span class="text-sm text-stone-400">→</span>
+            </a>
+          </li>
+        {/if}
         <li>
           <a
             href="/kitchens/{kitchen.id}/equipment"

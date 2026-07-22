@@ -238,6 +238,8 @@ export interface KitchenSummary {
   name: string;
   /** The caller's role: `"owner"` | `"guest"`. */
   role: string;
+  /** Whether this is the caller's primary — the one assumed unless they switch. */
+  is_primary: boolean;
 }
 
 /** A member of a kitchen. Mirrors `kitchens::Member` — identity is the Telegram id;
@@ -254,6 +256,8 @@ export interface KitchenDetail {
   id: string;
   name: string;
   role: string;
+  /** Whether this is the caller's primary. */
+  is_primary: boolean;
   invite_token: string;
   members: KitchenMember[];
   equipment: string[];

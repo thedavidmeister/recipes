@@ -133,6 +133,7 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens", get(kitchens::list).post(kitchens::create))
         .route("/kitchens/join", post(kitchens::join))
         .route("/kitchens/{id}", get(kitchens::get))
+        .route("/kitchens/{id}/name", post(kitchens::rename))
         .route(
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),

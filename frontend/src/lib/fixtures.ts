@@ -237,8 +237,9 @@ export function cookRecipe(): CookRecipe {
 /** The kitchens a user belongs to (#72), for the kitchens view. */
 export function kitchenList(): KitchenSummary[] {
   return [
-    { id: "k1", name: "Home", role: "owner" },
-    { id: "k2", name: "Beach house", role: "guest" },
+    { id: "k1", name: "dave's kitchen", role: "owner", is_primary: true },
+    { id: "k2", name: "Beach house", role: "owner", is_primary: false },
+    { id: "k3", name: "The Shed", role: "guest", is_primary: false },
   ];
 }
 
@@ -246,8 +247,9 @@ export function kitchenList(): KitchenSummary[] {
 export function kitchenDetail(): KitchenDetail {
   return {
     id: "k1",
-    name: "Home",
+    name: "dave's kitchen",
     role: "owner",
+    is_primary: true,
     invite_token: "a1b2c3d4e5f6a7b8",
     members: [
       { telegram_user_id: "4242", username: "dave", role: "owner" },

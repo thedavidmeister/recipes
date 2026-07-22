@@ -10,13 +10,12 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The kitchens you're in — yours, and ones a friend invited you to. */
+/** The kitchens you're in: your primary at the top, then any you made, then the ones
+ * a friend invited you to. There is no empty counterpart — the primary always
+ * exists. */
 export const Ready: Story = {
   args: { status: "ready", kitchens: kitchenList() },
 };
-
-/** Nothing yet: an invitation to make one, and the way to. */
-export const Empty: Story = { args: { status: "ready", kitchens: [] } };
 
 /** An invite link that wouldn't redeem — the reason lands here, on the page it sent
  * you to. */

@@ -39,6 +39,19 @@ export async function createKitchen(name: string): Promise<KitchenDetail> {
   return (await res.json()) as KitchenDetail;
 }
 
+/** Rename a kitchen. Owner only; a guest gets a 403. */
+export async function renameKitchen(
+  id: string,
+  name: string,
+): Promise<KitchenDetail> {
+  const res = await apiFetch(`/api/kitchens/${encodeURIComponent(id)}/name`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw failed(res.status, "rename the kitchen");
+  return (await res.json()) as KitchenDetail;
+}
+
 /** Join a kitchen by its invite token, as a guest. */
 export async function joinKitchen(token: string): Promise<KitchenDetail> {
   const res = await apiFetch("/api/kitchens/join", {
@@ -77,21 +90,24 @@ export const removePantry = (id: string, item: string) =>
   mutateItem("pantry", "DELETE", id, item);
 
 // --- the current kitchen (localStorage) ----------------------------------------
-// Which kitchen the user has open, so it survives a reload. The meal flow will read
-// this to scope pick/buy/cook to a kitchen (a follow-up to #72).
+// Which kitchen the app is working in. Nothing is remembered until you *switch*: with
+// no entry here the answer is your primary, which always exists, so there is no state
+// in which the app does not know which kitchen it is in. The meal flow will read this
+// to scope pick/buy/cook to a kitchen (a follow-up to #72).
 
 const CURRENT_KEY = "recipes:current-kitchen";
 
-/** Remember the open kitchen. */
+/** Remember a switch to a kitchen that is not your primary. */
 export function stashCurrentKitchen(id: string): void {
   try {
     localStorage.setItem(CURRENT_KEY, id);
   } catch {
-    // No storage (private mode): the page just defaults to the first kitchen.
+    // No storage (private mode): every visit simply starts in the primary.
   }
 }
 
-/** Forget the open kitchen — it no longer opens, so a reload must not land on it. */
+/** Switch back to the primary — a kitchen that no longer opens must not be
+ * returned to on the next visit. */
 export function forgetCurrentKitchen(): void {
   try {
     localStorage.removeItem(CURRENT_KEY);
@@ -100,11 +116,30 @@ export function forgetCurrentKitchen(): void {
   }
 }
 
-/** The last-opened kitchen id, if any. */
+/** The kitchen switched to, or `null` for "the primary" — resolve it against a list
+ * with {@link resolveKitchen}. */
 export function currentKitchen(): string | null {
   try {
     return localStorage.getItem(CURRENT_KEY);
   } catch {
     return null;
   }
+}
+
+/**
+ * The kitchen the app is working in: the one switched to, or the primary.
+ *
+ * A switch that no longer resolves — the kitchen was left, or never existed — falls
+ * back to the primary rather than to nothing, because "no kitchen" is not a state the
+ * app has. `undefined` only when the list itself is empty, which the server prevents.
+ */
+export function resolveKitchen(
+  kitchens: KitchenSummary[],
+): KitchenSummary | undefined {
+  const switched = currentKitchen();
+  return (
+    (switched && kitchens.find((k) => k.id === switched)) ||
+    kitchens.find((k) => k.is_primary) ||
+    kitchens[0]
+  );
 }

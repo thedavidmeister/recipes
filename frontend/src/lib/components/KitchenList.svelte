@@ -6,6 +6,10 @@
    * a navigation and so is making one, so this never has to know what a kitchen
    * contains or hold a half-filled form.
    *
+   * There is no empty state: everyone has a primary kitchen, made for them and named
+   * after them, so a list with nothing in it is not a thing that happens. The one at
+   * the top is that kitchen — the one the app works in until you open another.
+   *
    * `actionError` is what came back from redeeming an invite link, which lands on this
    * page rather than a page of its own.
    */
@@ -50,7 +54,12 @@
                   href="/kitchens/{k.id}"
                   class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
                 >
-                  {k.name}
+                  <span class="flex items-baseline gap-2">
+                    {k.name}
+                    {#if k.is_primary}
+                      <span class="text-xs text-stone-500">yours by default</span>
+                    {/if}
+                  </span>
                   <span class="text-sm text-stone-400">→</span>
                 </a>
               </li>
@@ -60,13 +69,6 @@
       {/snippet}
       {@render picker("Your kitchens", owned)}
       {@render picker("Friends' kitchens", guest)}
-
-      {#if kitchens.length === 0}
-        <p class="mt-4 text-sm text-stone-600">
-          No kitchens yet. Make one — a home, a share house, a holiday rental — then
-          invite the people you cook with.
-        </p>
-      {/if}
 
       <a
         href="/kitchens/new"

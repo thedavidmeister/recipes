@@ -63,6 +63,8 @@ pub struct KitchenSummary {
     pub name: String,
     /// The caller's role in it: `owner` | `guest`.
     pub role: String,
+    /// Whether this is the caller's primary — the one assumed unless they switch.
+    pub is_primary: bool,
 }
 
 /// A member of a kitchen. `username` is a display convenience (may be absent — a
@@ -81,6 +83,8 @@ pub struct KitchenDetail {
     pub name: String,
     /// The **caller's** role, so the UI can gate owner-only affordances.
     pub role: String,
+    /// Whether this is the **caller's** primary.
+    pub is_primary: bool,
     pub invite_token: String,
     pub members: Vec<Member>,
     pub equipment: Vec<String>,
@@ -102,17 +106,29 @@ pub async fn create(
     let id = create_kitchen(&state.db, name, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db, &id, "owner")
+    load_detail(&state.db, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
 }
 
-/// `GET /api/kitchens` — the kitchens the caller belongs to.
+/// `GET /api/kitchens` — the kitchens the caller belongs to, primary first.
+///
+/// Seeing your kitchens is also how you come to have one: nobody can have zero, so if
+/// the caller has no primary yet this mints it before answering. Doing it here rather
+/// than at signup means the guarantee also reaches people who logged in before there
+/// was such a thing as a primary.
 pub async fn list(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
 ) -> Result<Json<Vec<KitchenSummary>>, AppError> {
+    ensure_primary(
+        &state.db,
+        &user.telegram_user_id,
+        user.username.as_deref(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
     list_kitchens(&state.db, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
@@ -125,8 +141,38 @@ pub async fn get(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<KitchenDetail>, AppError> {
+    require_member(&state.db, &id, &user.telegram_user_id).await?;
+    load_detail(&state.db, &id, &user.telegram_user_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+        .map(Json)
+}
+
+/// `POST /api/kitchens/{id}/name` — rename a kitchen. Owner only.
+///
+/// Renaming is the only thing you do to a primary kitchen that you would otherwise
+/// have done by creating one: it arrives named after you, and this is how it stops
+/// being.
+pub async fn rename(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Json(body): Json<CreateBody>,
+) -> Result<Json<KitchenDetail>, AppError> {
     let role = require_member(&state.db, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db, &id, &role)
+    if role != "owner" {
+        return Err(AppError::Forbidden(
+            "only the owner can rename this kitchen".into(),
+        ));
+    }
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("kitchen name is required".into()));
+    }
+    rename_kitchen(&state.db, &id, name)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    load_detail(&state.db, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -142,8 +188,8 @@ pub async fn join(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest("no kitchen for that invite".into()))?;
-    let role = require_member(&state.db, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db, &id, &role)
+    require_member(&state.db, &id, &user.telegram_user_id).await?;
+    load_detail(&state.db, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -237,7 +283,7 @@ async fn mutate_item(
     item: &str,
     op: Op,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    let role = require_member(&state.db, kitchen_id, &user.telegram_user_id).await?;
+    require_member(&state.db, kitchen_id, &user.telegram_user_id).await?;
     if item.is_empty() {
         return Err(AppError::BadRequest("item is required".into()));
     }
@@ -246,7 +292,7 @@ async fn mutate_item(
         Op::Remove => remove_item(&state.db, table, kitchen_id, item).await,
     };
     res.map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db, kitchen_id, &role)
+    load_detail(&state.db, kitchen_id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -259,9 +305,10 @@ async fn require_member(
     kitchen_id: &str,
     user: &str,
 ) -> Result<String, AppError> {
-    role_of(conn, kitchen_id, user)
+    membership(conn, kitchen_id, user)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
+        .map(|(role, _)| role)
         .ok_or_else(|| AppError::Forbidden("not a member of this kitchen".into()))
 }
 
@@ -275,6 +322,16 @@ async fn require_member(
 /// for no one, while its `invite_token` is live and would seat a guest into a kitchen
 /// with no owner.
 async fn create_kitchen(conn: &Connection, name: &str, owner: &str) -> anyhow::Result<String> {
+    create_owned(conn, name, owner, false).await
+}
+
+/// Create a kitchen owned by `owner`, optionally as their primary.
+async fn create_owned(
+    conn: &Connection,
+    name: &str,
+    owner: &str,
+    primary: bool,
+) -> anyhow::Result<String> {
     let id = mint(16);
     let token = mint(16);
     let tx = conn.transaction().await?;
@@ -284,40 +341,99 @@ async fn create_kitchen(conn: &Connection, name: &str, owner: &str) -> anyhow::R
     )
     .await?;
     tx.execute(
-        "INSERT INTO kitchen_members (kitchen_id, user_id, role) VALUES (?1, ?2, 'owner')",
-        libsql::params![id.clone(), owner.to_owned()],
+        "INSERT INTO kitchen_members (kitchen_id, user_id, role, is_primary)
+         VALUES (?1, ?2, 'owner', ?3)",
+        libsql::params![id.clone(), owner.to_owned(), i64::from(primary)],
     )
     .await?;
     tx.commit().await?;
     Ok(id)
 }
 
-/// The caller's role in a kitchen, or `None` if they are not a member.
-async fn role_of(
+/// The name a kitchen arrives with: the person's, when Telegram gave us one to use.
+fn default_kitchen_name(username: Option<&str>) -> String {
+    match username.map(str::trim) {
+        Some(u) if !u.is_empty() => format!("{u}'s kitchen"),
+        _ => "My kitchen".to_owned(),
+    }
+}
+
+/// Whether `user` already has a primary kitchen.
+async fn has_primary(conn: &Connection, user: &str) -> anyhow::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM kitchen_members WHERE user_id = ?1 AND is_primary = 1",
+            libsql::params![user.to_owned()],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+/// Make sure `user` has a primary kitchen, minting one named after them if not.
+///
+/// Two first visits can race: both read "no primary" and both insert. The unique index
+/// on `(user_id) WHERE is_primary = 1` settles it — the loser's write is refused, and
+/// a refusal here means somebody else did the job, so the invariant holds either way.
+/// That is why the outcome is re-checked rather than the error inspected: what matters
+/// is whether a primary exists now, not which call created it.
+async fn ensure_primary(
+    conn: &Connection,
+    user: &str,
+    username: Option<&str>,
+) -> anyhow::Result<()> {
+    if has_primary(conn, user).await? {
+        return Ok(());
+    }
+    match create_owned(conn, &default_kitchen_name(username), user, true).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if has_primary(conn, user).await? {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Rename a kitchen.
+async fn rename_kitchen(conn: &Connection, kitchen_id: &str, name: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE kitchens SET name = ?2 WHERE id = ?1",
+        libsql::params![kitchen_id.to_owned(), name.to_owned()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// The caller's membership of a kitchen — their role and whether it is their primary
+/// — or `None` if they are not a member.
+async fn membership(
     conn: &Connection,
     kitchen_id: &str,
     user: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<(String, bool)>> {
     let mut rows = conn
         .query(
-            "SELECT role FROM kitchen_members WHERE kitchen_id = ?1 AND user_id = ?2",
+            "SELECT role, is_primary FROM kitchen_members WHERE kitchen_id = ?1 AND user_id = ?2",
             libsql::params![kitchen_id.to_owned(), user.to_owned()],
         )
         .await?;
     match rows.next().await? {
-        Some(row) => Ok(Some(row.get::<String>(0)?)),
+        Some(row) => Ok(Some((row.get::<String>(0)?, row.get::<i64>(1)? != 0))),
         None => Ok(None),
     }
 }
 
-/// The kitchens `user` belongs to, oldest first, with the caller's role in each.
+/// The kitchens `user` belongs to with their role in each: primary first, then oldest
+/// first.
 async fn list_kitchens(conn: &Connection, user: &str) -> anyhow::Result<Vec<KitchenSummary>> {
     let mut rows = conn
         .query(
-            "SELECT k.id, k.name, m.role
+            "SELECT k.id, k.name, m.role, m.is_primary
              FROM kitchen_members m JOIN kitchens k ON k.id = m.kitchen_id
              WHERE m.user_id = ?1
-             ORDER BY k.created_at, k.id",
+             ORDER BY m.is_primary DESC, k.created_at, k.id",
             libsql::params![user.to_owned()],
         )
         .await?;
@@ -327,6 +443,7 @@ async fn list_kitchens(conn: &Connection, user: &str) -> anyhow::Result<Vec<Kitc
             id: row.get::<String>(0)?,
             name: row.get::<String>(1)?,
             role: row.get::<String>(2)?,
+            is_primary: row.get::<i64>(3)? != 0,
         });
     }
     Ok(out)
@@ -392,13 +509,20 @@ async fn remove_item(
     Ok(())
 }
 
-/// The full detail of a kitchen the caller is a member of (their `role` passed in):
-/// its name + invite, every member, and both inventories.
+/// The full detail of a kitchen `caller` is a member of: its name + invite, every
+/// member, and both inventories.
+///
+/// The caller's role and primary flag are read here rather than passed in, so a role a
+/// handler resolved earlier can never disagree with what the database says now.
 async fn load_detail(
     conn: &Connection,
     kitchen_id: &str,
-    caller_role: &str,
+    caller: &str,
 ) -> anyhow::Result<KitchenDetail> {
+    let (caller_role, is_primary) = membership(conn, kitchen_id, caller)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("not a member of {kitchen_id}"))?;
+
     let mut rows = conn
         .query(
             "SELECT name, invite_token FROM kitchens WHERE id = ?1",
@@ -415,7 +539,8 @@ async fn load_detail(
     Ok(KitchenDetail {
         id: kitchen_id.to_owned(),
         name,
-        role: caller_role.to_owned(),
+        role: caller_role,
+        is_primary,
         invite_token,
         members: load_members(conn, kitchen_id).await?,
         equipment: load_items(conn, "kitchen_equipment", kitchen_id).await?,
@@ -477,6 +602,95 @@ mod tests {
         conn
     }
 
+    /// Nobody has zero kitchens: the first ask mints a primary named after them, and
+    /// asking again does not mint a second.
+    #[tokio::test]
+    async fn ensure_primary_is_idempotent_and_named_after_you() {
+        let conn = conn().await;
+
+        ensure_primary(&conn, "u1", Some("dave")).await.unwrap();
+        let first = list_kitchens(&conn, "u1").await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "dave's kitchen");
+        assert_eq!(first[0].role, "owner");
+        assert!(first[0].is_primary);
+
+        ensure_primary(&conn, "u1", Some("dave")).await.unwrap();
+        let again = list_kitchens(&conn, "u1").await.unwrap();
+        assert_eq!(again, first, "a second ask must not mint a second primary");
+    }
+
+    /// A renamed primary is still the primary — otherwise the next request would
+    /// decide the user has none and mint another one alongside it.
+    #[tokio::test]
+    async fn renaming_the_primary_keeps_it_primary() {
+        let conn = conn().await;
+        ensure_primary(&conn, "u1", Some("dave")).await.unwrap();
+        let id = list_kitchens(&conn, "u1").await.unwrap()[0].id.clone();
+
+        rename_kitchen(&conn, &id, "The Shed").await.unwrap();
+        ensure_primary(&conn, "u1", Some("dave")).await.unwrap();
+
+        let after = list_kitchens(&conn, "u1").await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].name, "The Shed");
+        assert!(after[0].is_primary);
+    }
+
+    /// A Telegram account need not have a username, and the guarantee cannot depend on
+    /// one — so the fallback name is used rather than a kitchen called "'s kitchen".
+    #[test]
+    fn default_name_survives_a_missing_username() {
+        assert_eq!(default_kitchen_name(Some("dave")), "dave's kitchen");
+        assert_eq!(default_kitchen_name(None), "My kitchen");
+        assert_eq!(default_kitchen_name(Some("   ")), "My kitchen");
+    }
+
+    /// Kitchens you make yourself are ordinary ones — the primary stays the primary,
+    /// and it leads the list so "the kitchen" is unambiguous.
+    #[tokio::test]
+    async fn a_made_kitchen_is_not_primary_and_the_primary_leads() {
+        let conn = conn().await;
+        ensure_primary(&conn, "u1", Some("dave")).await.unwrap();
+        let extra = create_kitchen(&conn, "Beach house", "u1").await.unwrap();
+
+        let list = list_kitchens(&conn, "u1").await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].is_primary, "the primary leads the list");
+        assert_eq!(list[0].name, "dave's kitchen");
+        assert_eq!(list[1].id, extra);
+        assert!(!list[1].is_primary);
+    }
+
+    /// Being invited into someone else's kitchen does not move your primary, and does
+    /// not make theirs yours.
+    #[tokio::test]
+    async fn joining_does_not_touch_your_primary() {
+        let conn = conn().await;
+        ensure_primary(&conn, "guest", Some("gina")).await.unwrap();
+        let theirs = create_kitchen(&conn, "Their place", "owner").await.unwrap();
+        let token: String = {
+            let mut rows = conn
+                .query(
+                    "SELECT invite_token FROM kitchens WHERE id = ?1",
+                    libsql::params![theirs.clone()],
+                )
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap().get(0).unwrap()
+        };
+
+        join_by_token(&conn, &token, "guest").await.unwrap();
+
+        let list = list_kitchens(&conn, "guest").await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "gina's kitchen");
+        assert!(list[0].is_primary, "your own kitchen stays your primary");
+        assert_eq!(list[1].id, theirs);
+        assert_eq!(list[1].role, "guest");
+        assert!(!list[1].is_primary);
+    }
+
     /// A created kitchen seats its creator as owner, appears in their list, and its
     /// detail carries the caller's role.
     #[tokio::test]
@@ -485,17 +699,17 @@ mod tests {
         let id = create_kitchen(&conn, "Home", "u1").await.unwrap();
 
         assert_eq!(
-            role_of(&conn, &id, "u1").await.unwrap().as_deref(),
+            membership(&conn, &id, "u1").await.unwrap().map(|(r, _)| r).as_deref(),
             Some("owner")
         );
-        assert_eq!(role_of(&conn, &id, "u2").await.unwrap(), None);
+        assert_eq!(membership(&conn, &id, "u2").await.unwrap(), None);
 
         let list = list_kitchens(&conn, "u1").await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "Home");
         assert_eq!(list[0].role, "owner");
 
-        let detail = load_detail(&conn, &id, "owner").await.unwrap();
+        let detail = load_detail(&conn, &id, "u1").await.unwrap();
         assert_eq!(detail.members.len(), 1);
         assert_eq!(detail.members[0].telegram_user_id, "u1");
         assert_eq!(detail.members[0].role, "owner");
@@ -526,7 +740,7 @@ mod tests {
             Some(id.as_str())
         );
         assert_eq!(
-            role_of(&conn, &id, "guest1").await.unwrap().as_deref(),
+            membership(&conn, &id, "guest1").await.unwrap().map(|(r, _)| r).as_deref(),
             Some("guest")
         );
 
@@ -542,13 +756,13 @@ mod tests {
         // The owner re-redeeming their own link stays owner (DO NOTHING keeps the row).
         join_by_token(&conn, &token, "owner").await.unwrap();
         assert_eq!(
-            role_of(&conn, &id, "owner").await.unwrap().as_deref(),
+            membership(&conn, &id, "owner").await.unwrap().map(|(r, _)| r).as_deref(),
             Some("owner")
         );
 
         // A bad token joins nothing.
         assert_eq!(join_by_token(&conn, "nope", "guest2").await.unwrap(), None);
-        assert_eq!(role_of(&conn, &id, "guest2").await.unwrap(), None);
+        assert_eq!(membership(&conn, &id, "guest2").await.unwrap(), None);
     }
 
     /// Equipment and pantry adds are idempotent and independent; a remove clears one.
@@ -570,7 +784,7 @@ mod tests {
             .await
             .unwrap();
 
-        let detail = load_detail(&conn, &id, "owner").await.unwrap();
+        let detail = load_detail(&conn, &id, "u1").await.unwrap();
         assert_eq!(
             detail.equipment,
             vec!["blender".to_string(), "wok".to_string()]
@@ -580,7 +794,7 @@ mod tests {
         remove_item(&conn, "kitchen_equipment", &id, "wok")
             .await
             .unwrap();
-        let detail = load_detail(&conn, &id, "owner").await.unwrap();
+        let detail = load_detail(&conn, &id, "u1").await.unwrap();
         assert_eq!(detail.equipment, vec!["blender".to_string()]);
         assert_eq!(detail.pantry, vec!["rice".to_string()], "pantry untouched");
     }
