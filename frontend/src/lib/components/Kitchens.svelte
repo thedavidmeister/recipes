@@ -5,7 +5,6 @@
     KitchensStatus,
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
-  import KitchenTalk from "./KitchenTalk.svelte";
 
   /**
    * `kitchens` (#72): the durable shared space that scopes the meal flow — who's in
@@ -105,13 +104,6 @@
 
 <div class="pt-6">
   <header class="mb-6">
-    <!-- The page is deliberately light on function, so it opens on the thing a
-         kitchen is actually for rather than on more controls. -->
-    <!-- Full-bleed: it breaks the page gutter rather than sitting in a box, so it
-         reads as the room the page is in rather than a picture pinned to it. -->
-    <div class="-mx-4 mb-5">
-      <KitchenTalk />
-    </div>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-cocoa-500" aria-hidden="true"></span>
       Kitchens
