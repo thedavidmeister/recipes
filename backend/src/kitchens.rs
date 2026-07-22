@@ -103,10 +103,10 @@ pub async fn create(
     if name.is_empty() {
         return Err(AppError::BadRequest("kitchen name is required".into()));
     }
-    let id = create_kitchen(&state.db, name, &user.telegram_user_id)
+    let id = create_kitchen(&state.db()?, name, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db, &id, &user.telegram_user_id)
+    load_detail(&state.db()?, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -122,10 +122,14 @@ pub async fn list(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
 ) -> Result<Json<Vec<KitchenSummary>>, AppError> {
-    ensure_primary(&state.db, &user.telegram_user_id, user.username.as_deref())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    list_kitchens(&state.db, &user.telegram_user_id)
+    ensure_primary(
+        &state.db()?,
+        &user.telegram_user_id,
+        user.username.as_deref(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    list_kitchens(&state.db()?, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -137,8 +141,8 @@ pub async fn get(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    require_member(&state.db, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db, &id, &user.telegram_user_id)
+    require_member(&state.db()?, &id, &user.telegram_user_id).await?;
+    load_detail(&state.db()?, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -155,7 +159,7 @@ pub async fn rename(
     Path(id): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    let role = require_member(&state.db, &id, &user.telegram_user_id).await?;
+    let role = require_member(&state.db()?, &id, &user.telegram_user_id).await?;
     if role != "owner" {
         return Err(AppError::Forbidden(
             "only the owner can rename this kitchen".into(),
@@ -165,10 +169,10 @@ pub async fn rename(
     if name.is_empty() {
         return Err(AppError::BadRequest("kitchen name is required".into()));
     }
-    rename_kitchen(&state.db, &id, name)
+    rename_kitchen(&state.db()?, &id, name)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db, &id, &user.telegram_user_id)
+    load_detail(&state.db()?, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -180,12 +184,12 @@ pub async fn join(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Json(body): Json<JoinBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    let id = join_by_token(&state.db, body.token.trim(), &user.telegram_user_id)
+    let id = join_by_token(&state.db()?, body.token.trim(), &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest("no kitchen for that invite".into()))?;
-    require_member(&state.db, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db, &id, &user.telegram_user_id)
+    require_member(&state.db()?, &id, &user.telegram_user_id).await?;
+    load_detail(&state.db()?, &id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -279,16 +283,16 @@ async fn mutate_item(
     item: &str,
     op: Op,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    require_member(&state.db, kitchen_id, &user.telegram_user_id).await?;
+    require_member(&state.db()?, kitchen_id, &user.telegram_user_id).await?;
     if item.is_empty() {
         return Err(AppError::BadRequest("item is required".into()));
     }
     let res = match op {
-        Op::Add => add_item(&state.db, table, kitchen_id, item).await,
-        Op::Remove => remove_item(&state.db, table, kitchen_id, item).await,
+        Op::Add => add_item(&state.db()?, table, kitchen_id, item).await,
+        Op::Remove => remove_item(&state.db()?, table, kitchen_id, item).await,
     };
     res.map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db, kitchen_id, &user.telegram_user_id)
+    load_detail(&state.db()?, kitchen_id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)

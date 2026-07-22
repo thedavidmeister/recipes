@@ -45,7 +45,7 @@ pub async fn pending(
     Query(params): Query<PendingParams>,
 ) -> Result<Json<Vec<enrich::PendingRecipe>>, AppError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let recipes = enrich::pending(&state.db, limit)
+    let recipes = enrich::pending(&state.db()?, limit)
         .await
         .map_err(|e| AppError::Internal(format!("pending failed: {e}")))?;
     Ok(Json(recipes))
@@ -76,7 +76,7 @@ pub async fn results(
             "model is required — it is the readings' provenance".into(),
         ));
     }
-    let report = enrich::submit(&state.db, req.readings, req.model.trim())
+    let report = enrich::submit(&state.db()?, req.readings, req.model.trim())
         .await
         .map_err(|e| AppError::Internal(format!("results failed: {e}")))?;
     Ok(Json(report))

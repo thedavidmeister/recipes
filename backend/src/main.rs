@@ -48,13 +48,44 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-/// Shared handler state: the SSRF-guarded HTTP client, a Turso/libSQL
-/// connection, the Telegram config auth runs on, and the infra key that guards
-/// the ingest sync.
+/// Shared handler state: the SSRF-guarded HTTP client, the Turso/libSQL database,
+/// the Telegram config auth runs on, and the infra key that guards the ingest sync.
+impl AppState {
+    /// A connection for this request.
+    ///
+    /// Deliberately per-request rather than one held for the process lifetime. A
+    /// libsql connection owns a Hrana stream, and a stream does not survive the
+    /// database changing generation — a restart or a failover on Turso's side. The
+    /// long-lived connection we used to hold went stale exactly once and then failed
+    /// *every* request after it with `stream not found: generation mismatch`, because
+    /// nothing in the process ever asked for a new stream. Only a restart cleared it,
+    /// which is not a recovery plan.
+    ///
+    /// Connecting is cheap — it allocates a handle; the stream is established lazily
+    /// on first use — so the fix is simply to stop keeping one around.
+    pub fn db(&self) -> Result<libsql::Connection, error::AppError> {
+        let conn = self
+            .database
+            .connect()
+            .map_err(|e| error::AppError::Internal(format!("could not reach the database: {e}")))?;
+        // Wait for a busy database rather than failing at once. Turso serves the
+        // deployed app and has no file lock to contend for, but a local file does —
+        // and SQLite's default is to give up immediately, so two connections to a dev
+        // or test database would collide the moment one of them wrote. Waiting is the
+        // behaviour every other caller already assumes.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| {
+                error::AppError::Internal(format!("could not configure the database: {e}"))
+            })?;
+        Ok(conn)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub http: reqwest::Client,
-    pub db: libsql::Connection,
+    /// The database, **not** a connection. See [`AppState::db`].
+    pub database: std::sync::Arc<libsql::Database>,
     pub telegram: auth::TelegramConfig,
     pub cookie: auth::CookieConfig,
     /// Authenticates the machine that triggers `/api/ingest` (#49) — a schedule,
@@ -347,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let state = AppState {
         http: proxy::build_client()?,
-        db: conn.clone(),
+        database: std::sync::Arc::new(database),
         telegram: auth::TelegramConfig::from_env()?,
         cookie: auth::CookieConfig::from_env()?,
         ingest_key,
@@ -392,15 +423,26 @@ mod tests {
     /// one still serves everything else), so the tests reach that state the same
     /// way the process does.
     async fn test_app_with_ingest_key(ingest_key: Option<String>) -> (Router, libsql::Connection) {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().unwrap();
+        // A file rather than `:memory:`, because SQLite gives every connection to
+        // `:memory:` its own private database — and the app now takes a fresh
+        // connection per request, so an in-memory one would hand each request an empty
+        // unmigrated database. A file is what production is: one database, many
+        // connections. Unique per test so they cannot see each other.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "recipes-test-{}-{}.db",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let database = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = database.connect().unwrap();
         db::migrate(&conn).await.unwrap();
+        // The returned connection is for the test's own assertions; the app takes its
+        // own from the same database, exactly as it does in production.
         let state = AppState {
             http: proxy::build_client().unwrap(),
-            db: conn.clone(),
+            database: std::sync::Arc::new(database),
             telegram: auth::TelegramConfig {
                 bot_token: "test-token".into(),
                 webhook_secret: "test-webhook-secret".into(),
@@ -835,7 +877,12 @@ mod tests {
             ))))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        eprintln!("DEBUG body: {}", String::from_utf8_lossy(&body));
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// With a session it reaches the handler and returns a walk. Empty here because

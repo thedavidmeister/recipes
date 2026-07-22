@@ -138,8 +138,11 @@ pub async fn create(
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
     let channel_id = mint_channel_id();
+    // One connection for both writes: the plan and its first voter are one act, and
+    // two connections to a local database can contend for the same write lock.
+    let db = state.db()?;
     create_session(
-        &state.db,
+        &db,
         &channel_id,
         &user.telegram_user_id,
         body.filter.as_deref(),
@@ -149,7 +152,7 @@ pub async fn create(
     .map_err(|e| AppError::Internal(e.to_string()))?;
     // The host is in their own plan from the moment it exists, so a lobby is never
     // empty and a plan never has nobody deciding it.
-    seat_voter(&state.db, &channel_id, &user.telegram_user_id)
+    seat_voter(&db, &channel_id, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(Created { channel_id }))
@@ -179,7 +182,7 @@ pub async fn lobby(
     Extension(_user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    load_lobby(&state.db, &channel)
+    load_lobby(&state.db()?, &channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))
@@ -197,7 +200,7 @@ pub async fn join_lobby(
     Extension(user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    let view = load_lobby(&state.db, &channel)
+    let view = load_lobby(&state.db()?, &channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -211,7 +214,7 @@ pub async fn join_lobby(
             "this meal plan has already started".into(),
         ));
     }
-    seat_voter(&state.db, &channel, &user.telegram_user_id)
+    seat_voter(&state.db()?, &channel, &user.telegram_user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, &channel).await?;
@@ -224,7 +227,7 @@ pub async fn start(
     Extension(user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    let view = load_lobby(&state.db, &channel)
+    let view = load_lobby(&state.db()?, &channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -233,7 +236,7 @@ pub async fn start(
             "only whoever started this plan can begin it".into(),
         ));
     }
-    begin_session(&state.db, &channel)
+    begin_session(&state.db()?, &channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, &channel).await?;
@@ -243,7 +246,7 @@ pub async fn start(
 /// Re-read the lobby and tell the room, so every open client moves together — a guest
 /// arriving, or the host pressing start, lands on everyone's screen at once.
 async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyView, AppError> {
-    let view = load_lobby(&state.db, channel)
+    let view = load_lobby(&state.db()?, channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -269,7 +272,7 @@ pub async fn ws(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     // An unknown channel is a client bug, not a new room to conjure.
-    if !session_exists(&state.db, &channel)
+    if !session_exists(&state.db()?, &channel)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
     {
@@ -291,8 +294,16 @@ async fn socket_loop(
     let mut rx = tx.subscribe();
     let (mut sink, mut stream) = socket.split();
 
+    // Not a handler: there is nowhere to return an error to, and this outlives a
+    // request by design. It takes one connection for the life of the socket — if that
+    // stream goes stale the client reconnects, which is the same recovery a dropped
+    // socket already has.
+    let Ok(db) = state.database.connect() else {
+        return;
+    };
+
     // Rehydrate: the current tally before any live vote.
-    if let Ok((participants, votes)) = load_tally(&state.db, &channel).await {
+    if let Ok((participants, votes)) = load_tally(&db, &channel).await {
         if let Ok(txt) = serde_json::to_string(&ServerMsg::Tally {
             participants,
             votes,
@@ -305,7 +316,7 @@ async fn socket_loop(
 
     // The lobby, so a (re)connecting client knows how many it has to convince and
     // whether the swiping has begun, without a second round trip.
-    if let Ok(Some(view)) = load_lobby(&state.db, &channel).await {
+    if let Ok(Some(view)) = load_lobby(&db, &channel).await {
         if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
             deciders: view.voters.len() as i64,
             started: view.started,
@@ -342,7 +353,7 @@ async fn socket_loop(
                         serde_json::from_str::<ClientMsg>(&t)
                     {
                         // Durable write first, then the live push — Turso is the truth.
-                        if record_vote(&state.db, &channel, &source, &id, &voter, vote)
+                        if record_vote(&db, &channel, &source, &id, &voter, vote)
                             .await
                             .is_ok()
                         {
