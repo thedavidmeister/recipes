@@ -4,6 +4,8 @@
     KitchenSummary,
     KitchensStatus,
   } from "$lib/types";
+  import QrCode from "./QrCode.svelte";
+  import KitchenTalk from "./KitchenTalk.svelte";
 
   /**
    * `kitchens` (#72): the durable shared space that scopes the meal flow — who's in
@@ -29,7 +31,6 @@
      */
     actionError?: string;
     onCreate?: (name: string) => void | Promise<void>;
-    onJoin?: (token: string) => void | Promise<void>;
     onSelect?: (id: string) => void;
     onAddEquipment?: (item: string) => void | Promise<void>;
     onRemoveEquipment?: (item: string) => void | Promise<void>;
@@ -45,7 +46,6 @@
     error,
     actionError,
     onCreate,
-    onJoin,
     onSelect,
     onAddEquipment,
     onRemoveEquipment,
@@ -59,7 +59,6 @@
   const guest = $derived(kitchens.filter((k) => k.role !== "owner"));
 
   let newName = $state("");
-  let joinToken = $state("");
   let newEquipment = $state("");
   let newPantry = $state("");
   let copied = $state(false);
@@ -106,6 +105,11 @@
 
 <div class="pt-6">
   <header class="mb-6">
+    <!-- The page is deliberately light on function, so it opens on the thing a
+         kitchen is actually for rather than on more controls. -->
+    <div class="rounded-card mb-4 overflow-hidden border border-stone-200">
+      <KitchenTalk />
+    </div>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-cocoa-500" aria-hidden="true"></span>
       Kitchens
@@ -165,46 +169,28 @@
       </div>
     {/if}
 
-    <div class="mb-8 flex flex-col gap-2 sm:flex-row">
-      <form
-        class="flex flex-1 gap-2"
-        onsubmit={(e) => {
-          e.preventDefault();
-          void submit(newName, onCreate, () => (newName = ""));
-        }}
+    <!-- Only creating needs a field. Joining doesn't: an invite *is* a link, and
+         opening it redeems the token on arrival — a paste box would be a second,
+         worse path to the same thing (and the link we hand out isn't a bare token). -->
+    <form
+      class="mb-8 flex gap-2"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void submit(newName, onCreate, () => (newName = ""));
+      }}
+    >
+      <input
+        bind:value={newName}
+        placeholder="New kitchen name"
+        class="rounded-card flex-1 border border-stone-200 bg-cream-50 px-3 py-2 text-sm text-stone-900"
+      />
+      <button
+        type="submit"
+        class="rounded-card flex-none bg-cocoa-500 px-4 py-2 text-sm font-medium text-cream-50"
       >
-        <input
-          bind:value={newName}
-          placeholder="New kitchen name"
-          class="rounded-card flex-1 border border-stone-200 bg-cream-50 px-3 py-2 text-sm text-stone-900"
-        />
-        <button
-          type="submit"
-          class="rounded-card flex-none bg-cocoa-500 px-4 py-2 text-sm font-medium text-cream-50"
-        >
-          Create
-        </button>
-      </form>
-      <form
-        class="flex flex-1 gap-2"
-        onsubmit={(e) => {
-          e.preventDefault();
-          void submit(joinToken, onJoin, () => (joinToken = ""));
-        }}
-      >
-        <input
-          bind:value={joinToken}
-          placeholder="Paste an invite"
-          class="rounded-card flex-1 border border-stone-200 bg-cream-50 px-3 py-2 text-sm text-stone-900"
-        />
-        <button
-          type="submit"
-          class="rounded-card flex-none border border-cocoa-500 px-4 py-2 text-sm font-medium text-cocoa-500"
-        >
-          Join
-        </button>
-      </form>
-    </div>
+        Create
+      </button>
+    </form>
 
     {#if selected}
       <section>
@@ -220,8 +206,16 @@
         </div>
 
         {#if inviteLink}
+          <div class="rounded-card mt-4 border border-stone-200 bg-cream-100 p-4">
+            <div class="flex justify-center">
+              <QrCode value={inviteLink} label="Scan to join {selected.name}" />
+            </div>
+            <p class="mt-3 text-center text-sm text-stone-500">
+              Scan to join, or send the link.
+            </p>
+          </div>
           <div
-            class="rounded-card mt-4 flex items-center gap-3 border border-stone-200 bg-cream-100 px-4 py-3"
+            class="rounded-card mt-3 flex items-center gap-3 border border-stone-200 bg-cream-100 px-4 py-3"
           >
             <span class="flex-1 truncate text-sm text-stone-600">{inviteLink}</span>
             <button

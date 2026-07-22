@@ -183,7 +183,6 @@
   error={list.error instanceof Error ? list.error.message : undefined}
   actionError={actionError ?? detailError ?? undefined}
   {onCreate}
-  {onJoin}
   onSelect={select}
   {onAddEquipment}
   {onRemoveEquipment}
