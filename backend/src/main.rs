@@ -123,6 +123,9 @@ pub fn app(state: AppState) -> Router {
         // Both session-gated — the room needs to know who is voting, and joining is
         // never anonymous (#25).
         .route("/session", post(session::create))
+        .route("/session/{channel}", get(session::lobby))
+        .route("/session/{channel}/join", post(session::join_lobby))
+        .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).

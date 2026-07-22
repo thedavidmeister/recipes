@@ -87,6 +87,13 @@ enum ServerMsg {
         participants: i64,
         votes: Vec<TallyRow>,
     },
+    /// The lobby: how many people are deciding, and whether the swiping has begun.
+    ///
+    /// `deciders` is the roster count — the number a recipe has to win over. It comes
+    /// from who *joined the plan*, not from who has voted or who happens to be
+    /// connected: a person who steps away is still deciding, and a person who has not
+    /// swiped yet has not agreed to anything.
+    Lobby { deciders: i64, started: bool },
     /// One live vote — drives both the incremental tally and peer-injection (a
     /// client slips `source`/`id` into its own deck if it has not seen it).
     Vote {
@@ -113,6 +120,10 @@ pub struct CreateBody {
     /// client interprets it; the backend only stores and echoes it.
     #[serde(default)]
     filter: Option<String>,
+    /// The kitchen this plans a meal for. Optional so a plan can still be started
+    /// outside one.
+    #[serde(default)]
+    kitchen_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,10 +143,119 @@ pub async fn create(
         &channel_id,
         &user.telegram_user_id,
         body.filter.as_deref(),
+        body.kitchen_id.as_deref(),
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
+    // The host is in their own plan from the moment it exists, so a lobby is never
+    // empty and a plan never has nobody deciding it.
+    seat_voter(&state.db, &channel_id, &user.telegram_user_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(Created { channel_id }))
+}
+
+/// A person in a plan. `username` is display convenience; identity is the id (#25).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Voter {
+    pub telegram_user_id: String,
+    pub username: Option<String>,
+}
+
+/// A plan's lobby: who is deciding, and whether it has begun.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LobbyView {
+    pub channel_id: String,
+    pub kitchen_id: Option<String>,
+    /// The telegram id that started it — only they can start the swiping.
+    pub host: String,
+    pub started: bool,
+    pub voters: Vec<Voter>,
+}
+
+/// `GET /api/session/{channel}` — the lobby: the roster, and whether it has started.
+pub async fn lobby(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+) -> Result<Json<LobbyView>, AppError> {
+    load_lobby(&state.db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))
+        .map(Json)
+}
+
+/// `POST /api/session/{channel}/join` — join a plan as a decider.
+///
+/// Only while the lobby is open. Once the swiping has begun the roster is what the
+/// tally is measured against, so admitting someone late would move the target for
+/// everyone already voting — every recipe that had won unanimously would silently
+/// stop having done so.
+pub async fn join_lobby(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+) -> Result<Json<LobbyView>, AppError> {
+    let view = load_lobby(&state.db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    if view.started
+        && !view
+            .voters
+            .iter()
+            .any(|v| v.telegram_user_id == user.telegram_user_id)
+    {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+    seat_voter(&state.db, &channel, &user.telegram_user_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, &channel).await?;
+    Ok(Json(view))
+}
+
+/// `POST /api/session/{channel}/start` — close the lobby and begin the pick. Host only.
+pub async fn start(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+) -> Result<Json<LobbyView>, AppError> {
+    let view = load_lobby(&state.db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can begin it".into(),
+        ));
+    }
+    begin_session(&state.db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, &channel).await?;
+    Ok(Json(view))
+}
+
+/// Re-read the lobby and tell the room, so every open client moves together — a guest
+/// arriving, or the host pressing start, lands on everyone's screen at once.
+async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyView, AppError> {
+    let view = load_lobby(&state.db, channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    let tx = room(&state.rooms, channel);
+    if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
+        deciders: view.voters.len() as i64,
+        started: view.started,
+    }) {
+        // No receivers is an error and also a non-event: nobody is listening yet.
+        let _ = tx.send(txt);
+    }
+    Ok(view)
 }
 
 /// `GET /api/session/{channel}/ws` — join a session's live room.
@@ -176,6 +296,19 @@ async fn socket_loop(
         if let Ok(txt) = serde_json::to_string(&ServerMsg::Tally {
             participants,
             votes,
+        }) {
+            if sink.send(Message::Text(txt.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // The lobby, so a (re)connecting client knows how many it has to convince and
+    // whether the swiping has begun, without a second round trip.
+    if let Ok(Some(view)) = load_lobby(&state.db, &channel).await {
+        if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
+            deciders: view.voters.len() as i64,
+            started: view.started,
         }) {
             if sink.send(Message::Text(txt.into())).await.is_err() {
                 return;
@@ -241,6 +374,72 @@ async fn socket_loop(
 
 // ---- persistence (pure, testable) ------------------------------------------
 
+/// Seat someone in a plan. Idempotent — joining twice is one row, so a re-opened link
+/// or a double tap does not inflate the number a recipe has to win over.
+async fn seat_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO pick_voters (channel_id, user_id) VALUES (?1, ?2)
+         ON CONFLICT(channel_id, user_id) DO NOTHING",
+        libsql::params![channel, user],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Close the lobby and begin the pick. Idempotent, and deliberately keeps the first
+/// start time: pressing start twice must not move the moment the roster closed.
+async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE pick_sessions SET started_at = unixepoch()
+         WHERE channel_id = ?1 AND started_at IS NULL",
+        libsql::params![channel],
+    )
+    .await?;
+    Ok(())
+}
+
+/// A plan's lobby, or `None` if no such plan exists.
+async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
+    let mut rows = conn
+        .query(
+            "SELECT created_by, kitchen_id, started_at FROM pick_sessions WHERE channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let host: String = row.get(0)?;
+    let kitchen_id: Option<String> = row.get(1)?;
+    let started_at: Option<i64> = row.get(2)?;
+
+    let mut vrows = conn
+        .query(
+            "SELECT v.user_id, u.username
+             FROM pick_voters v
+             LEFT JOIN users u ON u.telegram_user_id = v.user_id
+             WHERE v.channel_id = ?1
+             ORDER BY v.joined_at, v.user_id",
+            libsql::params![channel],
+        )
+        .await?;
+    let mut voters = Vec::new();
+    while let Some(v) = vrows.next().await? {
+        voters.push(Voter {
+            telegram_user_id: v.get::<String>(0)?,
+            username: v.get::<Option<String>>(1)?,
+        });
+    }
+
+    Ok(Some(LobbyView {
+        channel_id: channel.to_owned(),
+        kitchen_id,
+        host,
+        started: started_at.is_some(),
+        voters,
+    }))
+}
+
 async fn session_exists(conn: &Connection, channel: &str) -> anyhow::Result<bool> {
     let mut rows = conn
         .query(
@@ -257,10 +456,12 @@ pub async fn create_session(
     channel_id: &str,
     created_by: &str,
     filter: Option<&str>,
+    kitchen_id: Option<&str>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO pick_sessions (channel_id, created_by, filter) VALUES (?1, ?2, ?3)",
-        libsql::params![channel_id, created_by, filter],
+        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        libsql::params![channel_id, created_by, filter, kitchen_id],
     )
     .await?;
     Ok(())
@@ -346,10 +547,74 @@ mod tests {
     /// Two voters, two recipes: the tally counts yes/no per recipe and the distinct
     /// voters, and ranks by yeses — enough for the client to read both plurality and
     /// consensus off it.
+    /// A plan is never roster-less and never double-counts: the host is seated once,
+    /// however many times they arrive.
+    #[tokio::test]
+    async fn seating_is_idempotent_and_the_lobby_reads_back() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, Some("k1"))
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+        seat_voter(&conn, "c", "bob").await.unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.host, "alice");
+        assert_eq!(view.kitchen_id.as_deref(), Some("k1"));
+        assert!(!view.started, "a fresh plan is still in its lobby");
+        assert_eq!(view.voters.len(), 2, "alice once, plus bob");
+        assert_eq!(view.voters[0].telegram_user_id, "alice");
+    }
+
+    /// Starting twice must not move the moment the roster closed — a second press is
+    /// a no-op, not a re-start.
+    #[tokio::test]
+    async fn starting_is_idempotent() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None)
+            .await
+            .unwrap();
+        begin_session(&conn, "c").await.unwrap();
+        let first: Option<i64> = {
+            let mut rows = conn
+                .query(
+                    "SELECT started_at FROM pick_sessions WHERE channel_id = ?1",
+                    libsql::params!["c"],
+                )
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap().get(0).unwrap()
+        };
+        begin_session(&conn, "c").await.unwrap();
+        let second: Option<i64> = {
+            let mut rows = conn
+                .query(
+                    "SELECT started_at FROM pick_sessions WHERE channel_id = ?1",
+                    libsql::params!["c"],
+                )
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap().get(0).unwrap()
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second, "the start time is the first one, always");
+        assert!(load_lobby(&conn, "c").await.unwrap().unwrap().started);
+    }
+
+    /// A plan that does not exist has no lobby — and must not be conjured into one.
+    #[tokio::test]
+    async fn an_unknown_plan_has_no_lobby() {
+        let conn = conn().await;
+        assert!(load_lobby(&conn, "nope").await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn create_vote_and_tally() {
         let conn = conn().await;
-        create_session(&conn, "chan1", "alice", None).await.unwrap();
+        create_session(&conn, "chan1", "alice", None, None)
+            .await
+            .unwrap();
 
         record_vote(&conn, "chan1", "themealdb", "r1", "alice", true)
             .await
@@ -374,7 +639,9 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None).await.unwrap();
+        create_session(&conn, "c", "alice", None, None)
+            .await
+            .unwrap();
         record_vote(&conn, "c", "s", "1", "alice", true)
             .await
             .unwrap();
@@ -393,7 +660,9 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None).await.unwrap();
+        create_session(&conn, "c", "alice", None, None)
+            .await
+            .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
         assert_eq!(participants, 0);
         assert!(rows.is_empty());
@@ -403,7 +672,7 @@ mod tests {
     async fn session_existence_gates_join() {
         let conn = conn().await;
         assert!(!session_exists(&conn, "nope").await.unwrap());
-        create_session(&conn, "yep", "alice", Some(r#"{"area":"Japanese"}"#))
+        create_session(&conn, "yep", "alice", Some(r#"{"area":"Japanese"}"#), None)
             .await
             .unwrap();
         assert!(session_exists(&conn, "yep").await.unwrap());

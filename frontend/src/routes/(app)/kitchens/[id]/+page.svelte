@@ -8,6 +8,8 @@
   } from "$lib/kitchens";
   import type { KitchensStatus } from "$lib/types";
   import Kitchen from "$lib/components/Kitchen.svelte";
+  import { goto } from "$app/navigation";
+  import { createPick } from "$lib/pick";
 
   /** One kitchen (#72). The id comes from the route, so there is no selection state. */
   const id = $derived(page.params.id ?? "");
@@ -28,6 +30,12 @@
       : undefined,
   );
 
+  /** Start a meal plan for this kitchen; its lobby is where the deciders gather. */
+  async function planMeal() {
+    const channel = await createPick(undefined, id);
+    await goto(`/pick/${channel}`);
+  }
+
   /**
    * Opening a kitchen is how you switch to it, and only a switch is remembered: land
    * on your primary and the stored one is cleared, so the app goes back to assuming
@@ -44,6 +52,7 @@
 
 <Kitchen
   {status}
+  onPlan={planMeal}
   {inviteLink}
   kitchen={detail.data}
   error={detail.error instanceof Error ? detail.error.message : undefined}

@@ -1,11 +1,21 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { useQueryClient } from "@tanstack/svelte-query";
+  import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
   import { ApiError } from "$lib/client";
-  import { PickClient, fetchCard, type ConnStatus } from "$lib/pick";
+  import {
+    PickClient,
+    fetchCard,
+    getLobby,
+    joinLobby,
+    startPlan,
+    type ConnStatus,
+    type Lobby,
+  } from "$lib/pick";
+  import PlanLobby from "$lib/components/PlanLobby.svelte";
+  import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
   import type { Match, PickStatus, RecipeCard } from "$lib/types";
   import Pick from "$lib/components/Pick.svelte";
@@ -36,6 +46,10 @@
   let no = $state<Record<string, number>>({}); // key -> no count
   let voterIds = $state<string[]>([]); // distinct voters seen live
   let serverParticipants = $state(0); // authoritative count from the last tally
+  let deciders = $state(0); // the lobby roster size — who a recipe has to win over
+  let started = $state<boolean | undefined>(); // undefined until the lobby is known
+  let lobby = $state<Lobby | undefined>();
+  let lobbyError = $state<string | undefined>();
 
   // Dedupe only (never rendered), so plain Sets are fine. `queued` guards the deck
   // (a recipe is queued once); `pulling` guards in-flight card fetches so a failing
@@ -149,11 +163,65 @@
     if (deck.length < bufferTarget && !refilling && !dry && !decided) void refill();
   });
 
+  /**
+   * Arriving *is* joining. The URL is the invite, so opening it seats you — there is
+   * no accept step, because there is nothing to accept: you followed the link.
+   *
+   * Once the swiping has begun the server refuses a newcomer, and that refusal is the
+   * lobby's whole guarantee: the number a recipe had to win over cannot move under
+   * people who are already voting.
+   */
+  async function refreshLobby() {
+    try {
+      lobby = started === false || started === undefined
+        ? await joinLobby(channel)
+        : await getLobby(channel);
+      deciders = lobby.voters.length;
+      started = lobby.started;
+      lobbyError = undefined;
+    } catch (e) {
+      // Already started and not on the roster: you can watch, not vote.
+      try {
+        lobby = await getLobby(channel);
+        deciders = lobby.voters.length;
+        started = lobby.started;
+      } catch {
+        lobbyError = e instanceof Error ? e.message : "Couldn't open this meal plan.";
+      }
+    }
+  }
+
+  async function begin() {
+    try {
+      lobby = await startPlan(channel);
+      started = lobby.started;
+      deciders = lobby.voters.length;
+    } catch (e) {
+      lobbyError = e instanceof Error ? e.message : "Couldn't start this meal plan.";
+    }
+  }
+
+  // Who is looking, so the lobby knows whether to offer the start. The layout has
+  // already fetched this, so it is a cache read rather than a request.
+  const session = createQuery(() => ({
+    queryKey: ["session"],
+    queryFn: me,
+    retry: false,
+  }));
+
   let client: PickClient | null = null;
 
   onMount(() => {
+    void refreshLobby();
     client = new PickClient(channel, {
       onStatus: (s) => (conn = s),
+      onLobby: (count, begun) => {
+        deciders = count;
+        started = begun;
+        // The roster changed under us — re-read it so the lobby list matches the
+        // number it is about to be measured against.
+        if (!begun) void refreshLobby();
+      },
       onTally: (participants, votes) => {
         serverParticipants = participants;
         const y: Record<string, number> = {};
@@ -185,22 +253,28 @@
   });
 
   const current = $derived(deck[0]);
-  const participants = $derived(
-    Math.max(serverParticipants, voterIds.length, 1),
-  );
+  /**
+   * How many people a recipe has to win over: the lobby roster.
+   *
+   * This is the number the lobby exists to establish. Inferring it was the old bug in
+   * both directions — counting who had voted meant a solo swiper could never reach
+   * agreement with themselves, and counting who was connected meant a reload looked
+   * like somebody leaving. You are deciding because you joined, and you keep deciding
+   * while you make a cup of tea.
+   *
+   * The floor is one: your yes is unanimous when you are the only one in the plan.
+   */
+  const participants = $derived(Math.max(deciders, 1));
 
-  // Consensus: recipes everyone in the room said yes to. Needs a group — a solo
-  // swiper has none until someone else joins and agrees.
+  // Consensus: the recipes everyone deciding said yes to, and nobody said no to.
   const consensus = $derived<Match[]>(
-    participants < 2
-      ? []
-      : Object.keys(yes)
-          .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
-          .map((k) => {
-            const card = cardMap[k];
-            return card ? { card, yes: yes[k] ?? 0 } : null;
-          })
-          .filter((m): m is Match => m !== null),
+    Object.keys(yes)
+      .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
+      .map((k) => {
+        const card = cardMap[k];
+        return card ? { card, yes: yes[k] ?? 0 } : null;
+      })
+      .filter((m): m is Match => m !== null),
   );
 
   // A pick decides on the first recipe to reach consensus (consensus means one).
@@ -247,12 +321,25 @@
 
 </script>
 
-<Pick
-  {status}
-  card={current}
-  {participants}
-  shareUrl={page.url.href}
-  {copied}
-  onVote={vote}
-  onShare={share}
-/>
+{#if started === true}
+  <Pick
+    {status}
+    card={current}
+    {participants}
+    shareUrl={page.url.href}
+    {copied}
+    onVote={vote}
+    onShare={share}
+  />
+{:else}
+  <!-- Until the host begins, this is the lobby: the plan exists, the roster is still
+       forming, and nothing is being decided yet. -->
+  <PlanLobby
+    status={lobbyError ? "error" : lobby ? "ready" : "pending"}
+    voters={lobby?.voters}
+    host={!!lobby && lobby.host === session.data?.telegram_user_id}
+    inviteLink={page.url.href}
+    error={lobbyError}
+    onStart={begin}
+  />
+{/if}

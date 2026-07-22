@@ -14,10 +14,16 @@ import type { RecipeCard } from "./types";
  */
 
 /** `POST /api/session` — start a pick, returning its shareable channel id. */
-export async function createPick(filter?: string): Promise<string> {
+export async function createPick(
+  filter?: string,
+  kitchenId?: string,
+): Promise<string> {
   const res = await apiFetch("/api/session", {
     method: "POST",
-    body: JSON.stringify({ filter: filter ?? null }),
+    body: JSON.stringify({
+      filter: filter ?? null,
+      kitchen_id: kitchenId ?? null,
+    }),
   });
   if (!res.ok) {
     throw new ApiError(
@@ -72,6 +78,7 @@ export interface TallyRow {
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
+  | { type: "lobby"; deciders: number; started: boolean }
   | { type: "vote"; voter: string; source: string; id: string; vote: boolean };
 
 /** The connection's live state, surfaced so the UI can show "reconnecting…". */
@@ -81,6 +88,9 @@ export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
 export interface PickHandlers {
   /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
   onTally: (participants: number, votes: TallyRow[]) => void;
+  /** The roster size and whether the swiping has begun — on join, and on every
+   * change to either. */
+  onLobby: (deciders: number, started: boolean) => void;
   /** One live vote from any peer (including this client's own echo). */
   onVote: (
     voter: string,
@@ -156,6 +166,8 @@ export class PickClient {
       }
       if (msg.type === "tally") {
         this.handlers.onTally(msg.participants, msg.votes);
+      } else if (msg.type === "lobby") {
+        this.handlers.onLobby(msg.deciders, msg.started);
       } else if (msg.type === "vote") {
         this.handlers.onVote(msg.voter, msg.source, msg.id, msg.vote);
       }
@@ -176,4 +188,51 @@ export class PickClient {
     // A socket error is always followed by close; reconnect is handled there.
     ws.onerror = () => {};
   }
+}
+
+/** A person in a meal plan. Mirrors `session::Voter`. */
+export interface Voter {
+  telegram_user_id: string;
+  username: string | null;
+}
+
+/** A plan's lobby. Mirrors `session::LobbyView`. */
+export interface Lobby {
+  channel_id: string;
+  kitchen_id: string | null;
+  host: string;
+  started: boolean;
+  voters: Voter[];
+}
+
+function lobbyFailed(status: number, action: string): ApiError {
+  return new ApiError(
+    status,
+    status === 401 ? "Your session has expired." : `could not ${action} (${status})`,
+  );
+}
+
+/** The lobby: who is deciding, and whether it has begun. */
+export async function getLobby(channel: string): Promise<Lobby> {
+  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}`);
+  if (!res.ok) throw lobbyFailed(res.status, "open this meal plan");
+  return (await res.json()) as Lobby;
+}
+
+/** Join a plan as a decider. Refused once the swiping has begun. */
+export async function joinLobby(channel: string): Promise<Lobby> {
+  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/join`, {
+    method: "POST",
+  });
+  if (!res.ok) throw lobbyFailed(res.status, "join this meal plan");
+  return (await res.json()) as Lobby;
+}
+
+/** Close the lobby and start swiping. Host only. */
+export async function startPlan(channel: string): Promise<Lobby> {
+  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/start`, {
+    method: "POST",
+  });
+  if (!res.ok) throw lobbyFailed(res.status, "start this meal plan");
+  return (await res.json()) as Lobby;
 }
