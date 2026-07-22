@@ -40,7 +40,8 @@
   );
 </script>
 
-<div class="pt-6">
+<div class="pt-32 pb-16">
+  <div class="rounded-card bg-cream-50 p-6">
   <header class="mb-6 flex items-center justify-between gap-4">
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"></span>
@@ -133,4 +134,5 @@
       </p>
     </footer>
   {/if}
+</div>
 </div>
