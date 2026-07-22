@@ -1,267 +1,266 @@
 <script lang="ts">
   /**
-   * Two mice in a kitchen, mid-conversation. The pot is on and half-ignored, the
-   * board is abandoned half-chopped, and both of them are turned to each other
-   * instead — the cooking is the excuse, the evening is the point.
+   * Late in the evening, two mice in a kitchen, close together under the lamp. The
+   * pot is still on and neither of them is watching it — the cooking was the excuse,
+   * the talking is what they're actually here for.
    *
-   * Mice rather than people on purpose: ears, snouts and whiskers are circles and
-   * arcs, which line art carries well. The room is drawn dense — tiled splashback,
-   * a window, a rail of hanging utensils, loaded shelves — because the page is
-   * deliberately light on function and the picture is what carries it.
+   * Tonal, not line art: no outlines anywhere. Depth is built from filled shapes on
+   * the warm ramp (oat → latte → caramel → cocoa → coffee → bean → espresso), with
+   * the lamp pooling honey light over the pair and the edges of the room falling
+   * away into shadow. The rim of light down their lamp-facing side is a lighter
+   * shape sitting slightly proud of the darker one.
    *
-   * Inline SVG throughout: no image request, deterministic for the visual fence, and
-   * every colour arrives through `currentColor` on a palette text utility.
+   * The whole swatch is in here: the browns and creams build the room, and every
+   * flavour colour turns up where it belongs — as the food. A shelf of preserves, a
+   * bowl of fruit, chillies and herbs on the board, a bottle, the pot.
+   *
+   * Inline SVG — no image request, deterministic for the visual fence, and every
+   * colour arrives through `currentColor` on a palette text utility.
    */
 
-  // --- the splashback, laid in running bond behind the counter -------------------
-  const TILE_W = 24;
-  const TILE_H = 11;
-  const TILE_TOP = 86;
-  const TILE_ROWS = 4;
-
-  const tiles = $derived.by(() => {
-    const out: { x: number; y: number }[] = [];
-    for (let row = 0; row < TILE_ROWS; row++) {
-      const shift = row % 2 === 1 ? TILE_W / 2 : 0;
-      for (let col = -1; col <= 400 / TILE_W; col++) {
-        out.push({ x: col * TILE_W + shift, y: TILE_TOP + row * TILE_H });
-      }
-    }
-    return out;
-  });
-
-  /** Jars and bottles along a shelf: [x, width, height, tint]. */
-  const SHELF_TOP: [number, number, number, string][] = [
-    [300, 13, 20, "text-cream-50"],
-    [318, 10, 26, "text-pesto-100"],
-    [333, 16, 16, "text-cream-50"],
-    [354, 11, 23, "text-honey-100"],
-    [370, 14, 18, "text-cream-50"],
-  ];
-  const SHELF_LOW: [number, number, number, string][] = [
-    [302, 17, 14, "text-plum-100"],
-    [324, 12, 19, "text-cream-50"],
-    [341, 15, 15, "text-paprika-100"],
-    [361, 19, 12, "text-cream-50"],
+  /** Concentric pools make the lamp glow without needing a gradient. */
+  const GLOW = [
+    { rx: 236, ry: 170, o: 0.09 },
+    { rx: 198, ry: 144, o: 0.1 },
+    { rx: 160, ry: 118, o: 0.12 },
+    { rx: 122, ry: 92, o: 0.13 },
+    { rx: 86, ry: 66, o: 0.15 },
+    { rx: 52, ry: 42, o: 0.18 },
   ];
 
-  /** Hanging utensils on the rail: [x, kind]. */
-  const HANGING: [number, string][] = [
-    [176, "ladle"],
-    [192, "whisk"],
-    [208, "spatula"],
-    [224, "spoon"],
+  /** The preserve shelf — every flavour in the swatch, put up in jars.
+   *  [x, width, height, contents, lid] */
+  const JARS: [number, number, number, string, string][] = [
+    [300, 15, 26, "text-chilli-500", "text-chilli-100"],
+    [320, 13, 31, "text-citrus-500", "text-citrus-100"],
+    [337, 17, 22, "text-orchard-500", "text-orchard-100"],
+    [358, 14, 28, "text-allium-500", "text-allium-100"],
+    [376, 16, 24, "text-herb-500", "text-herb-100"],
+  ];
+  const JARS_LOW: [number, number, number, string, string][] = [
+    [302, 17, 21, "text-sea-500", "text-sea-100"],
+    [323, 14, 26, "text-berry-500", "text-berry-100"],
+    [341, 18, 18, "text-floral-500", "text-floral-100"],
+    [363, 15, 24, "text-beet-500", "text-beet-100"],
+    [382, 14, 20, "text-spice-500", "text-spice-100"],
   ];
 
+  /** Each of them: centre, head height, and which way they're turned. */
   const MICE = [
-    { x: 135, y: 100, dir: 1, stripes: true },
-    { x: 272, y: 97, dir: -1, stripes: false },
+    { x: 152, y: 150, dir: 1 },
+    { x: 250, y: 144, dir: -1 },
   ];
 </script>
 
-<svg viewBox="0 0 400 200" aria-hidden="true" class="w-full text-cocoa-500">
-  <!-- Splashback: glazed tiles on a slightly deeper ground. -->
-  <g class="text-cream-200">
-    <rect x="0" y={TILE_TOP} width="400" height={TILE_ROWS * TILE_H} fill="currentColor" />
-  </g>
-  <g class="text-cream-50">
-    {#each tiles as t, i (i)}
-      <rect x={t.x + 0.8} y={t.y + 0.8} width={TILE_W - 1.6} height={TILE_H - 1.6} rx="1.5" fill="currentColor" />
-    {/each}
+<svg viewBox="0 0 400 300" aria-hidden="true" class="block w-full">
+  <!-- The room, after dark. -->
+  <g class="text-espresso-800">
+    <rect x="0" y="0" width="400" height="300" fill="currentColor" />
   </g>
 
-  <g
-    fill="none"
-    stroke="currentColor"
-    stroke-width="1.4"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  >
-    <!-- Window, with something growing on the sill. -->
-    <rect x="16" y="12" width="86" height="62" rx="4" />
-    <path d="M59 12v62M16 43h86" />
-    <path d="M12 74h94" />
-    <g class="text-pesto-100">
-      <path d="M30 74c0-9 4-14 9-14s9 5 9 14z" fill="currentColor" />
-    </g>
-    <path d="M30 74c0-9 4-14 9-14s9 5 9 14z" />
-    <path d="M39 60v-8M39 55c-5-1-7-5-6-8 3 0 6 3 6 8M39 55c5-2 7-6 6-9-3 0-6 4-6 9" />
+  <!-- Night through the window, and a moon. -->
+  <g class="text-espresso-900">
+    <rect x="20" y="34" width="76" height="64" rx="3" fill="currentColor" />
+  </g>
+  <g class="text-sea-500">
+    <rect x="23" y="37" width="70" height="58" rx="2" fill="currentColor" fill-opacity="0.3" />
+  </g>
+  <g class="text-oat-200">
+    <circle cx="76" cy="54" r="9" fill="currentColor" fill-opacity="0.65" />
+    <circle cx="38" cy="50" r="1.6" fill="currentColor" fill-opacity="0.5" />
+    <circle cx="52" cy="70" r="1.2" fill="currentColor" fill-opacity="0.4" />
+    <circle cx="32" cy="82" r="1.4" fill="currentColor" fill-opacity="0.35" />
+  </g>
+  <g class="text-bean-700">
+    <rect x="20" y="34" width="76" height="3" fill="currentColor" />
+    <rect x="55" y="37" width="3" height="58" fill="currentColor" />
+    <rect x="16" y="96" width="84" height="4" rx="1" fill="currentColor" />
+  </g>
+  <!-- A pot of something growing on the sill. -->
+  <g class="text-paprika-500">
+    <path d="M62 96c0-7 3-11 8-11s8 4 8 11z" fill="currentColor" fill-opacity="0.8" />
+  </g>
+  <g class="text-herb-500">
+    <path d="M70 85c-6-2-9-7-8-12 4 1 8 5 8 12zM70 85c6-3 9-8 8-13-5 1-8 6-8 13z" fill="currentColor" fill-opacity="0.75" />
+  </g>
 
-    <!-- Clock. -->
-    <circle cx="126" cy="34" r="13" />
-    <circle cx="126" cy="34" r="1.6" />
-    <path d="M126 34v-7M126 34l5 3" />
-
-    <!-- Rail of hanging utensils. -->
-    <path d="M166 20h72" />
-    {#each HANGING as [hx, kind] (hx)}
-      <circle cx={hx} cy="20" r="2.4" />
-      <path d="M{hx} 22v{kind === 'whisk' ? 14 : 16}" />
-      {#if kind === 'ladle'}
-        <circle cx={hx} cy="43" r="5" />
-      {:else if kind === 'whisk'}
-        <path d="M{hx - 5} 36c0 8 2 12 5 12s5-4 5-12M{hx} 36v12M{hx - 2} 36c-1 8 0 12 2 12M{hx + 2} 36c1 8 0 12-2 12" />
-      {:else if kind === 'spatula'}
-        <rect x={hx - 4.5} y="38" width="9" height="11" rx="2" />
-      {:else}
-        <ellipse cx={hx} cy="43" rx="4" ry="5.5" />
-      {/if}
+  <!-- The lamp, and the light it throws. -->
+  <g class="text-honey-500">
+    {#each GLOW as pool, i (i)}
+      <ellipse cx="200" cy="150" rx={pool.rx} ry={pool.ry} fill="currentColor" fill-opacity={pool.o} />
     {/each}
+  </g>
+  <g class="text-espresso-900">
+    <rect x="198" y="0" width="4" height="32" fill="currentColor" />
+    <path d="M200 32c-22 0-34 16-38 30h76c-4-14-16-30-38-30z" fill="currentColor" />
+  </g>
+  <g class="text-honey-500">
+    <ellipse cx="200" cy="63" rx="35" ry="7" fill="currentColor" fill-opacity="0.8" />
+    <ellipse cx="200" cy="76" rx="21" ry="11" fill="currentColor" fill-opacity="0.3" />
+  </g>
 
-    <!-- Garlic and herbs, hung to dry. -->
-    <path d="M256 20v8" />
-    <g class="text-cream-50">
-      <circle cx="256" cy="33" r="5" fill="currentColor" />
-      <circle cx="251" cy="38" r="4.5" fill="currentColor" />
-      <circle cx="261" cy="38" r="4.5" fill="currentColor" />
+  <!-- The preserve shelves, at the edge of the light. -->
+  <g class="text-bean-700">
+    <rect x="292" y="104" width="108" height="5" fill="currentColor" />
+    <rect x="292" y="152" width="108" height="5" fill="currentColor" />
+  </g>
+  {#each JARS as [jx, jw, jh, body, lid] (jx)}
+    <g class={body}>
+      <rect x={jx} y={104 - jh} width={jw} height={jh} rx="2.5" fill="currentColor" fill-opacity="0.85" />
     </g>
-    <circle cx="256" cy="33" r="5" />
-    <circle cx="251" cy="38" r="4.5" />
-    <circle cx="261" cy="38" r="4.5" />
-
-    <!-- Open shelving, loaded. -->
-    <path d="M292 48h96M292 82h96" />
-    {#each SHELF_TOP as [sx, w, h, tint] (sx)}
-      <g class={tint}><rect x={sx} y={48 - h} width={w} height={h} rx="2.5" fill="currentColor" /></g>
-      <rect x={sx} y={48 - h} width={w} height={h} rx="2.5" />
-      <path d="M{sx + 2} {48 - h + 4}h{w - 4}" />
-    {/each}
-    {#each SHELF_LOW as [sx, w, h, tint] (sx)}
-      <g class={tint}><rect x={sx} y={82 - h} width={w} height={h} rx="2.5" fill="currentColor" /></g>
-      <rect x={sx} y={82 - h} width={w} height={h} rx="2.5" />
-    {/each}
-
-    <!-- Stacked plates on the lower shelf's left. -->
-    <path d="M292 78h0" />
-
-    <!-- The two of them. -->
-    {#each MICE as m (m.x)}
-      <!-- Body. -->
-      <g class="text-cream-50">
-        <path d="M{m.x - 28} 130c-2-28 8-46 28-46s30 18 28 46z" fill="currentColor" />
-      </g>
-      <path d="M{m.x - 28} 130c-2-28 8-46 28-46s30 18 28 46" />
-
-      <!-- Apron, with a neck strap and a pocket. -->
-      <g class="text-honey-100">
-        <path d="M{m.x - 19} 130c-1-20 4-30 19-30s20 10 19 30z" fill="currentColor" />
-      </g>
-      <path d="M{m.x - 19} 130c-1-20 4-30 19-30s20 10 19 30" />
-      <path d="M{m.x - 11} 101l6-8M{m.x + 11} 101l-6-8" />
-      <rect x={m.x - 9} y="112" width="18" height="11" rx="2" />
-      {#if m.stripes}
-        <path d="M{m.x - 17} 108h34M{m.x - 18} 116h9M{m.x + 9} 116h9M{m.x - 18} 124h36" />
-      {/if}
-
-      <!-- Ears. -->
-      <g class="text-cream-50">
-        <circle cx={m.x - 15} cy={m.y - 18} r="11" fill="currentColor" />
-        <circle cx={m.x + 15} cy={m.y - 18} r="11" fill="currentColor" />
-        <circle cx={m.x} cy={m.y} r="19" fill="currentColor" />
-      </g>
-      <circle cx={m.x - 15} cy={m.y - 18} r="11" />
-      <circle cx={m.x + 15} cy={m.y - 18} r="11" />
-      <g class="text-plum-100">
-        <circle cx={m.x - 15} cy={m.y - 18} r="5.5" fill="currentColor" />
-        <circle cx={m.x + 15} cy={m.y - 18} r="5.5" fill="currentColor" />
-      </g>
-      <circle cx={m.x - 15} cy={m.y - 18} r="5.5" />
-      <circle cx={m.x + 15} cy={m.y - 18} r="5.5" />
-      <circle cx={m.x} cy={m.y} r="19" />
-
-      <!-- Snout turned to the other one, with a nose, a smile and whiskers. -->
-      <g class="text-cream-50">
-        <ellipse cx={m.x + m.dir * 17} cy={m.y + 7} rx="10" ry="7.5" fill="currentColor" />
-      </g>
-      <ellipse cx={m.x + m.dir * 17} cy={m.y + 7} rx="10" ry="7.5" />
-      <g class="text-plum-100">
-        <ellipse cx={m.x + m.dir * 25} cy={m.y + 5} rx="2.8" ry="2.2" fill="currentColor" />
-      </g>
-      <ellipse cx={m.x + m.dir * 25} cy={m.y + 5} rx="2.8" ry="2.2" />
-      <path d="M{m.x + m.dir * 25} {m.y + 8}v3c0 2 {m.dir * -3} 3 {m.dir * -5} 1" />
-      <circle cx={m.x + m.dir * 6} cy={m.y - 4} r="2.6" />
-      <path
-        d="M{m.x + m.dir * 24} {m.y + 10}l{m.dir * 11} 3M{m.x + m.dir * 24} {m.y + 12}l{m.dir * 10} 7M{m.x + m.dir * 23} {m.y + 13}l{m.dir * 7} 9"
-      />
-    {/each}
-
-    <!-- The counter. -->
-    <g class="text-cream-100">
-      <rect x="0" y="130" width="400" height="12" rx="3" fill="currentColor" />
-      <rect x="6" y="142" width="388" height="58" fill="currentColor" />
+    <g class={lid}>
+      <rect x={jx - 1} y={104 - jh - 3} width={jw + 2} height="4" rx="1.5" fill="currentColor" fill-opacity="0.9" />
     </g>
-    <rect x="0" y="130" width="400" height="12" rx="3" />
-    <path d="M6 142v58M104 142v58M202 142v58M300 142v58M394 142v58" />
-    <path d="M40 158v34M138 158v34M236 158v34M334 158v34" />
-    <path d="M36 160h8M134 160h8M232 160h8M330 160h8" />
-    <!-- A tea towel over a handle. -->
-    <g class="text-plum-100">
-      <path d="M244 160h14v26c0 3-14 3-14 0z" fill="currentColor" />
+  {/each}
+  {#each JARS_LOW as [jx, jw, jh, body, lid] (jx)}
+    <g class={body}>
+      <rect x={jx} y={152 - jh} width={jw} height={jh} rx="2.5" fill="currentColor" fill-opacity="0.85" />
     </g>
-    <path d="M244 160h14v26c0 3-14 3-14 0zM248 164v18M254 164v18" />
+    <g class={lid}>
+      <rect x={jx - 1} y={152 - jh - 3} width={jw + 2} height="4" rx="1.5" fill="currentColor" fill-opacity="0.9" />
+    </g>
+  {/each}
 
-    <!-- The pot: on, steaming, unwatched. -->
-    <path d="M190 108c-2-7 0-11 4-13M200 104c-3-8 0-12 4-14" />
-    <g class="text-pesto-100">
-      <rect x="180" y="114" width="40" height="16" rx="5" fill="currentColor" />
-    </g>
-    <rect x="180" y="114" width="40" height="16" rx="5" />
-    <path d="M178 112h44" />
-    <path d="M174 118h6M220 118h6" />
-    <circle cx="200" cy="109" r="2" />
+  <!-- A rail of utensils, silhouetted against the glow. -->
+  <g class="text-espresso-900">
+    <rect x="16" y="122" width="84" height="3" fill="currentColor" />
+    <rect x="32" y="125" width="2.5" height="18" fill="currentColor" />
+    <rect x="58" y="125" width="2.5" height="16" fill="currentColor" />
+    <rect x="84" y="125" width="2.5" height="15" fill="currentColor" />
+  </g>
+  <g class="text-stone-500">
+    <circle cx="33" cy="146" r="6" fill="currentColor" fill-opacity="0.7" />
+    <ellipse cx="59" cy="146" rx="5" ry="7" fill="currentColor" fill-opacity="0.7" />
+    <rect x="79" y="140" width="12" height="13" rx="3" fill="currentColor" fill-opacity="0.7" />
+  </g>
 
-    <!-- Board, chopped halfway: a knife set down, slices, an onion, herbs. -->
-    <g class="text-cream-50">
-      <rect x="42" y="116" width="60" height="14" rx="4" fill="currentColor" />
+  <!-- The two of them. The lit shape sits a little proud of the dark one, so their
+       lamp-facing edge reads as a rim of light. -->
+  {#each MICE as m (m.x)}
+    <g class="text-caramel-400">
+      <circle cx={m.x - 19 + m.dir * 4} cy={m.y - 28} r="14" fill="currentColor" />
+      <circle cx={m.x + 19 + m.dir * 4} cy={m.y - 28} r="14" fill="currentColor" />
+      <circle cx={m.x + m.dir * 4} cy={m.y} r="27" fill="currentColor" />
+      <path d="M{m.x - 40 + m.dir * 4} 206c-3-38 12-62 40-62s43 24 40 62z" fill="currentColor" />
+      <ellipse cx={m.x + m.dir * 26} cy={m.y + 10} rx="14" ry="10" fill="currentColor" />
     </g>
-    <rect x="42" y="116" width="60" height="14" rx="4" />
-    <circle cx="49" cy="123" r="2.5" />
-    <g class="text-paprika-100">
-      <ellipse cx="66" cy="123" rx="5" ry="4" fill="currentColor" />
-      <ellipse cx="78" cy="123" rx="5" ry="4" fill="currentColor" />
-      <ellipse cx="90" cy="123" rx="5" ry="4" fill="currentColor" />
+    <g class="text-bean-700">
+      <circle cx={m.x - 19} cy={m.y - 28} r="14" fill="currentColor" />
+      <circle cx={m.x + 19} cy={m.y - 28} r="14" fill="currentColor" />
+      <circle cx={m.x} cy={m.y} r="27" fill="currentColor" />
+      <path d="M{m.x - 40} 206c-3-38 12-62 40-62s43 24 40 62z" fill="currentColor" />
+      <ellipse cx={m.x + m.dir * 22} cy={m.y + 10} rx="14" ry="10" fill="currentColor" />
     </g>
-    <ellipse cx="66" cy="123" rx="5" ry="4" />
-    <ellipse cx="78" cy="123" rx="5" ry="4" />
-    <ellipse cx="90" cy="123" rx="5" ry="4" />
-    <path d="M62 123h8M74 123h8M86 123h8" />
+    <!-- Ear interiors, a nose and a lit eye catch the warmth. -->
+    <g class="text-plum-500">
+      <circle cx={m.x - 19} cy={m.y - 28} r="7" fill="currentColor" fill-opacity="0.6" />
+      <circle cx={m.x + 19} cy={m.y - 28} r="7" fill="currentColor" fill-opacity="0.6" />
+      <ellipse cx={m.x + m.dir * 33} cy={m.y + 7} rx="4" ry="3.2" fill="currentColor" fill-opacity="0.8" />
+    </g>
+    <g class="text-oat-200">
+      <circle cx={m.x + m.dir * 10} cy={m.y - 6} r="3.4" fill="currentColor" fill-opacity="0.9" />
+    </g>
+    <!-- An apron, catching the lamp. -->
+    <g class="text-cream-200">
+      <path d="M{m.x - 22} 206c-1-26 6-38 22-38s23 12 22 38z" fill="currentColor" fill-opacity="0.22" />
+    </g>
+  {/each}
 
-    <!-- A bowl of something, and a stack of two more. -->
-    <g class="text-honey-100">
-      <path d="M12 118h26c0 8-6 12-13 12s-13-4-13-12z" fill="currentColor" />
-    </g>
-    <path d="M12 118h26c0 8-6 12-13 12s-13-4-13-12z" />
-    <path d="M14 122h22" />
+  <!-- Steam, drifting up into the light. -->
+  <g class="text-cream-100">
+    <path d="M196 178c-8-12 4-18-2-28 10 8 2 18 8 28z" fill="currentColor" fill-opacity="0.22" />
+    <path d="M211 176c-7-10 4-16-2-24 9 7 2 16 7 24z" fill="currentColor" fill-opacity="0.15" />
+  </g>
 
-    <!-- A bottle someone brought. -->
-    <g class="text-plum-100">
-      <path d="M306 130v-16c0-4 3-5 3-8v-4h6v4c0 3 3 4 3 8v16z" fill="currentColor" />
-    </g>
-    <path d="M306 130v-16c0-4 3-5 3-8v-4h6v4c0 3 3 4 3 8v16" />
-    <path d="M307 119h11" />
+  <!-- The counter, catching the lamp along its edge. -->
+  <g class="text-coffee-600">
+    <rect x="0" y="206" width="400" height="26" fill="currentColor" />
+  </g>
+  <g class="text-caramel-400">
+    <rect x="0" y="206" width="400" height="5" fill="currentColor" fill-opacity="0.85" />
+  </g>
 
-    <!-- Two glasses, the actual point of the evening. -->
-    <g class="text-honey-100">
-      <path d="M226 114h15l-2 13h-11z" fill="currentColor" />
-      <path d="M324 112h15l-2 15h-11z" fill="currentColor" />
-    </g>
-    <path d="M226 114h15l-2 13h-11zM233 127v3M228 130h11" />
-    <path d="M324 112h15l-2 15h-11zM331 127v3M326 130h11" />
+  <!-- The pot, still on. -->
+  <g class="text-stone-700">
+    <rect x="176" y="182" width="48" height="24" rx="5" fill="currentColor" />
+    <rect x="170" y="177" width="60" height="6" rx="3" fill="currentColor" />
+  </g>
+  <g class="text-pesto-500">
+    <rect x="180" y="184" width="40" height="5" rx="2" fill="currentColor" fill-opacity="0.7" />
+  </g>
 
-    <!-- Salt and pepper. -->
-    <g class="text-cream-50">
-      <rect x="344" y="118" width="9" height="12" rx="2.5" fill="currentColor" />
-      <rect x="357" y="120" width="9" height="10" rx="2.5" fill="currentColor" />
-    </g>
-    <rect x="344" y="118" width="9" height="12" rx="2.5" />
-    <rect x="357" y="120" width="9" height="10" rx="2.5" />
-    <path d="M347 121h3M360 123h3" />
+  <!-- The board, abandoned half-chopped: chillies and herbs still on it. -->
+  <g class="text-cocoa-500">
+    <rect x="36" y="192" width="56" height="14" rx="3" fill="currentColor" />
+  </g>
+  <g class="text-chilli-500">
+    <ellipse cx="50" cy="198" rx="6" ry="4" fill="currentColor" fill-opacity="0.9" />
+    <ellipse cx="62" cy="199" rx="5" ry="3.5" fill="currentColor" fill-opacity="0.9" />
+  </g>
+  <g class="text-herb-500">
+    <ellipse cx="76" cy="198" rx="7" ry="4" fill="currentColor" fill-opacity="0.85" />
+  </g>
 
-    <!-- A loaf, because someone brought bread. -->
-    <g class="text-cream-50">
-      <path d="M370 130c-2-10 4-16 12-16s14 6 12 16z" fill="currentColor" />
-    </g>
-    <path d="M370 130c-2-10 4-16 12-16s14 6 12 16z" />
-    <path d="M375 120l3-4M382 118v-4M389 120l-3-4" />
+  <!-- A bowl of fruit at the near end. -->
+  <g class="text-stone-400">
+    <path d="M292 206c-3-13 6-20 17-20s20 7 17 20z" fill="currentColor" fill-opacity="0.75" />
+  </g>
+  <g class="text-orchard-500">
+    <circle cx="303" cy="189" r="5.5" fill="currentColor" fill-opacity="0.95" />
+  </g>
+  <g class="text-citrus-500">
+    <circle cx="314" cy="188" r="5" fill="currentColor" fill-opacity="0.95" />
+  </g>
+  <g class="text-berry-500">
+    <circle cx="309" cy="182" r="3.5" fill="currentColor" fill-opacity="0.95" />
+  </g>
+
+  <!-- A bottle, and two glasses poured. -->
+  <g class="text-beet-500">
+    <path d="M108 206v-26c0-6 4-7 4-11v-6h8v6c0 4 4 5 4 11v26z" fill="currentColor" fill-opacity="0.85" />
+  </g>
+  <g class="text-cream-100">
+    <path d="M136 186h17l-3 20h-11z" fill="currentColor" fill-opacity="0.14" />
+    <path d="M254 184h17l-3 22h-11z" fill="currentColor" fill-opacity="0.14" />
+  </g>
+  <g class="text-plum-500">
+    <path d="M138 193h13l-2.5 13h-8z" fill="currentColor" fill-opacity="0.9" />
+    <path d="M256 192h13l-2.5 14h-8z" fill="currentColor" fill-opacity="0.9" />
+  </g>
+  <g class="text-oat-200">
+    <path d="M136 186h17v2h-17zM254 184h17v2h-17z" fill="currentColor" fill-opacity="0.45" />
+    <path d="M139 196h3v8h-3zM257 195h3v9h-3z" fill="currentColor" fill-opacity="0.16" />
+  </g>
+
+  <!-- Salt, pepper, and a loaf someone brought. -->
+  <g class="text-cream-300">
+    <rect x="340" y="192" width="9" height="14" rx="2.5" fill="currentColor" fill-opacity="0.8" />
+  </g>
+  <g class="text-spice-500">
+    <rect x="353" y="194" width="9" height="12" rx="2.5" fill="currentColor" fill-opacity="0.85" />
+  </g>
+  <g class="text-latte-300">
+    <path d="M368 206c-2-11 5-17 14-17s16 6 14 17z" fill="currentColor" fill-opacity="0.9" />
+  </g>
+
+  <!-- The cabinets, the darkest thing in the room. -->
+  <g class="text-espresso-900">
+    <rect x="0" y="232" width="400" height="68" fill="currentColor" />
+  </g>
+  <g class="text-bean-700">
+    <rect x="0" y="232" width="400" height="2" fill="currentColor" />
+    <rect x="98" y="238" width="2" height="62" fill="currentColor" />
+    <rect x="200" y="238" width="2" height="62" fill="currentColor" />
+    <rect x="302" y="238" width="2" height="62" fill="currentColor" />
+  </g>
+  <g class="text-stone-600">
+    <rect x="38" y="252" width="24" height="2.5" rx="1" fill="currentColor" fill-opacity="0.8" />
+    <rect x="140" y="252" width="24" height="2.5" rx="1" fill="currentColor" fill-opacity="0.8" />
+    <rect x="242" y="252" width="24" height="2.5" rx="1" fill="currentColor" fill-opacity="0.8" />
+    <rect x="344" y="252" width="24" height="2.5" rx="1" fill="currentColor" fill-opacity="0.8" />
+  </g>
+  <!-- A tea towel over one of the handles. -->
+  <g class="text-allium-500">
+    <path d="M242 254h14v28c0 3-14 3-14 0z" fill="currentColor" fill-opacity="0.55" />
   </g>
 </svg>

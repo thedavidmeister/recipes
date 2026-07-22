@@ -107,7 +107,9 @@
   <header class="mb-6">
     <!-- The page is deliberately light on function, so it opens on the thing a
          kitchen is actually for rather than on more controls. -->
-    <div class="rounded-card mb-4 overflow-hidden border border-stone-200">
+    <!-- Full-bleed: it breaks the page gutter rather than sitting in a box, so it
+         reads as the room the page is in rather than a picture pinned to it. -->
+    <div class="-mx-4 mb-5">
       <KitchenTalk />
     </div>
     <p class="font-display flex items-center gap-2 text-stone-600">
