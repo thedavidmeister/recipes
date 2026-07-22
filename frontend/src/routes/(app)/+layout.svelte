@@ -5,7 +5,6 @@
   import type { LoginStatus, Section } from "$lib/types";
   import Login from "$lib/components/Login.svelte";
   import Nav from "$lib/components/Nav.svelte";
-  import Splash from "$lib/components/Splash.svelte";
   import MusicSwitch from "$lib/components/MusicSwitch.svelte";
 
   let { children } = $props();
@@ -14,7 +13,6 @@
   const MUSIC_PREFERENCE = "recipes:music";
 
   let audio: HTMLAudioElement | undefined = $state();
-  let started = $state(false);
   let playing = $state(false);
 
   /**
@@ -22,25 +20,44 @@
    * track keeps going as you move from pick to buy to a kitchen, and only a reload or
    * a sign-out stops it.
    *
-   * Playback is driven imperatively rather than through an effect because of *when*
-   * it has to happen: a browser grants audio only to a real user gesture, and an
-   * effect scheduled after the click may already have fallen outside that window. So
-   * `play()` is called inside the handler, from the tap itself.
+   * Nothing plays unasked. A browser grants audio only to a real user gesture, so the
+   * switch is the only thing that reliably starts it — and it is called straight from
+   * the click rather than from an effect scheduled after it, which may already have
+   * fallen outside the window where the gesture counts.
    *
-   * This state is deliberately not persisted across reloads. A fresh load needs a
-   * fresh gesture anyway, so remembering "already started" would only produce a
-   * silent app with no obvious way to fix it.
+   * What the policy actually requires is a gesture *somewhere* — any click or key,
+   * not a particular button — or an origin the browser has learned you play audio on
+   * (Chrome's media engagement score, which is why YouTube appears to autoplay and a
+   * site you have never used does not). So the music asks immediately, in case this
+   * browser already trusts us, and otherwise starts on the first thing you do here.
+   * Whichever lands, it is the same track a moment later.
+   *
+   * Switching it off is remembered and checked again at the moment of the gesture, so
+   * a click after you turned it off does not turn it back on.
    */
-  function start() {
-    started = true;
-    if (localStorage.getItem(MUSIC_PREFERENCE) === "off") return;
-    audio?.play().then(
-      () => (playing = true),
-      // Refused (no gesture credited, no audio device, a failed fetch) — the app is
-      // entered either way, and the switch is right there.
-      () => (playing = false),
-    );
-  }
+  $effect(() => {
+    const el = audio;
+    if (!el) return;
+
+    const wanted = () => localStorage.getItem(MUSIC_PREFERENCE) !== "off";
+    const attempt = () => {
+      if (!wanted()) return;
+      el.play().then(
+        () => (playing = true),
+        () => {
+          // Refused: no gesture credited yet. The listeners below are the next chance.
+        },
+      );
+    };
+
+    attempt();
+    window.addEventListener("pointerdown", attempt, { once: true });
+    window.addEventListener("keydown", attempt, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", attempt);
+      window.removeEventListener("keydown", attempt);
+    };
+  });
 
   function toggleMusic() {
     if (!audio) return;
@@ -95,7 +112,6 @@
     queryClient.clear();
     audio?.pause();
     playing = false;
-    started = false;
   }
 </script>
 
@@ -109,8 +125,6 @@
     link={botLink()}
     error={session.error instanceof Error ? session.error.message : undefined}
   />
-{:else if !started}
-  <Splash onStart={start} />
 {:else}
   <!--
     The nav is the heading: `pick · buy · cook · joy` names where you are more
