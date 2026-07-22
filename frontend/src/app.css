@@ -155,6 +155,17 @@
     color-scheme: light;
   }
 
+  /* Anything you press says so under the cursor. Preflight sets buttons to the
+   * default arrow, which leaves a button looking inert next to a link that gets the
+   * hand for free — the two are the same gesture and must read the same. A disabled
+   * control is excluded: there the arrow is the honest answer. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  label[for],
+  summary {
+    cursor: pointer;
+  }
+
   body {
     background-color: var(--color-cream-50);
     color: var(--color-stone-900);
