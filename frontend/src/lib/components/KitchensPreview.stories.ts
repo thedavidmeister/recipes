@@ -9,5 +9,5 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The whole page: content legible over the photograph and its scrim. */
+/** The whole page: content legible over the photograph. */
 export const Default: Story = { args: {} };
