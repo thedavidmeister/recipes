@@ -11,7 +11,8 @@
  *   - the pinned nix chromium (CHROMIUM_BIN), same as CI
  *   - self-hosted fonts + FONTCONFIG_FILE, so no network and no fallback
  *   - a fixed width + deviceScaleFactor, animations disabled, and a wait on
- *     document.fonts.ready so text is never captured mid-swap.
+ *     document.fonts.ready so text is never captured mid-swap, and every
+ *     image's decode() so a photograph is never captured mid-decode.
  *   - external images (fixtures point at real themealdb.com photos) are stubbed
  *     with a fixed local placeholder. The regression fence protects layout, not a
  *     remote CDN's pixels — an unstubbed photo would make the shot depend on the
@@ -143,6 +144,15 @@ try {
     );
     await page.evaluate(async () => {
       await document.fonts.ready;
+      // The same wait, for images. `networkidle0` only says the bytes arrived —
+      // decoding them into a paintable bitmap is a separate asynchronous step, so a
+      // large photograph can still be resolving when the shot is taken. That does not
+      // look like a missing image; it looks like a faint difference spread across the
+      // whole picture, on one run and not the next. A broken or stubbed image rejects
+      // here, which must not stall the shoot.
+      await Promise.all(
+        [...document.images].map((img) => img.decode().catch(() => {})),
+      );
     });
     await page.screenshot({ path: join(OUT, `${id}.png`), fullPage: true });
     console.log(id);
