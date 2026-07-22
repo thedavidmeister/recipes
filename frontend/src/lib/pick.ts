@@ -72,6 +72,7 @@ export interface TallyRow {
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
+  | { type: "presence"; present: number }
   | { type: "vote"; voter: string; source: string; id: string; vote: boolean };
 
 /** The connection's live state, surfaced so the UI can show "reconnecting…". */
@@ -81,6 +82,8 @@ export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
 export interface PickHandlers {
   /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
   onTally: (participants: number, votes: TallyRow[]) => void;
+  /** How many clients are connected to the room, on every join and leave. */
+  onPresence: (present: number) => void;
   /** One live vote from any peer (including this client's own echo). */
   onVote: (
     voter: string,
@@ -156,6 +159,8 @@ export class PickClient {
       }
       if (msg.type === "tally") {
         this.handlers.onTally(msg.participants, msg.votes);
+      } else if (msg.type === "presence") {
+        this.handlers.onPresence(msg.present);
       } else if (msg.type === "vote") {
         this.handlers.onVote(msg.voter, msg.source, msg.id, msg.vote);
       }

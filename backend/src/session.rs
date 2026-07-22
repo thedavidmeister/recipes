@@ -87,6 +87,13 @@ enum ServerMsg {
         participants: i64,
         votes: Vec<TallyRow>,
     },
+    /// How many clients are connected to this room right now.
+    ///
+    /// Distinct from `participants`, which counts who has *voted*. Consensus is
+    /// measured against whichever is larger: someone present but silent has not
+    /// agreed to anything yet, and someone who voted then dropped should not have
+    /// their say erased by a flaky connection.
+    Presence { present: i64 },
     /// One live vote — drives both the incremental tally and peer-injection (a
     /// client slips `source`/`id` into its own deck if it has not seen it).
     Vote {
@@ -160,6 +167,21 @@ pub async fn ws(
         .on_upgrade(move |socket| socket_loop(socket, state, user.telegram_user_id, channel, tx)))
 }
 
+/// Tell the room how many clients are connected.
+///
+/// The broadcast channel already knows: its receiver count *is* the number of live
+/// sockets here. Announced on both join and leave, so the bar for "everyone agreed"
+/// moves with the room instead of being fixed when the first client happened to look.
+fn announce_presence(tx: &broadcast::Sender<String>) {
+    if let Ok(txt) = serde_json::to_string(&ServerMsg::Presence {
+        present: tx.receiver_count() as i64,
+    }) {
+        // Sending with no receivers is an error and also a non-event: an empty room
+        // has nobody to inform.
+        let _ = tx.send(txt);
+    }
+}
+
 /// One connected client: rehydrate, then fan votes both ways until it drops.
 async fn socket_loop(
     socket: WebSocket,
@@ -182,6 +204,10 @@ async fn socket_loop(
             }
         }
     }
+
+    // Now that this client is subscribed, the whole room — including this one — learns
+    // the new headcount.
+    announce_presence(&tx);
 
     // Render's free tier closes a WS idle for 5 min; a ping well inside that keeps
     // an active session's socket — and the box — awake.
@@ -237,6 +263,12 @@ async fn socket_loop(
             }
         }
     }
+
+    // Leaving lowers the bar for the peers still here. The receiver has to go first:
+    // it is counted until it is dropped, so announcing before this would report a
+    // client that has already gone.
+    drop(rx);
+    announce_presence(&tx);
 }
 
 // ---- persistence (pure, testable) ------------------------------------------

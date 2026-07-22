@@ -36,6 +36,7 @@
   let no = $state<Record<string, number>>({}); // key -> no count
   let voterIds = $state<string[]>([]); // distinct voters seen live
   let serverParticipants = $state(0); // authoritative count from the last tally
+  let present = $state(0); // clients connected right now, from the last presence
 
   // Dedupe only (never rendered), so plain Sets are fine. `queued` guards the deck
   // (a recipe is queued once); `pulling` guards in-flight card fetches so a failing
@@ -154,6 +155,9 @@
   onMount(() => {
     client = new PickClient(channel, {
       onStatus: (s) => (conn = s),
+      onPresence: (count) => {
+        present = count;
+      },
       onTally: (participants, votes) => {
         serverParticipants = participants;
         const y: Record<string, number> = {};
@@ -185,22 +189,33 @@
   });
 
   const current = $derived(deck[0]);
+  /**
+   * How many people a recipe has to win over: everyone connected right now, and
+   * everyone who has already voted, whichever is the larger group.
+   *
+   * Both halves matter. Presence alone would let a peer's reload — a socket that
+   * drops for a second — collapse the room to one and hand somebody a decision they
+   * never made. Voters alone would let you decide by yourself while a friend sat in
+   * the room having not swiped yet, which is precisely the thing a shared pick is
+   * for. Counting both means a silent arrival raises the bar and a brief
+   * disconnection does not lower it.
+   *
+   * The floor is one, so swiping alone works: your yes is unanimous when you are the
+   * only one here.
+   */
   const participants = $derived(
-    Math.max(serverParticipants, voterIds.length, 1),
+    Math.max(present, serverParticipants, voterIds.length, 1),
   );
 
-  // Consensus: recipes everyone in the room said yes to. Needs a group — a solo
-  // swiper has none until someone else joins and agrees.
+  // Consensus: the recipes everyone deciding said yes to, and nobody said no to.
   const consensus = $derived<Match[]>(
-    participants < 2
-      ? []
-      : Object.keys(yes)
-          .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
-          .map((k) => {
-            const card = cardMap[k];
-            return card ? { card, yes: yes[k] ?? 0 } : null;
-          })
-          .filter((m): m is Match => m !== null),
+    Object.keys(yes)
+      .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
+      .map((k) => {
+        const card = cardMap[k];
+        return card ? { card, yes: yes[k] ?? 0 } : null;
+      })
+      .filter((m): m is Match => m !== null),
   );
 
   // A pick decides on the first recipe to reach consensus (consensus means one).
