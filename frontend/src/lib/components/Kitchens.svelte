@@ -102,7 +102,9 @@
   }
 </script>
 
-<div class="pt-6">
+<!-- Deep top padding so the page opens on the photograph itself: the text
+     starts below the clear band of the backdrop scrim. -->
+<div class="pt-48">
   <header class="mb-6">
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-cocoa-500" aria-hidden="true"></span>

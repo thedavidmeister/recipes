@@ -17,6 +17,7 @@
   } from "$lib/kitchens";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
   import Kitchens from "$lib/components/Kitchens.svelte";
+  import KitchenBackdrop from "$lib/components/KitchenBackdrop.svelte";
 
   /**
    * `kitchens` (#72) — the durable shared space that scopes the meal flow.
@@ -175,21 +176,9 @@
   });
 </script>
 
-<!--
-  The kitchen itself, behind the whole page (#87). It lives here rather than in
-  `Kitchens` because it is page chrome, not part of the view's contract — which also
-  keeps the component's stories deterministic.
-
-  The scrim is a gradient rather than a flat wash: the photograph stays legible at the
-  top, where the page has room to breathe, and settles to solid cream further down
-  where the text is dense. Fixed, so it stays put while the content scrolls over it.
--->
-<div aria-hidden="true" class="fixed inset-0 -z-10">
-  <img src="/kitchen.jpg" alt="" class="size-full object-cover" />
-  <div
-    class="absolute inset-0 bg-gradient-to-b from-cream-50/35 via-cream-50/85 to-cream-50"
-  ></div>
-</div>
+<!-- The kitchen itself, behind the whole page (#87). Page chrome rather than part
+     of the view's contract, so it lives here and not in `Kitchens`. -->
+<KitchenBackdrop />
 
 <Kitchens
   {status}
