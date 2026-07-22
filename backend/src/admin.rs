@@ -57,7 +57,7 @@ pub async fn health(
         return Err(AppError::Forbidden("admin only".into()));
     }
 
-    let db = &state.db;
+    let db = &state.db()?;
     let recipes = scalar(db, "SELECT count(*) FROM recipes").await?;
     let raw = scalar(db, "SELECT count(*) FROM raw_imports").await?;
     let enriched = scalar(db, "SELECT count(*) FROM ingredient_structures").await?;

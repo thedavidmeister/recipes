@@ -39,33 +39,46 @@ pub struct IngestReport {
 
 /// `POST /api/ingest` — trigger a server-driven corpus sync + derive.
 pub async fn ingest(State(state): State<AppState>) -> Json<IngestReport> {
+    // One connection for the whole trigger: this is a long job, not a request-shaped
+    // one, and the two halves must write under the same run.
+    let db = match state.database.connect() {
+        Ok(db) => db,
+        Err(e) => {
+            // A scheduled trigger has nobody to show an error to, and the report is
+            // the log. An empty one says plainly that nothing was synced.
+            tracing::error!("ingest could not reach the database: {e}");
+            return Json(IngestReport {
+                sync: sync::SyncReport::default(),
+                derive: derive::Report::default(),
+            });
+        }
+    };
+
     // One run for the whole trigger, so every write it makes is ordered against a
     // concurrent CLI `enrich`/`derive` (#11 write-path hardening). Best-effort: if
     // the run row can't be opened, stamp 0 — superseded by any real run — rather
     // than 500 a scheduled trigger.
-    let run_id = runs::begin(&state.db, "ingest").await.unwrap_or_else(|e| {
+    let run_id = runs::begin(&db, "ingest").await.unwrap_or_else(|e| {
         tracing::warn!("could not open a run, stamping 0: {e}");
         0
     });
 
     let fetcher = sync::ProxyFetcher { http: &state.http };
-    let sink = sync::TursoSink { conn: &state.db };
+    let sink = sync::TursoSink { conn: &db };
     let sync = sync::sync(adapters::ADAPTERS, &fetcher, &sink, run_id).await;
 
     // Derive so `recipes` reflects the raw just synced (and reattaches whatever
     // readings the enrich worker has already stored). Best-effort: a failed derive
     // leaves the previous `recipes` in place rather than 500-ing a scheduled
     // trigger.
-    let derive = derive::derive(&state.db, None, run_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("derive step failed, leaving recipes as-is: {e}");
-            derive::Report::default()
-        });
+    let derive = derive::derive(&db, None, run_id).await.unwrap_or_else(|e| {
+        tracing::warn!("derive step failed, leaving recipes as-is: {e}");
+        derive::Report::default()
+    });
 
     // Close the run. A run left open (this failing, or the process dying) is the
     // "died mid-flight" signal the runs table exists to surface.
-    if let Err(e) = runs::finish(&state.db, run_id, runs::COMPLETED).await {
+    if let Err(e) = runs::finish(&db, run_id, runs::COMPLETED).await {
         tracing::warn!("could not close run {run_id}: {e}");
     }
 

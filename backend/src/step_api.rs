@@ -39,7 +39,7 @@ pub async fn pending(
     Query(params): Query<PendingParams>,
 ) -> Result<Json<Vec<steps::PendingStepRecipe>>, AppError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let recipes = steps::pending(&state.db, limit)
+    let recipes = steps::pending(&state.db()?, limit)
         .await
         .map_err(|e| AppError::Internal(format!("steps pending failed: {e}")))?;
     Ok(Json(recipes))
@@ -64,7 +64,7 @@ pub async fn results(
             "model is required — it is the reading's provenance".into(),
         ));
     }
-    let report = steps::submit(&state.db, req.readings, req.model.trim())
+    let report = steps::submit(&state.db()?, req.readings, req.model.trim())
         .await
         .map_err(|e| AppError::Internal(format!("steps results failed: {e}")))?;
     Ok(Json(report))
