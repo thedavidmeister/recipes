@@ -12,27 +12,31 @@
    *
    * So it says what it will do before it does it. Sound that arrives unannounced is
    * the thing people resent, and the way out is named in the same breath.
+   *
+   * The words sit on a panel rather than straight on the photograph, which is how
+   * every readable surface in the app works — the room stays a room and the type stays
+   * type.
    */
   let { onStart }: { onStart: () => void } = $props();
 </script>
 
 <KitchenBackdrop />
 
-<div
-  class="flex min-h-screen flex-col items-center justify-end px-6 pb-24 text-center"
->
-  <h1 class="text-espresso-900 text-4xl font-semibold">recipes</h1>
-  <p class="text-cocoa-500 mt-2 text-lg">pick · buy · cook · joy</p>
+<div class="flex min-h-screen items-center justify-center px-6">
+  <div class="rounded-card bg-cream-50 px-12 py-14 text-center">
+    <h1 class="text-espresso-900 text-4xl font-semibold">recipes</h1>
+    <p class="text-cocoa-500 mt-2 text-lg">pick · buy · cook · joy</p>
 
-  <button
-    type="button"
-    onclick={onStart}
-    class="rounded-pill bg-cocoa-500 text-cream-50 mt-10 px-10 py-4 text-lg font-medium"
-  >
-    Start
-  </button>
+    <button
+      type="button"
+      onclick={onStart}
+      class="rounded-pill bg-cocoa-500 text-cream-50 mt-10 px-10 py-4 text-lg font-medium"
+    >
+      Start
+    </button>
 
-  <p class="text-stone-500 mt-4 text-sm">
-    Starts with music. Switch it off any time.
-  </p>
+    <p class="text-stone-500 mt-4 text-sm">
+      Starts with music. Switch it off any time.
+    </p>
+  </div>
 </div>
