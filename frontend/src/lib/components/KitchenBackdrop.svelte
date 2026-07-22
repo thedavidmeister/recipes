@@ -13,6 +13,6 @@
    */
 </script>
 
-<div aria-hidden="true" class="fixed inset-0 -z-10">
+<div aria-hidden="true" class="page-backdrop fixed inset-0 -z-10">
   <img src="/kitchen.jpg" alt="" class="size-full object-cover" />
 </div>

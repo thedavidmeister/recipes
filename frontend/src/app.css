@@ -166,6 +166,14 @@
     cursor: pointer;
   }
 
+  /* Held out of the page's sliding snapshot — see the page-transition block below. */
+  .page-backdrop {
+    view-transition-name: page-backdrop;
+  }
+  .app-controls {
+    view-transition-name: app-controls;
+  }
+
   body {
     background-color: var(--color-cream-50);
     color: var(--color-stone-900);
@@ -189,7 +197,22 @@
    directions; this is the motion itself. The outgoing page slides off one way and the
    incoming one arrives from another, so moving between a kitchen and its pantry reads
    as travel rather than a repaint. Anyone who has asked their system for less motion
-   gets none. */
+   gets none.
+
+   What slides is the *page*, not the room. A view transition captures the whole page
+   as one image unless an element is named, in which case it is lifted out and animated
+   on its own — so naming the backdrop is what excludes it from the sliding snapshot
+   and leaves it hanging still while the content moves across it. The floating controls
+   are named for the same reason: they belong to the app rather than to the page under
+   them, and something that is always there should not leave and come back. */
+::view-transition-old(page-backdrop),
+::view-transition-new(page-backdrop),
+::view-transition-old(app-controls),
+::view-transition-new(app-controls) {
+  animation: none;
+  /* Both snapshots occupy the same place; without this the outgoing one fades. */
+  mix-blend-mode: normal;
+}
 @keyframes page-slide-out {
   to {
     transform: translate(var(--page-exit-x, 0), var(--page-exit-y, 0));
