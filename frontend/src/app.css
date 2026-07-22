@@ -173,3 +173,35 @@
     letter-spacing: -0.01em;
   }
 }
+
+/* Page transitions (SPA navigation). The hook lives in the root layout and picks the
+   directions; this is the motion itself. The outgoing page slides off one way and the
+   incoming one arrives from another, so moving between a kitchen and its pantry reads
+   as travel rather than a repaint. Anyone who has asked their system for less motion
+   gets none. */
+@keyframes page-slide-out {
+  to {
+    transform: translate(var(--page-exit-x, 0), var(--page-exit-y, 0));
+    opacity: 0;
+  }
+}
+@keyframes page-slide-in {
+  from {
+    transform: translate(var(--page-enter-x, 0), var(--page-enter-y, 0));
+    opacity: 0;
+  }
+}
+
+::view-transition-old(root) {
+  animation: page-slide-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+::view-transition-new(root) {
+  animation: page-slide-in 300ms cubic-bezier(0, 0, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+}

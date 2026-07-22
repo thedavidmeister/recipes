@@ -229,3 +229,40 @@ export interface HealthStats {
  * - `ready` — a snapshot is in hand.
  */
 export type HealthStatus = "pending" | "error" | "forbidden" | "ready";
+
+// ---- kitchens (#72) --------------------------------------------------------
+
+/** A kitchen in the caller's list. Mirrors `kitchens::KitchenSummary`. */
+export interface KitchenSummary {
+  id: string;
+  name: string;
+  /** The caller's role: `"owner"` | `"guest"`. */
+  role: string;
+  /** Whether this is the caller's primary — the one assumed unless they switch. */
+  is_primary: boolean;
+}
+
+/** A member of a kitchen. Mirrors `kitchens::Member` — identity is the Telegram id;
+ * `username` is a display convenience and may be absent. */
+export interface KitchenMember {
+  telegram_user_id: string;
+  username: string | null;
+  role: string;
+}
+
+/** A kitchen in full. Mirrors `kitchens::KitchenDetail`. `role` is the caller's, so
+ * the UI can gate owner-only affordances. */
+export interface KitchenDetail {
+  id: string;
+  name: string;
+  role: string;
+  /** Whether this is the caller's primary. */
+  is_primary: boolean;
+  invite_token: string;
+  members: KitchenMember[];
+  equipment: string[];
+  pantry: string[];
+}
+
+/** Render state of the kitchens view. */
+export type KitchensStatus = "pending" | "error" | "ready";
