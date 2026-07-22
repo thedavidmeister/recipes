@@ -197,10 +197,10 @@
           </div>
         {/if}
 
-        <!-- Who's here -->
+        <!-- Members: who has access, owner first — not who is currently online. -->
         <h2 class="font-display mt-8 mb-3 flex items-center gap-2 text-stone-600">
           <span class="size-2 rounded-full bg-cocoa-500" aria-hidden="true"></span>
-          Who's here
+          Members
         </h2>
         <ul class="flex flex-col gap-2">
           {#each selected.members as m (m.telegram_user_id)}
