@@ -2,38 +2,24 @@
   import type { KitchenSummary, KitchensStatus } from "$lib/types";
 
   /**
-   * `kitchens` (#72): the kitchens you're in, and making a new one. That is the whole
-   * page — opening one is a navigation, not a state change here, so this never has to
-   * know what a kitchen contains.
+   * `kitchens` (#72): the kitchens you're in. That is the whole page — opening one is
+   * a navigation and so is making one, so this never has to know what a kitchen
+   * contains or hold a half-filled form.
+   *
+   * `actionError` is what came back from redeeming an invite link, which lands on this
+   * page rather than a page of its own.
    */
   interface Props {
     status: KitchensStatus;
     kitchens?: KitchenSummary[];
     error?: string;
     actionError?: string;
-    onCreate?: (name: string) => void | Promise<void>;
   }
 
-  let { status, kitchens = [], error, actionError, onCreate }: Props = $props();
+  let { status, kitchens = [], error, actionError }: Props = $props();
 
   const owned = $derived(kitchens.filter((k) => k.role === "owner"));
   const guest = $derived(kitchens.filter((k) => k.role !== "owner"));
-
-  let newName = $state("");
-
-  // Clear the field only once the create has landed — emptying it up front reads as
-  // success even when it failed.
-  async function create(e: Event) {
-    e.preventDefault();
-    const v = newName.trim();
-    if (!v) return;
-    try {
-      await onCreate?.(v);
-    } catch {
-      return;
-    }
-    newName = "";
-  }
 </script>
 
 <div class="pt-48 pb-16">
@@ -82,19 +68,13 @@
         </p>
       {/if}
 
-      <form class="mt-6 flex gap-2" onsubmit={create}>
-        <input
-          bind:value={newName}
-          placeholder="New kitchen name"
-          class="rounded-card flex-1 border border-stone-200 bg-cream-50 px-3 py-2 text-sm text-stone-900"
-        />
-        <button
-          type="submit"
-          class="rounded-card flex-none bg-cocoa-500 px-4 py-2 text-sm font-medium text-cream-50"
-        >
-          Create
-        </button>
-      </form>
+      <a
+        href="/kitchens/new"
+        class="rounded-card font-display mt-6 flex items-center justify-between bg-cocoa-500 px-4 py-3 text-cream-50"
+      >
+        New kitchen
+        <span class="text-sm text-cream-200">→</span>
+      </a>
     {/if}
   </div>
 </div>

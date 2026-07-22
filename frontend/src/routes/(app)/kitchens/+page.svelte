@@ -2,7 +2,7 @@
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { page } from "$app/state";
   import { goto, replaceState } from "$app/navigation";
-  import { listKitchens, createKitchen, joinKitchen } from "$lib/kitchens";
+  import { listKitchens, joinKitchen } from "$lib/kitchens";
   import type { KitchensStatus } from "$lib/types";
   import KitchenList from "$lib/components/KitchenList.svelte";
 
@@ -23,19 +23,6 @@
   );
 
   let actionError = $state<string | null>(null);
-
-  async function onCreate(name: string) {
-    actionError = null;
-    try {
-      const k = await createKitchen(name);
-      await qc.invalidateQueries({ queryKey: ["kitchens"] });
-      qc.setQueryData(["kitchen", k.id], k);
-      await goto(`/kitchens/${k.id}`);
-    } catch (e) {
-      actionError = e instanceof Error ? e.message : "could not create the kitchen";
-      throw e;
-    }
-  }
 
   // A shareable invite is a `?join=<token>` link: redeem it once on arrival, drop the
   // spent param, and go straight into the kitchen it opened.
@@ -64,5 +51,4 @@
   kitchens={list.data}
   error={list.error instanceof Error ? list.error.message : undefined}
   actionError={actionError ?? undefined}
-  {onCreate}
 />

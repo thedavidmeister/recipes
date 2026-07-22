@@ -15,15 +15,16 @@ export const Ready: Story = {
   args: { status: "ready", kitchens: kitchenList() },
 };
 
-/** Nothing yet: the create field is the whole page. */
+/** Nothing yet: an invitation to make one, and the way to. */
 export const Empty: Story = { args: { status: "ready", kitchens: [] } };
 
-/** A create that didn't land — the reason stays, and so does what you typed. */
+/** An invite link that wouldn't redeem — the reason lands here, on the page it sent
+ * you to. */
 export const ActionFailed: Story = {
   args: {
     status: "ready",
     kitchens: kitchenList(),
-    actionError: "could not create the kitchen (502)",
+    actionError: "that invite has already been used",
   },
 };
 
