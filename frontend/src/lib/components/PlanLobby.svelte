@@ -48,7 +48,7 @@
   }
 </script>
 
-<div class="pt-6 pb-16">
+<div class="pt-32 pb-16">
   <div class="rounded-card bg-cream-50 p-6">
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="bg-pesto-500 size-2.5 rounded-full" aria-hidden="true"></span>
