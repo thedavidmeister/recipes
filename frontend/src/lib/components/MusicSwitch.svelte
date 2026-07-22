@@ -20,7 +20,7 @@
   let { playing, volume, onToggle, onVolume }: Props = $props();
 </script>
 
-<div class="fixed bottom-6 right-6 z-20 flex items-center gap-2">
+<div class="app-controls fixed bottom-6 right-6 z-20 flex items-center gap-2">
   {#if playing}
     <label
       class="rounded-pill bg-cream-50 ring-cream-300 flex items-center gap-2 px-4 py-3 ring-1"
