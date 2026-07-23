@@ -673,8 +673,7 @@ async fn load_members(conn: &Connection, kitchen_id: &str) -> anyhow::Result<Vec
     while let Some(row) = rows.next().await? {
         out.push(Member {
             telegram_user_id: row.get::<String>(0)?,
-
-            username: row.get::<Option<String>>(2)?,
+            username: row.get::<Option<String>>(1)?,
         });
     }
     Ok(out)
@@ -840,6 +839,78 @@ mod tests {
             .unwrap();
         let live: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(live, 1, "the expired one was swept by the second mint");
+    }
+
+    /// Members come back with their usernames attached.
+    ///
+    /// This exists because it did not, and a column-index slip shipped: the query lost
+    /// a column and the reads kept their old positions, so it asked for index 2 of a
+    /// two-column row. Local SQLite tolerated that; the remote Hrana client unwraps an
+    /// `Option` and panicked on every request in production. A test that only checks
+    /// the *count* of members never touches the columns — so this one checks a value
+    /// that has to be read out of the far end of the row.
+    #[tokio::test]
+    async fn members_carry_their_usernames() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO users (telegram_user_id, username) VALUES (?1, ?2)",
+            libsql::params!["4242", "dave"],
+        )
+        .await
+        .unwrap();
+        let id = create_kitchen(&conn, "Home", "4242").await.unwrap();
+
+        let members = load_members(&conn, &id).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].telegram_user_id, "4242");
+        assert_eq!(
+            members[0].username.as_deref(),
+            Some("dave"),
+            "the username is read from the row, not merely present in the table"
+        );
+    }
+
+    /// The bot's invite path reads two columns out of its own query and is otherwise
+    /// only exercised through Telegram, which no test drives.
+    #[tokio::test]
+    async fn the_bot_invite_names_the_kitchen_it_opens() {
+        let conn = conn().await;
+        ensure_primary(&conn, "4242", Some("dave")).await.unwrap();
+
+        let (kitchen, token, expires_at) = primary_invite(&conn, "4242", Some("dave"))
+            .await
+            .unwrap()
+            .expect("a primary exists, so an invite can be made for it");
+
+        assert_eq!(kitchen, "dave's kitchen", "the reply says what it opens");
+        assert!(expires_at > now(), "and when it stops");
+
+        // And it is a working invite, not merely a string.
+        let id = list_kitchens(&conn, "4242").await.unwrap()[0].id.clone();
+        assert_eq!(
+            join_by_token(&conn, &token, "guest")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str())
+        );
+    }
+
+    /// Somebody with no kitchen at all gets one made before the invite is minted, so
+    /// the bot never has to say "you have nowhere to invite anyone to".
+    #[tokio::test]
+    async fn the_bot_invite_makes_a_kitchen_if_you_have_none() {
+        let conn = conn().await;
+        assert!(list_kitchens(&conn, "9317").await.unwrap().is_empty());
+
+        let minted = primary_invite(&conn, "9317", None).await.unwrap();
+        assert!(minted.is_some(), "a kitchen is made rather than refused");
+        assert_eq!(
+            minted.unwrap().0,
+            "My kitchen",
+            "named for someone with no username"
+        );
+        assert_eq!(list_kitchens(&conn, "9317").await.unwrap().len(), 1);
     }
 
     /// Nobody has zero kitchens: the first ask mints a primary named after them, and

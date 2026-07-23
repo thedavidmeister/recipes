@@ -578,6 +578,29 @@ mod tests {
         assert_eq!(view.voters[0].telegram_user_id, "alice");
     }
 
+    /// Voters come back with their usernames, which means reading the far column of
+    /// the row rather than merely counting rows — the shape that hid a column-index
+    /// slip in the kitchens lobby's twin query.
+    #[tokio::test]
+    async fn voters_carry_their_usernames() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO users (telegram_user_id, username) VALUES (?1, ?2)",
+            libsql::params!["4242", "dave"],
+        )
+        .await
+        .unwrap();
+        create_session(&conn, "c", "4242", None, None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "4242").await.unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.voters.len(), 1);
+        assert_eq!(view.voters[0].telegram_user_id, "4242");
+        assert_eq!(view.voters[0].username.as_deref(), Some("dave"));
+    }
+
     /// Starting twice must not move the moment the roster closed — a second press is
     /// a no-op, not a re-start.
     #[tokio::test]
