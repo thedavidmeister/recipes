@@ -52,7 +52,29 @@ export async function renameKitchen(
   return (await res.json()) as KitchenDetail;
 }
 
-/** Join a kitchen by its invite token, as a guest. */
+/** A freshly minted invite. Mirrors `kitchens::Invite`. */
+export interface KitchenInvite {
+  token: string;
+  /** Unix seconds. The link stops working then — it is not a permalink. */
+  expires_at: number;
+}
+
+/**
+ * Mint an invite to a kitchen. Members only.
+ *
+ * Minted per ask rather than read off the kitchen, because there is nothing standing
+ * to read: a link is good for two hours. Calling this is what makes one exist, so the
+ * page asks when someone opens it.
+ */
+export async function mintInvite(id: string): Promise<KitchenInvite> {
+  const res = await apiFetch(`/api/kitchens/${encodeURIComponent(id)}/invite`, {
+    method: "POST",
+  });
+  if (!res.ok) throw failed(res.status, "make an invite");
+  return (await res.json()) as KitchenInvite;
+}
+
+/** Join a kitchen by an invite, as a member like any other. */
 export async function joinKitchen(token: string): Promise<KitchenDetail> {
   const res = await apiFetch("/api/kitchens/join", {
     method: "POST",

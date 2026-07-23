@@ -239,7 +239,7 @@ fn mint_secret() -> String {
 ///
 /// Hashing also makes the digest the lookup key, so a secret is never compared in
 /// application code and there is no timing signal to leak.
-fn hash_secret(secret: &str) -> String {
+pub(crate) fn hash_secret(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
@@ -593,6 +593,11 @@ pub struct TelegramUser {
 #[derive(Debug, Deserialize)]
 pub struct Chat {
     pub id: i64,
+    /// `private` | `group` | `supergroup` | `channel`. Read because what may be said
+    /// depends on who can hear it — an invite belongs in a one-to-one chat and nowhere
+    /// else.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
 }
 
 /// Reject any request to ingest without the infra API key.
@@ -672,6 +677,21 @@ fn is_login_command(text: &str) -> bool {
     cmd.starts_with("/start") || cmd.starts_with("/login")
 }
 
+/// Does this message ask for an invite to the sender's kitchen? Same tolerance as
+/// [`is_login_command`] for Telegram's padding and `@bot` suffixes.
+fn is_kitchen_invite_command(text: &str) -> bool {
+    text.trim_start().starts_with("/kitcheninvite")
+}
+
+/// Is this a one-to-one chat with the bot?
+///
+/// Absent means private: Telegram always sends the field, and a message with no chat
+/// type is not a group we can identify. Being wrong in the cautious direction here
+/// would only ever refuse someone their own invite in their own chat.
+fn is_private_chat(chat: &Chat) -> bool {
+    chat.kind.as_deref().unwrap_or("private") == "private"
+}
+
 /// `POST /api/telegram/webhook` — someone pressed Start, or sent `/login`.
 ///
 /// This is where a login begins, and the direction matters: Telegram tells us
@@ -702,8 +722,18 @@ pub async fn webhook(
     // Telegram sends a bare `/start` when the deep link carries no payload, which
     // is the normal case here: the link exists to open a chat, not to carry state.
     // A payload would be ignored — there is nothing a caller could usefully say.
+    if is_kitchen_invite_command(&text) {
+        kitchen_invite_reply(&state, &chat, &from).await?;
+        return Ok(StatusCode::OK);
+    }
+
     if !is_login_command(&text) {
-        reply(&state, chat.id, "Send /login to sign in.").await;
+        reply(
+            &state,
+            chat.id,
+            "Send /login to sign in, or /kitcheninvite for a link to your kitchen.",
+        )
+        .await;
         return Ok(StatusCode::OK);
     }
 
@@ -717,6 +747,59 @@ pub async fn webhook(
     )
     .await;
     Ok(StatusCode::OK)
+}
+
+/// Answer `/kitcheninvite` with a fresh link to the sender's own kitchen.
+///
+/// Refused outside a one-to-one chat, and that refusal is the point. An invite is a
+/// live key to a kitchen — everyone in one is an owner of it — so answering the same
+/// command in a group would hand that key to every member of the group at once,
+/// including whoever forwards the message on. The bot will say so rather than
+/// silently do it.
+///
+/// Identity comes from Telegram alongside a verified webhook secret, so the link is
+/// minted for whoever actually sent the message and delivered only to their chat.
+async fn kitchen_invite_reply(
+    state: &AppState,
+    chat: &Chat,
+    from: &TelegramUser,
+) -> Result<(), AppError> {
+    if !is_private_chat(chat) {
+        reply(
+            state,
+            chat.id,
+            "Not here — an invite is a live key to your kitchen, and anyone reading this group would have it. Message me directly for one.",
+        )
+        .await;
+        return Ok(());
+    }
+
+    let db = state.db()?;
+    let minted =
+        crate::kitchens::primary_invite(&db, &from.id.to_string(), from.username.as_deref())
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let Some((kitchen, token, _expires_at)) = minted else {
+        reply(
+            state,
+            chat.id,
+            "You have no kitchen to invite anyone to yet.",
+        )
+        .await;
+        return Ok(());
+    };
+
+    let base = state.telegram.frontend_base_url.trim_end_matches('/');
+    reply(
+        state,
+        chat.id,
+        &format!(
+            "Anyone who opens this joins {kitchen}, the same as everyone else in it. It lasts 2 hours:\n{base}/kitchens?join={token}"
+        ),
+    )
+    .await;
+    Ok(())
 }
 
 /// Mint a completion secret for a **known** Telegram user and build their link.
@@ -874,6 +957,52 @@ mod tests {
         assert!(!is_login_command("/help"));
         assert!(!is_login_command("hello"));
         assert!(!is_login_command("start"), "a slash is required");
+    }
+
+    #[test]
+    fn the_kitchen_invite_command_is_recognised() {
+        assert!(is_kitchen_invite_command("/kitcheninvite"));
+        assert!(
+            is_kitchen_invite_command("  /kitcheninvite"),
+            "Telegram pads"
+        );
+        assert!(
+            is_kitchen_invite_command("/kitcheninvite@lehlehlehbot"),
+            "group-style @mention suffix"
+        );
+        assert!(!is_kitchen_invite_command("/kitchen"));
+        assert!(
+            !is_login_command("/kitcheninvite"),
+            "asking for an invite is not asking to sign in"
+        );
+    }
+
+    /// An invite is a live key to a kitchen, and everyone in a kitchen is an owner of
+    /// it — so where the bot is willing to say one out loud is a security boundary, not
+    /// a nicety. Anything that is not a one-to-one chat is a room with an audience.
+    #[test]
+    fn an_invite_is_only_for_a_one_to_one_chat() {
+        let private = Chat {
+            id: 1,
+            kind: Some("private".into()),
+        };
+        assert!(is_private_chat(&private));
+
+        for shared in ["group", "supergroup", "channel"] {
+            let chat = Chat {
+                id: 1,
+                kind: Some(shared.into()),
+            };
+            assert!(
+                !is_private_chat(&chat),
+                "{shared} has an audience, so no invite goes into it"
+            );
+        }
+
+        // Telegram always sends the field; a message without one is not a group we can
+        // identify, and treating it as private only ever costs someone their own link.
+        let unknown = Chat { id: 1, kind: None };
+        assert!(is_private_chat(&unknown));
     }
 
     #[test]

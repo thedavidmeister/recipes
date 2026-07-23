@@ -168,6 +168,7 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens/join", post(kitchens::join))
         .route("/kitchens/{id}", get(kitchens::get))
         .route("/kitchens/{id}/name", post(kitchens::rename))
+        .route("/kitchens/{id}/invite", post(kitchens::invite))
         .route(
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),
@@ -860,6 +861,111 @@ mod tests {
 
     /// Starting a pick is session-gated like the rest — joining is never
     /// anonymous (#25).
+    fn json_post(uri: &str, cookie: Option<&str>, body: &str) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    async fn body_json(res: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Make a kitchen through the API as `who`, returning its id — the same path a
+    /// person takes, so these tests exercise the router rather than a lookalike.
+    async fn make_kitchen(app: &Router, cookie: &str, name: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/kitchens",
+                Some(cookie),
+                &format!(r#"{{"name":"{name}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_json(res).await["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Minting an invite is gated like everything else a person reaches (#25).
+    #[tokio::test]
+    async fn minting_an_invite_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+
+        let res = app
+            .oneshot(json_post(&format!("/api/kitchens/{id}/invite"), None, "{}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The boundary that matters: a stranger cannot mint themselves a way in. Without
+    /// this, an invite endpoint would be an open door to any kitchen whose id leaked —
+    /// and since everyone in a kitchen is an owner of it, that is the whole kitchen.
+    #[tokio::test]
+    async fn a_stranger_cannot_mint_an_invite_to_your_kitchen() {
+        let (app, conn) = test_app().await;
+        let mine = auth::issue_test_session(&conn, "4242").await;
+        let theirs = auth::issue_test_session(&conn, "9317").await;
+        let id = make_kitchen(&app, &format!("recipes_session={mine}"), "Home").await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/kitchens/{id}/invite"),
+                Some(&format!("recipes_session={theirs}")),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A member gets a token, and one that dies: the response says when, and it says a
+    /// time roughly two hours out rather than never.
+    #[tokio::test]
+    async fn a_member_gets_an_invite_that_expires() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/kitchens/{id}/invite"),
+                Some(&cookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let body = body_json(res).await;
+        let minted = body["token"].as_str().unwrap();
+        assert!(!minted.is_empty(), "a token to put in a link");
+
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let two_hours = 2 * 60 * 60;
+        assert!(
+            expires_at > now && expires_at <= now + two_hours + 5,
+            "expires about two hours out, not never: {expires_at} vs {now}"
+        );
+    }
+
     #[tokio::test]
     async fn session_create_requires_a_session() {
         let (app, _conn) = test_app().await;
