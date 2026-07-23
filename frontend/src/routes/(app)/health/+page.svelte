@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createQuery, useQueryClient } from "@tanstack/svelte-query";
+  import { resource } from "$lib/resource";
+  import { useQueryClient } from "@tanstack/svelte-query";
   import { me } from "$lib/auth";
   import { fetchHealth } from "$lib/health";
   import { ApiError } from "$lib/client";
@@ -14,33 +15,32 @@
    * Shares the `["session"]` query with the layout, so `is_admin` costs no extra
    * request. Refetches on an interval so the numbers stay live while it is open.
    */
-  const session = createQuery(() => ({
+  const session = resource(() => ({
     queryKey: ["session"],
     queryFn: me,
   }));
   const isAdmin = $derived(session.data?.is_admin === true);
 
-  const health = createQuery(() => ({
+  const health = resource(() => ({
     queryKey: ["health"],
     queryFn: fetchHealth,
     enabled: isAdmin,
     refetchInterval: 30_000,
   }));
 
+  /**
+   * Loading is `resource`'s job; being allowed in is this page's. Only the `forbidden`
+   * branch stays local, because it is the one part that is about admin-ness rather
+   * than about a request — see the note in `$lib/resource`.
+   */
   const status = $derived<HealthStatus>(
-    session.data && !isAdmin
+    (session.data && !isAdmin) ||
+      (health.query.error instanceof ApiError &&
+        health.query.error.status === 403)
       ? "forbidden"
-      : health.isError
-        ? health.error instanceof ApiError && health.error.status === 403
-          ? "forbidden"
-          : "error"
-        : health.data
-          ? "ready"
-          : "pending",
+      : health.status,
   );
-  const error = $derived(
-    health.error instanceof Error ? health.error.message : undefined,
-  );
+  const error = $derived(health.error);
 
   // A 401 from the health poll means the session lapsed since the page loaded.
   // Re-check the session so the `(app)` layout re-gates to the login screen,
@@ -48,7 +48,7 @@
   // is the *admin* gate and stays on the page as `forbidden`.)
   const queryClient = useQueryClient();
   $effect(() => {
-    if (health.error instanceof ApiError && health.error.status === 401) {
+    if (health.query.error instanceof ApiError && health.query.error.status === 401) {
       queryClient.invalidateQueries({ queryKey: ["session"] });
     }
   });

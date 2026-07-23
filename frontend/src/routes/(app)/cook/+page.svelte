@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resource } from "$lib/resource";
   import { createQuery } from "@tanstack/svelte-query";
   import { getCookRecipe } from "$lib/cook";
   import { consensusRef } from "$lib/buy";
@@ -20,15 +21,12 @@
    * running timer per recipe so a reload mid-cook keeps counting — and passes the
    * derived per-step `timers` down, so `Cook` renders a pure view.
    */
-  const recipe = createQuery(() => ({
+  const recipe = resource(() => ({
     queryKey: ["cook"],
     queryFn: () => getCookRecipe(),
     staleTime: Infinity,
   }));
 
-  const status = $derived<CookStatus>(
-    recipe.isError ? "error" : recipe.isPending ? "pending" : "ready",
-  );
 
   // Running timers: step id → deadline (unix ms), plus which have already fired.
   // `now` ticks each second so the countdowns re-derive.
@@ -168,10 +166,10 @@
 </script>
 
 <Cook
-  {status}
+  status={recipe.status}
   {timers}
   recipe={recipe.data}
-  error={recipe.error instanceof Error ? recipe.error.message : undefined}
+  error={recipe.error}
   onStartTimer={startTimer}
   onDismissTimer={dismissTimer}
 />

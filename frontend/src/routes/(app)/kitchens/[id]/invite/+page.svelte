@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createQuery } from "@tanstack/svelte-query";
+  import { resource, together } from "$lib/resource";
   import { page } from "$app/state";
   import { getKitchen, mintInvite } from "$lib/kitchens";
   import KitchenInvite from "$lib/components/KitchenInvite.svelte";
@@ -10,17 +10,17 @@
    * The invite is minted by opening this page, not stored on the kitchen. It lasts two
    * hours, which is why it can be minted freely: a link nobody uses simply dies.
    *
-   * `staleTime: 0` and no retry on purpose — every visit should hand you a fresh one
+   * `staleTime: 0` and `gcTime: 0` on purpose — every visit should hand you a fresh one
    * rather than a cached link that may already have expired while the page sat open.
    */
   const id = $derived(page.params.id ?? "");
 
-  const detail = createQuery(() => ({
+  const detail = resource(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
   }));
 
-  const invite = createQuery(() => ({
+  const invite = resource(() => ({
     queryKey: ["kitchen-invite", id],
     queryFn: () => mintInvite(id),
     staleTime: 0,
@@ -49,24 +49,16 @@
     return () => clearInterval(handle);
   });
 
-  const error = $derived(
-    invite.error instanceof Error
-      ? invite.error.message
-      : detail.error instanceof Error
-        ? detail.error.message
-        : undefined,
-  );
+  // Two requests, one screen: pending until both land, and the first failure is the
+  // one worth showing.
+  const loaded = together(invite, detail);
 </script>
 
 <KitchenInvite
-  status={invite.isError || detail.isError
-    ? "error"
-    : invite.isPending || detail.isPending
-      ? "pending"
-      : "ready"}
+  status={loaded.status}
   kitchen={detail.data?.name}
   {link}
   {remaining}
-  {error}
-  onRenew={() => void invite.refetch()}
+  error={loaded.error}
+  onRenew={() => void invite.query.refetch()}
 />

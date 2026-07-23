@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resource } from "$lib/resource";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { page } from "$app/state";
   import { goto, replaceState } from "$app/navigation";
@@ -12,14 +13,11 @@
    */
   const qc = useQueryClient();
 
-  const list = createQuery(() => ({
+  const list = resource(() => ({
     queryKey: ["kitchens"],
     queryFn: listKitchens,
   }));
 
-  const status = $derived<KitchensStatus>(
-    list.isError ? "error" : list.isPending ? "pending" : "ready",
-  );
 
   let actionError = $state<string | null>(null);
 
@@ -46,8 +44,8 @@
 </script>
 
 <KitchenList
-  {status}
+  status={list.status}
   kitchens={list.data}
-  error={list.error instanceof Error ? list.error.message : undefined}
+  error={list.error}
   actionError={actionError ?? undefined}
 />

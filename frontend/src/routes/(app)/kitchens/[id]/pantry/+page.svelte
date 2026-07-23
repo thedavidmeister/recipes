@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resource } from "$lib/resource";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { page } from "$app/state";
   import { getKitchen, addPantry, removePantry } from "$lib/kitchens";
@@ -9,14 +10,11 @@
   const id = $derived(page.params.id ?? "");
   const qc = useQueryClient();
 
-  const detail = createQuery(() => ({
+  const detail = resource(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
   }));
 
-  const status = $derived<KitchensStatus>(
-    detail.isError ? "error" : detail.isPending ? "pending" : "ready",
-  );
 
   let actionError = $state<string | null>(null);
 
@@ -41,12 +39,12 @@
 </script>
 
 <KitchenItems
-  {status}
+  status={detail.status}
   title="Pantry"
   items={detail.data?.pantry}
   placeholder="Add to the pantry (rice, eggs…)"
   backHref="/kitchens/{id}"
-  error={detail.error instanceof Error ? detail.error.message : undefined}
+  error={detail.error}
   actionError={actionError ?? undefined}
   {onAdd}
   {onRemove}
