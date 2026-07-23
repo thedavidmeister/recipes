@@ -2,10 +2,15 @@
   import "../app.css";
   import favicon from "$lib/assets/favicon.svg";
   import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
+  import { retryTransient } from "$lib/client";
   import { onNavigate } from "$app/navigation";
 
   let { children } = $props();
-  const queryClient = new QueryClient();
+  // One retry policy for every query in the app: patient with a server that has not
+  // woken up, and unargumentative with one that has answered. See `retryTransient`.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: retryTransient } },
+  });
 
   /** Where a page leaves to, or arrives from. */
   const DIRECTIONS = ["left", "right", "up", "down"] as const;

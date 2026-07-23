@@ -17,7 +17,6 @@
   const session = createQuery(() => ({
     queryKey: ["session"],
     queryFn: me,
-    retry: false,
   }));
   const isAdmin = $derived(session.data?.is_admin === true);
 
@@ -25,7 +24,6 @@
     queryKey: ["health"],
     queryFn: fetchHealth,
     enabled: isAdmin,
-    retry: false,
     refetchInterval: 30_000,
   }));
 

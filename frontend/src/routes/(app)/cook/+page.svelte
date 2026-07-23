@@ -24,7 +24,6 @@
     queryKey: ["cook"],
     queryFn: () => getCookRecipe(),
     staleTime: Infinity,
-    retry: false,
   }));
 
   const status = $derived<CookStatus>(

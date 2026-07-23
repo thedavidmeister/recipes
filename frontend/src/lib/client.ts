@@ -45,3 +45,35 @@ export async function apiFetch(
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
 }
+
+/**
+ * Should a failed query be tried again?
+ *
+ * The backend sleeps. Render's free tier spins a service down after fifteen minutes
+ * idle, and waking it takes the better part of a minute — during which a browser's
+ * fetch does not return an error code, it simply never completes. Safari reports that
+ * as `Load failed`, Chrome as `Failed to fetch`, and neither is a fault worth showing
+ * somebody: the service is coming, it is just not there yet.
+ *
+ * Every query used to be `retry: false`, so a single cold start turned into a dead end
+ * — an error page with nothing on it but a breadcrumb, until you thought to reload.
+ * That is the first visit of the day, for everyone, and it read as the app being
+ * broken.
+ *
+ * So: a request that never reached the server is retried, patiently enough to cover a
+ * cold start. A request the server *answered* is not, because an answer is not a
+ * failure to be argued with — a 401 means sign in, a 403 means no, and asking again
+ * changes neither. The exceptions are the two codes that explicitly mean "later":
+ * timeouts and rate limits.
+ */
+export function retryTransient(failureCount: number, error: unknown): boolean {
+  if (error instanceof ApiError) {
+    const worthRepeating =
+      error.status >= 500 || error.status === 408 || error.status === 429;
+    return worthRepeating && failureCount < 2;
+  }
+  // No status at all: the request never completed. With TanStack's exponential
+  // backoff this spans roughly half a minute, which is what waking a sleeping
+  // service costs.
+  return failureCount < 5;
+}

@@ -206,7 +206,6 @@
   const session = createQuery(() => ({
     queryKey: ["session"],
     queryFn: me,
-    retry: false,
   }));
 
   let client: PickClient | null = null;
