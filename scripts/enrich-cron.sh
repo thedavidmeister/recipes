@@ -89,6 +89,7 @@ PLUGIN_DIR="$REPO/plugins/recipes-enrich"
 # print mode never prompts.
 ING_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__enrich_pull,mcp__plugin_recipes-enrich_recipes-enrich__enrich_push"
 STEP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__step_pull,mcp__plugin_recipes-enrich_recipes-enrich__step_push"
+EQUIP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__equipment_pull,mcp__plugin_recipes-enrich_recipes-enrich__equipment_push"
 
 ING_PROMPT="Drain the recipes ingredient enrichment queue now. Loop: call enrich_pull, \
 read each returned recipe's ingredient lines into StructuredMeasure readings, then \
@@ -98,13 +99,20 @@ STEP_PROMPT="Drain the recipes step-reading queue now. Loop: call step_pull, rea
 returned recipe's method into a StructuredStep DAG (segment it, time the timed steps, \
 map the dependencies, extract prep from the ingredients), then call step_push; repeat \
 until step_pull returns an empty array. Use only the step_pull and step_push tools."
+EQUIP_PROMPT="Drain the recipes equipment-reading queue now. Loop: call equipment_pull, \
+read each returned recipe's method into the equipment it requires — preparation tools \
+as well as appliances, since a salad still needs a bowl, a knife and a board — with \
+every name normalised (lowercase, trimmed, single-spaced), then call equipment_push; \
+repeat until equipment_pull returns an empty array. Use only the equipment_pull and \
+equipment_push tools."
 
 # --- drain one queue -------------------------------------------------------------
 # Peek the queue cheaply via the CLI (a read-only pull; it does not consume). While
 # non-empty, run bounded Claude sessions — each loops internally until the queue
 # drains or the wall-clock cap — so a large backfill drains over several sessions
 # rather than one unbounded one. Args: <kind> <skill-file> <allowed-tools> <prompt>,
-# where <kind> is both the CLI subcommand (`enrich`|`steps`) and the log label.
+# where <kind> is both the CLI subcommand (`enrich`|`steps`|`equipment`) and the log
+# label.
 #
 # Returns 0 only when the queue fully drained; 1 when it hit MAX_BATCHES with work
 # still pending. The caller uses that to gate the steps drain on ingredients being
@@ -154,3 +162,11 @@ if drain_queue enrich "$PLUGIN_DIR/skills/enrich/SKILL.md" "$ING_TOOLS" "$ING_PR
 else
   log "ingredients not fully drained this run; deferring the step reading"
 fi
+
+# Equipment (#81) is deliberately NOT gated on the other two. It reads `instructions`
+# and nothing else — no ingredient prep, no step DAG — so making it wait on the
+# ingredient queue would be a dependency the reading does not actually have, and on a
+# large backfill it would simply never run. Gate what depends; run what does not.
+drain_queue equipment "$PLUGIN_DIR/skills/enrich-equipment/SKILL.md" \
+  "$EQUIP_TOOLS" "$EQUIP_PROMPT" \
+  || true # a backlog just waits for the next run
