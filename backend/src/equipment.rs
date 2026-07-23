@@ -191,6 +191,20 @@ pub async fn vocabulary(conn: &Connection) -> anyhow::Result<Vec<String>> {
     Ok(names)
 }
 
+/// The vocabulary's answer for one name: the normalised form if the corpus asks for
+/// it, `None` if it does not.
+///
+/// Normalising the caller's input first means a kitchen may type "Frying Pan" and be
+/// understood — the strictness is about *which* items exist, not about punishing
+/// someone for a capital letter. What it will not do is invent an item.
+pub async fn normalise_known(conn: &Connection, raw: &str) -> anyhow::Result<Option<String>> {
+    let wanted = equipment::normalise(raw);
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    Ok(vocabulary(conn).await?.into_iter().find(|k| *k == wanted))
+}
+
 /// Load every reading so [`crate::derive`] can reattach in memory — one query, not a
 /// lookup per recipe.
 pub async fn load(conn: &Connection) -> anyhow::Result<HashMap<RecipeKey, Vec<RequiredEquipment>>> {

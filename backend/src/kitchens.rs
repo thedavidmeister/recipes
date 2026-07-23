@@ -234,21 +234,33 @@ pub async fn join(
 }
 
 /// `POST /api/kitchens/{id}/equipment` — add a piece of equipment.
+/// A kitchen selects equipment from the corpus vocabulary and may not invent it (#81).
+///
+/// Checked here and not only in the picker, because a rule the client enforces is not
+/// a rule: the endpoint takes whatever it is sent. And the reason is not tidiness —
+/// the only use of knowing what a kitchen owns is matching it against recipes, so an
+/// item no recipe asks for could never change what you are able to cook. It would sit
+/// in the list making the kitchen look better equipped than it is.
+///
+/// Before the corpus has been read the vocabulary is empty and nothing can be added.
+/// That is the ruling working, not a bug: there is genuinely nothing legitimate to
+/// add yet.
 pub async fn add_equipment(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
     Json(body): Json<ItemBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    mutate_item(
-        &state,
-        &user,
-        &id,
-        "kitchen_equipment",
-        body.item.trim(),
-        Op::Add,
-    )
-    .await
+    let raw = body.item.trim();
+    let item = crate::equipment::normalise_known(&state.db()?, raw)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "{raw:?} is not equipment any recipe asks for — pick from the list"
+            ))
+        })?;
+    mutate_item(&state, &user, &id, "kitchen_equipment", &item, Op::Add).await
 }
 
 /// `DELETE /api/kitchens/{id}/equipment?item=…` — remove a piece of equipment.
@@ -911,6 +923,63 @@ mod tests {
             "named for someone with no username"
         );
         assert_eq!(list_kitchens(&conn, "9317").await.unwrap().len(), 1);
+    }
+
+    /// A kitchen may only own what some recipe asks for (#81). Checked at the
+    /// endpoint, because a rule only the picker enforces is not a rule — the endpoint
+    /// takes whatever it is sent.
+    #[tokio::test]
+    async fn a_kitchen_can_only_own_what_recipes_ask_for() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO recipes (source, id, title, ingredients, instructions)
+             VALUES ('themealdb', '1', 'T', '[]', 'Fry.')",
+            (),
+        )
+        .await
+        .unwrap();
+        crate::equipment::submit(
+            &conn,
+            vec![crate::equipment::SubmittedEquipment {
+                source: "themealdb".into(),
+                id: "1".into(),
+                equipment: vec![recipe_core::equipment::RequiredEquipment { item: "wok".into() }],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        // Known — and a typed capital is understood, because the strictness is about
+        // which items exist, not about punishing spelling.
+        assert_eq!(
+            crate::equipment::normalise_known(&conn, "Wok")
+                .await
+                .unwrap(),
+            Some("wok".to_string())
+        );
+        // Unknown — no recipe asks for it, so owning it could never change what you
+        // are able to cook.
+        assert_eq!(
+            crate::equipment::normalise_known(&conn, "spurtle")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Before the corpus has been read there is nothing legitimate to own. That is the
+    /// ruling working, not a bug — and it is why the picker says so rather than
+    /// offering an empty field.
+    #[tokio::test]
+    async fn an_unread_corpus_lets_a_kitchen_own_nothing() {
+        let conn = conn().await;
+        assert_eq!(
+            crate::equipment::normalise_known(&conn, "wok")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     /// Nobody has zero kitchens: the first ask mints a primary named after them, and

@@ -10,13 +10,42 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The same page serves equipment and pantry; only the words differ. */
+/** The same page serves equipment and pantry; only the words differ.
+ *
+ * Equipment is a **picker**: `options` is everything any recipe asks for, and there is
+ * no way to add something that is not on it (#81). */
 export const Equipment: Story = {
   args: {
     status: "ready",
     title: "Equipment",
     items: kitchenDetail().equipment,
     placeholder: "Add equipment (blender, wok…)",
+    options: [
+      "baking tray",
+      "blender",
+      "chopping board",
+      "frying pan",
+      "knife",
+      "mixing bowl",
+      "oven",
+      "saucepan",
+      "whisk",
+      "wok",
+    ],
+    backHref: "/kitchens/k1",
+  },
+};
+
+/** Nothing has been read yet, so there is nothing legitimate to own. The page says so
+ * rather than offering a field that would only ever be refused — the ruling working,
+ * not a failure. */
+export const NothingKnownYet: Story = {
+  args: {
+    status: "ready",
+    title: "Equipment",
+    items: [],
+    placeholder: "Add equipment (blender, wok…)",
+    options: [],
     backHref: "/kitchens/k1",
   },
 };

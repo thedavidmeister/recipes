@@ -5,6 +5,7 @@
   import { getKitchen, addEquipment, removeEquipment } from "$lib/kitchens";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
   import KitchenItems from "$lib/components/KitchenItems.svelte";
+  import { equipmentVocabulary } from "$lib/kitchens";
 
   /** A kitchen's equipment (#72) — its own page, so it is one idea. */
   const id = $derived(page.params.id ?? "");
@@ -13,6 +14,16 @@
   const detail = resource(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
+  }));
+
+  /**
+   * What may be owned at all. A kitchen picks from this and cannot invent an item
+   * (#81) — the server refuses anything outside it, so offering a free field would be
+   * offering a failure.
+   */
+  const known = resource(() => ({
+    queryKey: ["equipment-vocabulary"],
+    queryFn: equipmentVocabulary,
   }));
 
 
@@ -42,6 +53,7 @@
   status={detail.status}
   title="Equipment"
   items={detail.data?.equipment}
+  options={known.data ?? []}
   placeholder="Add equipment (blender, wok…)"
   backHref="/kitchens/{id}"
   error={detail.error}

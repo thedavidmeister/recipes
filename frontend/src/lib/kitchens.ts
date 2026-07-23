@@ -52,6 +52,19 @@ export async function renameKitchen(
   return (await res.json()) as KitchenDetail;
 }
 
+/**
+ * Every piece of equipment any recipe asks for — the only things a kitchen may own
+ * (#81).
+ *
+ * Empty until the corpus has been read, which is a real answer rather than a failure:
+ * there is genuinely nothing legitimate to pick yet.
+ */
+export async function equipmentVocabulary(): Promise<string[]> {
+  const res = await apiFetch("/api/equipment");
+  if (!res.ok) throw failed(res.status, "load the equipment list");
+  return (await res.json()) as string[];
+}
+
 /** A freshly minted invite. Mirrors `kitchens::Invite`. */
 export interface KitchenInvite {
   token: string;
