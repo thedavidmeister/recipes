@@ -139,9 +139,20 @@
     session.isError ? "error" : session.isPending ? "checking" : "idle",
   );
 
-  // The first path segment is the section. Anything else has no business here.
+  /**
+   * Which leg of the meal you are on, or nothing at all.
+   *
+   * `pick · buy · cook · joy` is the shape of *a meal* — the four things you do to
+   * get one on the table, in order. It is not the app's navigation, and on a page
+   * that is not part of a meal it says something untrue: standing in your kitchen
+   * looking at the pantry, it offers to move you to "cook" as though a meal were
+   * underway, and marks one of the four as where you are when you are nowhere in it.
+   *
+   * So the arc appears while you are walking it, and not before.
+   */
+  const SECTIONS: Section[] = ["pick", "buy", "cook", "joy"];
   const current = $derived(
-    (page.url.pathname.split("/")[1] || "pick") as Section,
+    SECTIONS.find((s) => s === page.url.pathname.split("/")[1]),
   );
 
   async function signOut() {
@@ -169,7 +180,9 @@
     clearly than an <h1> repeating the same word underneath it would. So the
     line goes first and the page starts below it.
   -->
-  <Nav {current} />
+  {#if current}
+    <Nav {current} />
+  {/if}
 
   <div class="mx-auto max-w-2xl px-4 pb-16">
     <div class="flex justify-end gap-3 py-2 text-sm">
