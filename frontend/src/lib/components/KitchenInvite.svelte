@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Skeleton from "./Skeleton.svelte";
+  import Panel from "./Panel.svelte";
+  import Button from "./Button.svelte";
   import QrCode from "./QrCode.svelte";
 
   /**
@@ -61,7 +64,7 @@
 </script>
 
 <div class="pt-48 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <a href="/kitchens" class="text-stone-500 underline">Kitchens</a>
       <span aria-hidden="true">·</span>
@@ -77,18 +80,11 @@
         This link has run out. Links last two hours, so one that has been sitting open
         is no use to anybody — including whoever finds it.
       </p>
-      <button
-        type="button"
-        onclick={onRenew}
-        class="rounded-card bg-cocoa-500 text-cream-50 mt-6 w-full px-4 py-3 font-medium"
-      >
-        Make a new link
-      </button>
+      <div class="mt-6">
+        <Button onclick={onRenew} dot="cocoa">Make a new link</Button>
+      </div>
     {:else if status === "pending" || !link}
-      <div
-        class="rounded-card mt-4 h-10 w-full bg-stone-100"
-        aria-hidden="true"
-      ></div>
+      <div class="mt-4"><Skeleton /></div>
     {:else}
         <p class="mt-4 text-sm text-stone-600">
           Anyone who opens this joins {kitchen ?? "the kitchen"} — the same as
@@ -111,5 +107,5 @@
           </button>
         </div>
     {/if}
-  </div>
+  </Panel>
 </div>

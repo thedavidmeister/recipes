@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Alert from "./Alert.svelte";
+  import Notice from "./Notice.svelte";
   import type {
     CookRecipe,
     CookStatus,
@@ -59,23 +61,23 @@
   </header>
 
   {#if status === "error"}
-    <div class="rounded-card border border-paprika-500/30 bg-paprika-100 p-6">
+    <Alert>
       <p class="font-display text-stone-900">Couldn't load the recipe.</p>
       <p class="mt-1 text-sm text-stone-600">
         {error ?? "Something went wrong reaching the corpus."}
       </p>
-    </div>
+    </Alert>
   {:else if status === "pending"}
     <div class="rounded-card mb-5 aspect-video w-full bg-stone-100" aria-hidden="true"></div>
     <div class="rounded-pill h-6 w-56 bg-stone-100" aria-hidden="true"></div>
   {:else if !recipe}
-    <div class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center">
+    <Notice>
       <p class="font-display text-stone-900">Nothing to cook yet.</p>
       <p class="mt-1 text-sm text-stone-600">
         Pick something first — once the group agrees on a recipe, the method shows
         up here.
       </p>
-    </div>
+    </Notice>
   {:else}
     {#if recipe.image}
       <img

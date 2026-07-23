@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Skeleton from "./Skeleton.svelte";
+  import Panel from "./Panel.svelte";
+  import Button from "./Button.svelte";
   import type { Voter } from "$lib/pick";
   import QrCode from "./QrCode.svelte";
 
@@ -49,7 +52,7 @@
 </script>
 
 <div class="pt-32 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="bg-pesto-500 size-2.5 rounded-full" aria-hidden="true"></span>
       Meal plan
@@ -60,10 +63,7 @@
         {error ?? "Couldn't open this meal plan."}
       </p>
     {:else if status === "pending"}
-      <div
-        class="rounded-card mt-4 h-10 w-full bg-stone-100"
-        aria-hidden="true"
-      ></div>
+      <div class="mt-4"><Skeleton /></div>
     {:else}
       <p class="mt-4 text-sm text-stone-600">
         {voters.length === 1
@@ -95,18 +95,14 @@
       {/if}
 
       {#if host}
-        <button
-          type="button"
-          onclick={onStart}
-          class="rounded-card bg-cocoa-500 text-cream-50 mt-8 w-full px-4 py-3 font-medium"
-        >
-          Start swiping
-        </button>
+        <div class="mt-8">
+          <Button onclick={onStart} dot="pesto">Start swiping</Button>
+        </div>
       {:else}
         <p class="mt-8 text-sm text-stone-500">
           Waiting for whoever started this to begin.
         </p>
       {/if}
     {/if}
-  </div>
+  </Panel>
 </div>

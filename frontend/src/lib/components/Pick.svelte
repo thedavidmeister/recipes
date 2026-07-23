@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Alert from "./Alert.svelte";
+  import Notice from "./Notice.svelte";
+  import Panel from "./Panel.svelte";
   import type { PickStatus, RecipeCard } from "$lib/types";
 
   /**
@@ -41,7 +44,7 @@
 </script>
 
 <div class="pt-32 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
   <header class="mb-6 flex items-center justify-between gap-4">
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"></span>
@@ -58,19 +61,17 @@
   </header>
 
   {#if status === "error"}
-    <div class="rounded-card border border-paprika-500/30 bg-paprika-100 p-6">
+    <Alert>
       <p class="font-display text-stone-900">The pick dropped.</p>
       <p class="mt-1 text-sm text-stone-600">
         {error ?? "Could not reach the room."}
       </p>
-    </div>
+    </Alert>
   {:else if status === "connecting"}
-    <div
-      class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
-    >
+    <Notice>
       <p class="font-display text-stone-900">Starting a pick…</p>
       <p class="mt-1 text-sm text-stone-600">Catching up on the votes so far.</p>
-    </div>
+    </Notice>
   {:else}
     {#if status === "reconnecting"}
       <p
@@ -82,14 +83,12 @@
     {/if}
 
     {#if !card}
-      <div
-        class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
-      >
+      <Notice>
         <p class="font-display text-stone-900">Finding more recipes…</p>
         <p class="mt-1 text-sm text-stone-600">
           A pick keeps going until everyone agrees — the next card is on its way.
         </p>
-      </div>
+      </Notice>
     {:else}
       <article
         class="rounded-card overflow-hidden border border-stone-200 bg-cream-100"
@@ -134,5 +133,5 @@
       </p>
     </footer>
   {/if}
-</div>
+</Panel>
 </div>
