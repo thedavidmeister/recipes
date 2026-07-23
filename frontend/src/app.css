@@ -193,49 +193,118 @@
   }
 }
 
-/* Page transitions (SPA navigation). The hook lives in the root layout and picks the
-   directions; this is the motion itself. The outgoing page slides off one way and the
-   incoming one arrives from another, so moving between a kitchen and its pantry reads
-   as travel rather than a repaint. Anyone who has asked their system for less motion
-   gets none.
+/* Page transitions (SPA navigation). The hook in the root layout picks a direction
+   for each half and puts it on the root element as a class; this is the motion.
+
+   Directions are classes rather than custom properties on purpose. A view transition
+   runs in its own pseudo-element tree, and custom properties do not reliably inherit
+   into it — Safari does not, so `translate(var(--x), var(--y))` silently became
+   `translate(0, 0)` there and the whole thing collapsed to the bare opacity fade that
+   was left, which reads as the page blinking out. A class selector on the originating
+   element resolves the same way in every engine.
 
    What slides is the *page*, not the room. A view transition captures the whole page
    as one image unless an element is named, in which case it is lifted out and animated
-   on its own — so naming the backdrop is what excludes it from the sliding snapshot
-   and leaves it hanging still while the content moves across it. The floating controls
-   are named for the same reason: they belong to the app rather than to the page under
-   them, and something that is always there should not leave and come back. */
+   on its own — so naming the backdrop excludes it from the sliding snapshot and leaves
+   it hanging still while the content moves across it. The floating controls are named
+   for the same reason: they belong to the app rather than to the page under them.
+
+   Reduced motion is honoured in the hook, which skips the transition altogether — an
+   `animation: none` here would still swap the two snapshots abruptly, which is the
+   flicker it was meant to avoid. */
 ::view-transition-old(page-backdrop),
 ::view-transition-new(page-backdrop),
 ::view-transition-old(app-controls),
 ::view-transition-new(app-controls) {
   animation: none;
-  /* Both snapshots occupy the same place; without this the outgoing one fades. */
   mix-blend-mode: normal;
 }
-@keyframes page-slide-out {
+
+@keyframes page-exit-left {
   to {
-    transform: translate(var(--page-exit-x, 0), var(--page-exit-y, 0));
+    transform: translateX(-100%);
     opacity: 0;
   }
 }
-@keyframes page-slide-in {
+@keyframes page-exit-right {
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+@keyframes page-exit-up {
+  to {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+@keyframes page-exit-down {
+  to {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes page-enter-left {
   from {
-    transform: translate(var(--page-enter-x, 0), var(--page-enter-y, 0));
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+@keyframes page-enter-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+@keyframes page-enter-up {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+@keyframes page-enter-down {
+  from {
+    transform: translateY(100%);
     opacity: 0;
   }
 }
 
 ::view-transition-old(root) {
-  animation: page-slide-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  animation-fill-mode: both;
+  animation-name: page-exit-left;
 }
 ::view-transition-new(root) {
-  animation: page-slide-in 300ms cubic-bezier(0, 0, 0.2, 1) both;
+  animation-duration: 300ms;
+  animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  animation-fill-mode: both;
+  animation-name: page-enter-right;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  ::view-transition-old(root),
-  ::view-transition-new(root) {
-    animation: none;
-  }
+:root.page-exit-left::view-transition-old(root) {
+  animation-name: page-exit-left;
+}
+:root.page-exit-right::view-transition-old(root) {
+  animation-name: page-exit-right;
+}
+:root.page-exit-up::view-transition-old(root) {
+  animation-name: page-exit-up;
+}
+:root.page-exit-down::view-transition-old(root) {
+  animation-name: page-exit-down;
+}
+
+:root.page-enter-left::view-transition-new(root) {
+  animation-name: page-enter-left;
+}
+:root.page-enter-right::view-transition-new(root) {
+  animation-name: page-enter-right;
+}
+:root.page-enter-up::view-transition-new(root) {
+  animation-name: page-enter-up;
+}
+:root.page-enter-down::view-transition-new(root) {
+  animation-name: page-enter-down;
 }
