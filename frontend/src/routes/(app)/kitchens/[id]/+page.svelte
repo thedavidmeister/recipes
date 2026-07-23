@@ -24,11 +24,6 @@
     detail.isError ? "error" : detail.isPending ? "pending" : "ready",
   );
 
-  const inviteLink = $derived(
-    detail.data && typeof window !== "undefined"
-      ? `${window.location.origin}/kitchens?join=${detail.data.invite_token}`
-      : undefined,
-  );
 
   /** Start a meal plan for this kitchen; its lobby is where the deciders gather. */
   async function planMeal() {
@@ -53,7 +48,6 @@
 <Kitchen
   {status}
   onPlan={planMeal}
-  {inviteLink}
   kitchen={detail.data}
   error={detail.error instanceof Error ? detail.error.message : undefined}
 />

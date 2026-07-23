@@ -10,6 +10,10 @@
    * after them, so a list with nothing in it is not a thing that happens. The one at
    * the top is that kitchen — the one the app works in until you open another.
    *
+   * One list, because there is one kind of kitchen. A kitchen you were invited into is
+   * as much yours as the one you made: everyone in it is an owner of it, and being a
+   * guest is something you are at a *meal*, not in a room.
+   *
    * `actionError` is what came back from redeeming an invite link, which lands on this
    * page rather than a page of its own.
    */
@@ -22,8 +26,6 @@
 
   let { status, kitchens = [], error, actionError }: Props = $props();
 
-  const owned = $derived(kitchens.filter((k) => k.role === "owner"));
-  const guest = $derived(kitchens.filter((k) => k.role !== "owner"));
 </script>
 
 <div class="pt-48 pb-16">
@@ -44,10 +46,9 @@
         <p role="alert" class="mt-3 text-sm text-paprika-500">{actionError}</p>
       {/if}
 
-      {#snippet picker(label: string, items: KitchenSummary[])}
+      {#snippet picker(items: KitchenSummary[])}
         {#if items.length}
-          <p class="mt-5 mb-2 text-xs text-stone-500">{label}</p>
-          <ul class="flex flex-col gap-2">
+          <ul class="mt-5 flex flex-col gap-2">
             {#each items as k (k.id)}
               <li>
                 <a
@@ -67,8 +68,7 @@
           </ul>
         {/if}
       {/snippet}
-      {@render picker("Your kitchens", owned)}
-      {@render picker("Friends' kitchens", guest)}
+      {@render picker(kitchens)}
 
       <a
         href="/kitchens/new"

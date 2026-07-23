@@ -15,7 +15,6 @@ export const Ready: Story = {
   args: {
     status: "ready",
     kitchen: kitchenDetail(),
-    inviteLink: "https://recipes.lehlehleh.com/kitchens?join=a1b2c3d4e5f6a7b8",
   },
 };
 

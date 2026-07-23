@@ -236,26 +236,22 @@ export type HealthStatus = "pending" | "error" | "forbidden" | "ready";
 export interface KitchenSummary {
   id: string;
   name: string;
-  /** The caller's role: `"owner"` | `"guest"`. */
-  role: string;
   /** Whether this is the caller's primary — the one assumed unless they switch. */
   is_primary: boolean;
 }
 
 /** A member of a kitchen. Mirrors `kitchens::Member` — identity is the Telegram id;
- * `username` is a display convenience and may be absent. */
+ * `username` is a display convenience and may be absent. There is no role: everyone in
+ * a kitchen is an owner of it. Guests belong to a *meal*, not to the room. */
 export interface KitchenMember {
   telegram_user_id: string;
   username: string | null;
-  role: string;
 }
 
-/** A kitchen in full. Mirrors `kitchens::KitchenDetail`. `role` is the caller's, so
- * the UI can gate owner-only affordances. */
+/** A kitchen in full. Mirrors `kitchens::KitchenDetail`. */
 export interface KitchenDetail {
   id: string;
   name: string;
-  role: string;
   /** Whether this is the caller's primary. */
   is_primary: boolean;
   invite_token: string;
