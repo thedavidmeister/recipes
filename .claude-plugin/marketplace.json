@@ -9,7 +9,7 @@
     {
       "name": "recipes-enrich",
       "source": "./plugins/recipes-enrich",
-      "description": "The ingredient-enrichment worker: a fixed pull -> read -> push loop that reads a recipe's raw ingredient lines into structured measures, using recipe-backend as its only I/O."
+      "description": "The corpus enrichment worker: fixed pull -> read -> push loops that read a recipe's ingredient lines into structured measures, its method into a step DAG, and the equipment it requires \u2014 using recipe-backend as its only I/O."
     }
   ]
 }
