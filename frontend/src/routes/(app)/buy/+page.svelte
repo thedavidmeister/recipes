@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resource } from "$lib/resource";
   import { createQuery } from "@tanstack/svelte-query";
   import { getBuyList, loadChecks, saveChecks } from "$lib/buy";
   import type { BuyStatus } from "$lib/types";
@@ -13,15 +14,12 @@
    * Turso (the corpus is public), so a lapsed session doesn't 401 it — the layout
    * already gates the shell.
    */
-  const list = createQuery(() => ({
+  const list = resource(() => ({
     queryKey: ["buy"],
     queryFn: () => getBuyList(),
     staleTime: Infinity,
   }));
 
-  const status = $derived<BuyStatus>(
-    list.isError ? "error" : list.isPending ? "pending" : "ready",
-  );
 
   // The shopping checklist — which ingredients are already in the basket. Owned
   // here and persisted per recipe, so it survives a reload mid-shop.
@@ -54,9 +52,9 @@
 </script>
 
 <Buy
-  {status}
+  status={list.status}
   recipe={list.data}
-  error={list.error instanceof Error ? list.error.message : undefined}
+  error={list.error}
   {checked}
   onToggle={toggle}
 />

@@ -3,6 +3,7 @@
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { me, logout, botLink } from "$lib/auth";
   import type { LoginStatus, Section } from "$lib/types";
+  import { loginStatus } from "$lib/resource";
   import Login from "$lib/components/Login.svelte";
   import Nav from "$lib/components/Nav.svelte";
   import MusicSwitch from "$lib/components/MusicSwitch.svelte";
@@ -136,9 +137,7 @@
   }));
 
   const authed = $derived(!!session.data);
-  const loginStatus = $derived<LoginStatus>(
-    session.isError ? "error" : session.isPending ? "checking" : "idle",
-  );
+  const status = $derived<LoginStatus>(loginStatus(session));
 
   /**
    * Which leg of the meal you are on, or nothing at all.
@@ -171,7 +170,7 @@
 
 {#if !authed}
   <Login
-    status={loginStatus}
+    status={status}
     link={botLink()}
     error={session.error instanceof Error ? session.error.message : undefined}
   />

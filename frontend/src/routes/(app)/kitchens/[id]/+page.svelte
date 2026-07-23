@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resource } from "$lib/resource";
   import { createQuery } from "@tanstack/svelte-query";
   import { page } from "$app/state";
   import {
@@ -14,14 +15,11 @@
   /** One kitchen (#72). The id comes from the route, so there is no selection state. */
   const id = $derived(page.params.id ?? "");
 
-  const detail = createQuery(() => ({
+  const detail = resource(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
   }));
 
-  const status = $derived<KitchensStatus>(
-    detail.isError ? "error" : detail.isPending ? "pending" : "ready",
-  );
 
 
   /** Start a meal plan for this kitchen; its lobby is where the deciders gather. */
@@ -45,8 +43,8 @@
 </script>
 
 <Kitchen
-  {status}
+  status={detail.status}
   onPlan={planMeal}
   kitchen={detail.data}
-  error={detail.error instanceof Error ? detail.error.message : undefined}
+  error={detail.error}
 />
