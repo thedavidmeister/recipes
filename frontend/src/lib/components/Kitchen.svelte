@@ -1,4 +1,8 @@
 <script lang="ts">
+  import RowLink from "./RowLink.svelte";
+  import Skeleton from "./Skeleton.svelte";
+  import Panel from "./Panel.svelte";
+  import Button from "./Button.svelte";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
 
   /**
@@ -24,7 +28,7 @@
 </script>
 
 <div class="pt-48 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <a href="/kitchens" class="text-sm text-stone-500 underline">← Kitchens</a>
 
     {#if status === "error" || (status === "ready" && !kitchen)}
@@ -32,7 +36,7 @@
         {error ?? "Couldn't open this kitchen."}
       </p>
     {:else if status === "pending" || !kitchen}
-      <div class="rounded-card mt-4 h-10 w-full bg-stone-100" aria-hidden="true"></div>
+      <div class="mt-4"><Skeleton /></div>
     {:else}
       <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">
         {kitchen.name}
@@ -43,51 +47,30 @@
         </p>
       {/if}
 
-      <button
-        type="button"
-        onclick={onPlan}
-        class="rounded-card font-display bg-cocoa-500 text-cream-50 mt-5 flex w-full items-center justify-between px-4 py-3"
-      >
-        Plan a meal here
-        <span class="text-cream-200 text-sm">→</span>
-      </button>
+      <div class="mt-5">
+        <Button onclick={onPlan} dot="pesto">Plan a meal here</Button>
+      </div>
 
       <ul class="mt-5 flex flex-col gap-2">
         <li>
-          <a
-            href="/kitchens/{kitchen.id}/name"
-            class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
-          >
-            Rename
-            <span class="text-sm text-stone-400">→</span>
-          </a>
+          <RowLink href="/kitchens/{kitchen.id}/name">
+          Rename
+        </RowLink>
         </li>
         <li>
-          <a
-            href="/kitchens/{kitchen.id}/invite"
-            class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
-          >
-            Invite someone
-            <span class="text-sm text-stone-400">→</span>
-          </a>
+          <RowLink href="/kitchens/{kitchen.id}/invite">
+          Invite someone
+        </RowLink>
         </li>
         <li>
-          <a
-            href="/kitchens/{kitchen.id}/equipment"
-            class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
-          >
-            Equipment
-            <span class="text-sm text-stone-400">{kitchen.equipment.length} →</span>
-          </a>
+          <RowLink href="/kitchens/{kitchen.id}/equipment" trailing={kitchen.equipment.length}>
+          Equipment
+        </RowLink>
         </li>
         <li>
-          <a
-            href="/kitchens/{kitchen.id}/pantry"
-            class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
-          >
-            Pantry
-            <span class="text-sm text-stone-400">{kitchen.pantry.length} →</span>
-          </a>
+          <RowLink href="/kitchens/{kitchen.id}/pantry" trailing={kitchen.pantry.length}>
+          Pantry
+        </RowLink>
         </li>
       </ul>
 
@@ -101,5 +84,5 @@
       </ul>
 
     {/if}
-  </div>
+  </Panel>
 </div>

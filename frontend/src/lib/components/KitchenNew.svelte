@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Panel from "./Panel.svelte";
+  import Button from "./Button.svelte";
   /**
    * Making a kitchen (#72) — a page, because it is a thing you are doing rather than a
    * corner of the list you are looking at.
@@ -32,7 +34,7 @@
 </script>
 
 <div class="pt-48 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <a href="/kitchens" class="text-stone-500 underline">Kitchens</a>
       <span aria-hidden="true">·</span>
@@ -54,13 +56,11 @@
         <p role="alert" class="text-sm text-paprika-500">{error}</p>
       {/if}
 
-      <button
-        type="submit"
-        disabled={saving}
-        class="rounded-card bg-cocoa-500 px-4 py-3 font-medium text-cream-50"
-      >
+      <div>
+        <Button type="submit" disabled={saving} dot="cocoa">
         {saving ? "Making it…" : "Create kitchen"}
-      </button>
+        </Button>
+      </div>
     </form>
-  </div>
+  </Panel>
 </div>

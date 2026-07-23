@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Button from "./Button.svelte";
   /**
    * The design system, as a page you can look at. Not shipped in the app — it is
    * the reference we screenshot and argue about.
@@ -434,22 +435,11 @@
 
       <!-- Buttons -->
       <div class="mt-6 flex flex-wrap items-center gap-3">
-        <button
-          class="bg-cream-50 flex items-center gap-2 rounded-xl border-2 border-stone-300 px-7 py-3 text-lg font-semibold text-stone-900 transition hover:border-stone-400"
-        >
-          <span class="bg-pesto-500 size-2.5 rounded-full"></span>
-          Cook this
-        </button>
-        <button
-          class="bg-cream-100 rounded-xl border border-stone-300 px-7 py-3 text-lg font-semibold text-stone-700 transition hover:border-stone-400"
-        >
-          Maybe later
-        </button>
-        <button
-          class="rounded-xl px-4 py-3 text-lg font-medium text-stone-500 hover:text-stone-900"
-        >
-          skip
-        </button>
+        <!-- The real component, not a copy of it: a swatch that restates the markup
+             is a swatch that goes quietly out of date. -->
+        <Button dot="pesto">Cook this</Button>
+        <Button variant="secondary">Maybe later</Button>
+        <Button variant="quiet">skip</Button>
       </div>
 
       <!-- A card -->

@@ -1,4 +1,8 @@
 <script lang="ts">
+  import Button from "./Button.svelte";
+  import RowLink from "./RowLink.svelte";
+  import Skeleton from "./Skeleton.svelte";
+  import Panel from "./Panel.svelte";
   import type { KitchenSummary, KitchensStatus } from "$lib/types";
 
   /**
@@ -29,7 +33,7 @@
 </script>
 
 <div class="pt-48 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <p class="font-display flex items-center gap-2 text-stone-600">
       <span class="size-2.5 rounded-full bg-cocoa-500" aria-hidden="true"></span>
       Kitchens
@@ -40,7 +44,7 @@
         {error ?? "Couldn't load your kitchens."}
       </p>
     {:else if status === "pending"}
-      <div class="rounded-card mt-4 h-10 w-full bg-stone-100" aria-hidden="true"></div>
+      <div class="mt-4"><Skeleton /></div>
     {:else}
       {#if actionError}
         <p role="alert" class="mt-3 text-sm text-paprika-500">{actionError}</p>
@@ -51,18 +55,14 @@
           <ul class="mt-5 flex flex-col gap-2">
             {#each items as k (k.id)}
               <li>
-                <a
-                  href="/kitchens/{k.id}"
-                  class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
-                >
-                  <span class="flex items-baseline gap-2">
+                <RowLink href="/kitchens/{k.id}">
+          <span class="flex items-baseline gap-2">
                     {k.name}
                     {#if k.is_primary}
                       <span class="text-xs text-stone-500">yours by default</span>
                     {/if}
                   </span>
-                  <span class="text-sm text-stone-400">→</span>
-                </a>
+        </RowLink>
               </li>
             {/each}
           </ul>
@@ -70,13 +70,9 @@
       {/snippet}
       {@render picker(kitchens)}
 
-      <a
-        href="/kitchens/new"
-        class="rounded-card font-display mt-6 flex items-center justify-between bg-cocoa-500 px-4 py-3 text-cream-50"
-      >
-        New kitchen
-        <span class="text-sm text-cream-200">→</span>
-      </a>
+      <div class="mt-6">
+        <Button href="/kitchens/new" dot="cocoa">New kitchen</Button>
+      </div>
     {/if}
-  </div>
+  </Panel>
 </div>

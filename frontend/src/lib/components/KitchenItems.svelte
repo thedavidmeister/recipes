@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Skeleton from "./Skeleton.svelte";
+  import Panel from "./Panel.svelte";
   import type { KitchensStatus } from "$lib/types";
 
   /**
@@ -54,14 +56,14 @@
 </script>
 
 <div class="pt-48 pb-16">
-  <div class="rounded-card bg-cream-50 p-6">
+  <Panel>
     <a href={backHref} class="text-sm text-stone-500 underline">← Kitchen</a>
     <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">{title}</h1>
 
     {#if status === "error"}
       <p class="mt-4 text-sm text-stone-600">{error ?? `Couldn't load the ${title.toLowerCase()}.`}</p>
     {:else if status === "pending"}
-      <div class="rounded-card mt-4 h-10 w-full bg-stone-100" aria-hidden="true"></div>
+      <div class="mt-4"><Skeleton /></div>
     {:else}
       {#if actionError}
         <p role="alert" class="mt-3 text-sm text-paprika-500">{actionError}</p>
@@ -101,5 +103,5 @@
         </button>
       </form>
     {/if}
-  </div>
+  </Panel>
 </div>
