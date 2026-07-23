@@ -25,6 +25,8 @@ mod db;
 mod derive;
 mod enrich;
 mod enrich_api;
+mod equipment;
+mod equipment_api;
 mod error;
 mod ingest;
 mod kitchens;
@@ -135,6 +137,8 @@ pub fn app(state: AppState) -> Router {
         // reading a recipe's method into a step DAG.
         .route("/enrich/steps/pending", get(step_api::pending))
         .route("/enrich/steps/results", post(step_api::results))
+        .route("/enrich/equipment/pending", get(equipment_api::pending))
+        .route("/enrich/equipment/results", post(equipment_api::results))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -169,6 +173,8 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens/{id}", get(kitchens::get))
         .route("/kitchens/{id}/name", post(kitchens::rename))
         .route("/kitchens/{id}/invite", post(kitchens::invite))
+        // The vocabulary a kitchen picks from — a person's list, so session-gated.
+        .route("/equipment", get(equipment_api::vocabulary))
         .route(
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),
@@ -330,6 +336,29 @@ async fn main() -> anyhow::Result<()> {
             _ => {
                 eprintln!(
                     "usage: recipe-backend enrich pull [--limit N] | recipe-backend enrich push"
+                );
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+
+    // The equipment queue's worker side (#81) — same shape again, another path.
+    if std::env::args().nth(1).as_deref() == Some("equipment") {
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                equipment_api::client::pull(limit).await?;
+            }
+            Some("push") => equipment_api::client::push().await?,
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend equipment pull [--limit N] | recipe-backend equipment push"
                 );
                 std::process::exit(2);
             }

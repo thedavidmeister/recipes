@@ -244,6 +244,7 @@ mod tests {
             }],
             instructions: "Cook it.".to_string(),
             steps: Vec::new(),
+            equipment: Vec::new(),
             source_url: None,
             video_url: None,
         };

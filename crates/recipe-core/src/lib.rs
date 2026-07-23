@@ -7,6 +7,7 @@
 //! logic therefore runs server-side and in-browser without duplication.
 
 pub mod adapters;
+pub mod equipment;
 pub mod measure;
 pub mod models;
 pub mod step;

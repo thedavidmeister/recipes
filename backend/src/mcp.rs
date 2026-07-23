@@ -22,6 +22,7 @@ use rmcp::{
 use tracing_subscriber::EnvFilter;
 
 use crate::enrich_api::client;
+use crate::equipment_api::client as equipment_client;
 use crate::step_api::client as step_client;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -57,6 +58,24 @@ struct StepPushParams {
     /// skill for the StructuredStep shape: id, text, kind, seconds, after). Pass a
     /// native JSON array; a JSON-encoded string of one is also accepted. The app
     /// validates the graph before it writes anything.
+    readings: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EquipmentPullParams {
+    /// Maximum recipes to return. Omit for the server's default page size; the
+    /// worker loops until the queue is empty regardless.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EquipmentPushParams {
+    /// The equipment readings: a JSON array with one entry per recipe, each
+    /// `{ "source", "id", "equipment": [{ "item": "wok" }, ...] }`. Names must already
+    /// be normalised — lowercase, trimmed, single-spaced — because a kitchen selects
+    /// from this vocabulary and "Wok" would be a second, unmatchable entry beside
+    /// "wok". The app refuses an unnormalised reading rather than repairing it.
     readings: serde_json::Value,
 }
 
@@ -128,6 +147,44 @@ impl Enricher {
     }
 
     #[tool(
+        name = "equipment_pull",
+        description = "Get the recipes that still need a reading of the equipment they \
+                       require. Returns a JSON array of {source, id, instructions}; an \
+                       empty array means the queue is drained."
+    )]
+    async fn equipment_pull(
+        &self,
+        Parameters(EquipmentPullParams { limit }): Parameters<EquipmentPullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match equipment_client::pull_pending(limit).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "equipment_pull failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "equipment_push",
+        description = "Submit equipment readings: each recipe's {item} list, covering \
+                       preparation as well as cooking — a salad still needs a bowl, a \
+                       knife and a board. Names must be normalised (lowercase, \
+                       trimmed); the app refuses a reading that is not, and refuses an \
+                       empty one. Returns {accepted, derived, rejected}."
+    )]
+    async fn equipment_push(
+        &self,
+        Parameters(EquipmentPushParams { readings }): Parameters<EquipmentPushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match equipment_client::push_readings(readings).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "equipment_push failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
         name = "step_pull",
         description = "Get the recipes that still need a structured reading of their \
                        method. Returns a JSON array of {source, id, instructions, \
@@ -172,10 +229,10 @@ impl ServerHandler for Enricher {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Recipe corpus enrichment (#59): pull recipes that still need a \
-                 structured reading of their ingredient lines, then push the readings \
-                 back. The app validates and writes; these tools never touch the \
-                 database."
+                "Recipe corpus enrichment (#59): three queues — ingredient lines, \
+                 methods, and required equipment. Pull the recipes that still need a \
+                 reading, read them, push the readings back. The app validates and \
+                 writes; these tools never touch the database."
                     .to_string(),
             )
     }
