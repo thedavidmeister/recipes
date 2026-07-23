@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::measure::StructuredMeasure;
 use crate::equipment::RequiredEquipment;
+use crate::measure::StructuredMeasure;
 use crate::step::StructuredStep;
 
 /// A single ingredient line. `measure` is the quantity/unit when the source
