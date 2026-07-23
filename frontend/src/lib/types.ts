@@ -254,7 +254,6 @@ export interface KitchenDetail {
   name: string;
   /** Whether this is the caller's primary. */
   is_primary: boolean;
-  invite_token: string;
   members: KitchenMember[];
   equipment: string[];
   pantry: string[];

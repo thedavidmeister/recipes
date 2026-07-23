@@ -74,14 +74,14 @@ pub struct Member {
     pub username: Option<String>,
 }
 
-/// A kitchen in full — members, equipment, pantry, and the invite to share.
+/// A kitchen in full — who is in it and what it holds. No invite: one is minted on
+/// request and lives for two hours, so there is nothing standing to hand out here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KitchenDetail {
     pub id: String,
     pub name: String,
     /// Whether this is the **caller's** primary.
     pub is_primary: bool,
-    pub invite_token: String,
     pub members: Vec<Member>,
     pub equipment: Vec<String>,
     pub pantry: Vec<String>,
@@ -169,7 +169,54 @@ pub async fn rename(
         .map(Json)
 }
 
-/// `POST /api/kitchens/join` — join a kitchen by its invite token, as a guest.
+/// How long an invite is good for. Long enough to hand someone a phone or send a
+/// message; short enough that a link which escapes is a problem that ends.
+const INVITE_TTL_SECS: i64 = 2 * 60 * 60;
+
+/// How far another process's clock may disagree with ours before we treat what it
+/// wrote as impossible rather than merely early. Generous enough that ordinary drift
+/// between machines is never mistaken for nonsense.
+const CLOCK_SKEW_GRACE_SECS: i64 = 5 * 60;
+
+/// Seconds since the epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// A freshly minted invite. The token is returned **once**, here, and never stored in
+/// a form it could be read back out of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Invite {
+    pub token: String,
+    /// When it stops working, so the page can say so rather than imply forever.
+    pub expires_at: i64,
+}
+
+/// `POST /api/kitchens/{id}/invite` — mint an invite to this kitchen. Members only.
+///
+/// Minted per ask rather than kept on the kitchen. A standing token is a key under the
+/// mat: it outlives the occasion it was shared for, and since everyone in a kitchen is
+/// an owner of it, anyone who ever saw the link would keep full access forever.
+pub async fn invite(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<Invite>, AppError> {
+    let db = state.db()?;
+    require_member(&db, &id, &user.telegram_user_id).await?;
+
+    let token = mint(16);
+    let expires_at = now() + INVITE_TTL_SECS;
+    store_invite(&db, &token, &id, &user.telegram_user_id, expires_at)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(Invite { token, expires_at }))
+}
+
+/// `POST /api/kitchens/join` — join a kitchen by an invite, as a member like any other.
 pub async fn join(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
@@ -303,10 +350,9 @@ async fn require_member(conn: &Connection, kitchen_id: &str, user: &str) -> Resu
 /// Create a kitchen owned by `owner` and seat the owner as its first member. Returns
 /// the new kitchen's id.
 ///
-/// Both writes go in one transaction. A kitchen row without its owner's membership row
-/// is a kitchen nobody is in — `list_kitchens` joins `kitchen_members`, so it shows up
-/// for no one, while its `invite_token` is live and would seat a guest into a kitchen
-/// with no owner.
+/// Both writes go in one transaction. A kitchen row without its membership row is a
+/// kitchen nobody is in: `list_kitchens` joins `kitchen_members`, so it would show up
+/// for no one and be reachable by no one.
 async fn create_kitchen(conn: &Connection, name: &str, owner: &str) -> anyhow::Result<String> {
     create_owned(conn, name, owner, false).await
 }
@@ -319,11 +365,10 @@ async fn create_owned(
     primary: bool,
 ) -> anyhow::Result<String> {
     let id = mint(16);
-    let token = mint(16);
     let tx = conn.transaction().await?;
     tx.execute(
-        "INSERT INTO kitchens (id, name, owner_id, invite_token) VALUES (?1, ?2, ?3, ?4)",
-        libsql::params![id.clone(), name.to_owned(), owner.to_owned(), token],
+        "INSERT INTO kitchens (id, name, owner_id) VALUES (?1, ?2, ?3)",
+        libsql::params![id.clone(), name.to_owned(), owner.to_owned()],
     )
     .await?;
     tx.execute(
@@ -433,7 +478,90 @@ async fn list_kitchens(conn: &Connection, user: &str) -> anyhow::Result<Vec<Kitc
     Ok(out)
 }
 
-/// Join a kitchen by its invite token, as a guest. Idempotent: an existing member
+/// Mint an invite to `user`'s primary kitchen, for the Telegram bot (#25).
+///
+/// The bot is a person-facing surface like any other, so it goes through the same
+/// guarantees rather than around them: the primary is made if it does not exist, and
+/// the invite it returns is the same short-lived, hash-stored thing the web page gets.
+/// Returns the kitchen's name alongside the token, so the reply can say what is being
+/// handed out.
+pub(crate) async fn primary_invite(
+    conn: &Connection,
+    user: &str,
+    username: Option<&str>,
+) -> anyhow::Result<Option<(String, String, i64)>> {
+    ensure_primary(conn, user, username).await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT k.id, k.name
+             FROM kitchen_members m JOIN kitchens k ON k.id = m.kitchen_id
+             WHERE m.user_id = ?1 AND m.is_primary = 1",
+            libsql::params![user.to_owned()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let id: String = row.get(0)?;
+    let name: String = row.get(1)?;
+
+    let token = mint(16);
+    let expires_at = now() + INVITE_TTL_SECS;
+    store_invite(conn, &token, &id, user, expires_at).await?;
+    Ok(Some((name, token, expires_at)))
+}
+
+/// Store an invite by its hash and both of its times, and clear out any that have died.
+///
+/// The token itself is never written down: the hash is the lookup key, exactly as for
+/// sessions and login links (#25), so the database cannot hand anybody a working
+/// invite. Sweeping here rather than on a timer keeps dead rows from accumulating
+/// without anything having to run on a schedule — the table only grows while invites
+/// are live.
+///
+/// The mint time is recorded as well as the expiry, because `now + 2h` trusts the
+/// clock in one direction it should not: a clock running fast mints a link that
+/// outlives the two hours it promised. Redemption refuses anything created in the
+/// future, so once the clock is corrected such an invite is dead rather than
+/// long-lived — and the sweep collects it, because an expiry that far out is one no
+/// honest mint could have written and one that would otherwise never lapse. The grace
+/// window keeps ordinary drift between machines from looking like that.
+async fn store_invite(
+    conn: &Connection,
+    token: &str,
+    kitchen_id: &str,
+    created_by: &str,
+    expires_at: i64,
+) -> anyhow::Result<()> {
+    // Two kinds of dead: expired, and impossible. A real invite expires at most
+    // `INVITE_TTL_SECS` from the moment it was made, so one expiring beyond that came
+    // from a clock that was wrong — and, crucially, its expiry is never reached, so
+    // waiting for it to lapse would leave the row here forever. Both go.
+    let at = now();
+    conn.execute(
+        "DELETE FROM kitchen_invites
+         WHERE expires_at <= ?1 OR expires_at > ?2",
+        libsql::params![at, at + INVITE_TTL_SECS + CLOCK_SKEW_GRACE_SECS],
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO kitchen_invites
+             (token_hash, kitchen_id, created_by, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        libsql::params![
+            crate::auth::hash_secret(token),
+            kitchen_id.to_owned(),
+            created_by.to_owned(),
+            expires_at - INVITE_TTL_SECS,
+            expires_at
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Join a kitchen by an invite, as a member like any other. Idempotent: an existing member
 /// keeps their place. Returns the kitchen id, or `None` if no kitchen has that
 /// token.
 async fn join_by_token(
@@ -443,8 +571,9 @@ async fn join_by_token(
 ) -> anyhow::Result<Option<String>> {
     let mut rows = conn
         .query(
-            "SELECT id FROM kitchens WHERE invite_token = ?1",
-            libsql::params![token.to_owned()],
+            "SELECT kitchen_id FROM kitchen_invites
+             WHERE token_hash = ?1 AND created_at <= ?2 AND expires_at > ?2",
+            libsql::params![crate::auth::hash_secret(token), now()],
         )
         .await?;
     let Some(row) = rows.next().await? else {
@@ -509,7 +638,7 @@ async fn load_detail(
 
     let mut rows = conn
         .query(
-            "SELECT name, invite_token FROM kitchens WHERE id = ?1",
+            "SELECT name FROM kitchens WHERE id = ?1",
             libsql::params![kitchen_id.to_owned()],
         )
         .await?;
@@ -518,13 +647,11 @@ async fn load_detail(
         .await?
         .ok_or_else(|| anyhow::anyhow!("kitchen vanished mid-request: {kitchen_id}"))?;
     let name: String = row.get(0)?;
-    let invite_token: String = row.get(1)?;
 
     Ok(KitchenDetail {
         id: kitchen_id.to_owned(),
         name,
         is_primary,
-        invite_token,
         members: load_members(conn, kitchen_id).await?,
         equipment: load_items(conn, "kitchen_equipment", kitchen_id).await?,
         pantry: load_items(conn, "kitchen_pantry", kitchen_id).await?,
@@ -583,6 +710,136 @@ mod tests {
         let conn = db.connect().unwrap();
         crate::db::migrate(&conn).await.unwrap();
         conn
+    }
+
+    /// An invite works until it does not. This is the whole point of the change: a
+    /// link that escapes — a screenshot, a forwarded message — stops being a key.
+    #[tokio::test]
+    async fn an_expired_invite_opens_nothing() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "owner").await.unwrap();
+
+        let live = mint(16);
+        store_invite(&conn, &live, &id, "owner", now() + 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            join_by_token(&conn, &live, "friend")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str()),
+            "a live invite seats you"
+        );
+
+        let dead = mint(16);
+        store_invite(&conn, &dead, &id, "owner", now() - 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            join_by_token(&conn, &dead, "stranger").await.unwrap(),
+            None,
+            "an expired invite is not a door"
+        );
+    }
+
+    /// A clock running fast mints an invite that would outlive its two hours. Once the
+    /// clock is right, that invite claims to come from the future — and is refused,
+    /// rather than being honoured for however long the skew was.
+    #[tokio::test]
+    async fn an_invite_from_the_future_opens_nothing() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "owner").await.unwrap();
+
+        // What a clock an hour ahead would have written: minted "now + 1h", expiring
+        // an hour beyond the honest two.
+        let token = mint(16);
+        store_invite(&conn, &token, &id, "owner", now() + 3600 + INVITE_TTL_SECS)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            join_by_token(&conn, &token, "stranger").await.unwrap(),
+            None,
+            "an invite that has not been created yet is not a door"
+        );
+    }
+
+    /// A far-future invite is not merely refused, it is collected. Its expiry never
+    /// arrives, so leaving it to the ordinary sweep would leave it in the table for
+    /// good — the exact opposite of what the sweep is for.
+    #[tokio::test]
+    async fn the_sweep_collects_impossible_invites() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "owner").await.unwrap();
+
+        // A year out: no honest mint could have written this.
+        store_invite(&conn, &mint(16), &id, "owner", now() + 365 * 24 * 60 * 60)
+            .await
+            .unwrap();
+        // The next mint sweeps it, and keeps its own.
+        store_invite(&conn, &mint(16), &id, "owner", now() + INVITE_TTL_SECS)
+            .await
+            .unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM kitchen_invites WHERE kitchen_id = ?1",
+                libsql::params![id.clone()],
+            )
+            .await
+            .unwrap();
+        let left: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(
+            left, 1,
+            "the impossible one was collected, the honest one kept"
+        );
+    }
+
+    /// The token is not recoverable from the database — only its hash is stored, so a
+    /// leaked backup is not a set of working links.
+    #[tokio::test]
+    async fn only_the_hash_is_stored() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "owner").await.unwrap();
+        let token = mint(16);
+        store_invite(&conn, &token, &id, "owner", now() + 60)
+            .await
+            .unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT token_hash FROM kitchen_invites WHERE kitchen_id = ?1",
+                libsql::params![id.clone()],
+            )
+            .await
+            .unwrap();
+        let stored: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_ne!(stored, token, "the token itself must never be written down");
+        assert_eq!(stored, crate::auth::hash_secret(&token));
+    }
+
+    /// Minting sweeps what has died, so dead invites do not pile up unattended.
+    #[tokio::test]
+    async fn minting_clears_out_expired_invites() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "owner").await.unwrap();
+        store_invite(&conn, &mint(16), &id, "owner", now() - 1)
+            .await
+            .unwrap();
+        store_invite(&conn, &mint(16), &id, "owner", now() + 60)
+            .await
+            .unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM kitchen_invites WHERE kitchen_id = ?1",
+                libsql::params![id.clone()],
+            )
+            .await
+            .unwrap();
+        let live: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(live, 1, "the expired one was swept by the second mint");
     }
 
     /// Nobody has zero kitchens: the first ask mints a primary named after them, and
@@ -651,16 +908,10 @@ mod tests {
         let conn = conn().await;
         ensure_primary(&conn, "guest", Some("gina")).await.unwrap();
         let theirs = create_kitchen(&conn, "Their place", "owner").await.unwrap();
-        let token: String = {
-            let mut rows = conn
-                .query(
-                    "SELECT invite_token FROM kitchens WHERE id = ?1",
-                    libsql::params![theirs.clone()],
-                )
-                .await
-                .unwrap();
-            rows.next().await.unwrap().unwrap().get(0).unwrap()
-        };
+        let token = mint(16);
+        store_invite(&conn, &token, &theirs, "owner", now() + 60)
+            .await
+            .unwrap();
 
         join_by_token(&conn, &token, "guest").await.unwrap();
 
@@ -700,16 +951,10 @@ mod tests {
     async fn join_by_token_is_idempotent_and_guarded() {
         let conn = conn().await;
         let id = create_kitchen(&conn, "Beach house", "owner").await.unwrap();
-        let token: String = {
-            let mut rows = conn
-                .query(
-                    "SELECT invite_token FROM kitchens WHERE id = ?1",
-                    libsql::params![id.clone()],
-                )
-                .await
-                .unwrap();
-            rows.next().await.unwrap().unwrap().get(0).unwrap()
-        };
+        let token = mint(16);
+        store_invite(&conn, &token, &id, "owner", now() + 60)
+            .await
+            .unwrap();
 
         assert_eq!(
             join_by_token(&conn, &token, "guest1")

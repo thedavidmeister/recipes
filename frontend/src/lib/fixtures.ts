@@ -249,7 +249,6 @@ export function kitchenDetail(): KitchenDetail {
     id: "k1",
     name: "dave's kitchen",
     is_primary: true,
-    invite_token: "a1b2c3d4e5f6a7b8",
     members: [
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: null },
