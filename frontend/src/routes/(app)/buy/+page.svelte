@@ -17,7 +17,6 @@
     queryKey: ["buy"],
     queryFn: () => getBuyList(),
     staleTime: Infinity,
-    retry: false,
   }));
 
   const status = $derived<BuyStatus>(

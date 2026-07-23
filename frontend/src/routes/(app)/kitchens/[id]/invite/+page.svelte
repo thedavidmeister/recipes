@@ -18,13 +18,11 @@
   const detail = createQuery(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
-    retry: false,
   }));
 
   const invite = createQuery(() => ({
     queryKey: ["kitchen-invite", id],
     queryFn: () => mintInvite(id),
-    retry: false,
     staleTime: 0,
     gcTime: 0,
   }));

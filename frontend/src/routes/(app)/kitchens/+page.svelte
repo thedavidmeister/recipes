@@ -15,7 +15,6 @@
   const list = createQuery(() => ({
     queryKey: ["kitchens"],
     queryFn: listKitchens,
-    retry: false,
   }));
 
   const status = $derived<KitchensStatus>(

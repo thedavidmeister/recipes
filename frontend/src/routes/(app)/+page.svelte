@@ -16,7 +16,6 @@
   const list = createQuery(() => ({
     queryKey: ["kitchens"],
     queryFn: listKitchens,
-    retry: false,
   }));
 
   $effect(() => {

@@ -12,7 +12,6 @@
   const detail = createQuery(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
-    retry: false,
   }));
 
   const status = $derived<KitchensStatus>(

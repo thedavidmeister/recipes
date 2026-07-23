@@ -119,9 +119,11 @@
    * forget. `/auth/finish` is deliberately **outside** this group: it is how a
    * session is obtained, so gating it would deadlock the login.
    *
-   * The session is an HttpOnly cookie, so script cannot answer this locally;
-   * only the server knows. `retry: false` because a 401 is a legitimate answer
-   * ("nobody is logged in"), not a failure worth retrying.
+   * The session is an HttpOnly cookie, so script cannot answer this locally; only the
+   * server knows. A 401 is not an error here — `me()` returns null for it, because
+   * "nobody is logged in" is an answer rather than a fault. A request that never
+   * reaches the server is a different thing, and the shared retry policy waits that
+   * one out (see `retryTransient`).
    *
    * Polling while signed out is also how a tab notices a login: opening the
    * bot's link in the same browser sets the cookie, and the next poll simply
@@ -130,7 +132,6 @@
   const session = createQuery(() => ({
     queryKey: ["session"],
     queryFn: me,
-    retry: false,
     refetchInterval: (q) => (q.state.data ? false : 2000),
   }));
 
