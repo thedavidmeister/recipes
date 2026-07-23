@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
+import { text } from "./story-text";
 import Panel from "./Panel.svelte";
 
 const meta = {
@@ -10,4 +11,4 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** The surface everything readable sits on. */
-export const Default: Story = { args: { children: "Anything legible" as never } };
+export const Default: Story = { args: { children: text("Anything legible") } };
