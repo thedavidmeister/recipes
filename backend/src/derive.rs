@@ -15,6 +15,7 @@ use libsql::Connection;
 use recipe_core::{adapters, StructuredMeasure, StructuredStep};
 
 use crate::enrich;
+use crate::equipment as equipment_readings;
 use crate::recipes::upsert;
 use crate::steps;
 
@@ -48,6 +49,7 @@ pub async fn derive(
     // The step readings (#74/#75/#76), loaded once too — attached the same way, and
     // empty when nothing has been step-read (recipes then keep `steps: []`).
     let step_readings = steps::load(conn).await?;
+    let equipment_readings = equipment_readings::load(conn).await?;
 
     let mut rows = match source {
         Some(source) => {
@@ -77,6 +79,7 @@ pub async fn derive(
             source_url,
             &readings,
             &step_readings,
+            &equipment_readings,
             run_id,
             &mut report,
         )
@@ -100,6 +103,7 @@ pub async fn derive_recipes(
     // One load for the batch, same as `derive` — reattaching is then in-memory.
     let readings = enrich::load(conn).await?;
     let step_readings = steps::load(conn).await?;
+    let equipment_readings = equipment_readings::load(conn).await?;
 
     for (source, id) in recipes {
         let mut rows = conn
@@ -123,6 +127,7 @@ pub async fn derive_recipes(
             source_url,
             &readings,
             &step_readings,
+            &equipment_readings,
             run_id,
             &mut report,
         )
@@ -145,6 +150,7 @@ async fn normalize_and_upsert(
     source_url: Option<String>,
     readings: &HashMap<(String, String), Vec<StructuredMeasure>>,
     step_readings: &HashMap<(String, String), Vec<StructuredStep>>,
+    equipment_reads: &HashMap<(String, String), Vec<recipe_core::equipment::RequiredEquipment>>,
     run_id: i64,
     report: &mut Report,
 ) -> anyhow::Result<()> {
@@ -182,6 +188,14 @@ async fn normalize_and_upsert(
             &item.recipe.source,
             &item.recipe.id,
             &mut item.recipe.steps,
+        );
+        // And the equipment reading (#81), which is also the vocabulary a kitchen
+        // picks from — so a recipe that has not been read simply offers nothing.
+        equipment_readings::attach(
+            equipment_reads,
+            &item.recipe.source,
+            &item.recipe.id,
+            &mut item.recipe.equipment,
         );
         upsert(conn, &item.recipe, run_id).await?;
         report.derived += 1;

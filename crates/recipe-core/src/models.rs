@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::measure::StructuredMeasure;
+use crate::equipment::RequiredEquipment;
 use crate::step::StructuredStep;
 
 /// A single ingredient line. `measure` is the quantity/unit when the source
@@ -62,6 +63,13 @@ pub struct Recipe {
     /// before, no churn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StructuredStep>,
+    /// What the recipe needs you to own (#81).
+    ///
+    /// Empty until the equipment worker has read it — and, because a kitchen selects
+    /// only from what recipes ask for, an un-read recipe contributes nothing to that
+    /// vocabulary rather than contributing a guess.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equipment: Vec<RequiredEquipment>,
     /// Canonical URL of the recipe on its origin site, when known.
     pub source_url: Option<String>,
     pub video_url: Option<String>,

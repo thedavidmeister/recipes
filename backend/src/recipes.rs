@@ -145,6 +145,7 @@ mod tests {
             }],
             instructions: "Boil.".into(),
             steps: Vec::new(),
+            equipment: Vec::new(),
             source_url: None,
             video_url: None,
         }
@@ -163,6 +164,7 @@ mod tests {
             ingredients: vec![],
             instructions: String::new(),
             steps: Vec::new(),
+            equipment: Vec::new(),
             source_url: None,
             video_url: None,
         }
