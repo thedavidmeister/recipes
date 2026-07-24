@@ -2,7 +2,12 @@
   import { resource } from "$lib/resource";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { page } from "$app/state";
-  import { getKitchen, addPantry, removePantry } from "$lib/kitchens";
+  import {
+    getKitchen,
+    addPantry,
+    removePantry,
+    pantryVocabulary,
+  } from "$lib/kitchens";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
   import KitchenItems from "$lib/components/KitchenItems.svelte";
 
@@ -13,6 +18,15 @@
   const detail = resource(() => ({
     queryKey: ["kitchen", id],
     queryFn: () => getKitchen(id),
+  }));
+
+  /**
+   * What may be stocked at all. The pantry picks from what recipes cook with and the
+   * server refuses anything else, so a free field would be offering a failure.
+   */
+  const known = resource(() => ({
+    queryKey: ["pantry-vocabulary"],
+    queryFn: pantryVocabulary,
   }));
 
 
@@ -42,6 +56,7 @@
   status={detail.status}
   title="Pantry"
   items={detail.data?.pantry}
+  options={known.data ?? []}
   placeholder="Add to the pantry (rice, eggs…)"
   backHref="/kitchens/{id}"
   error={detail.error}

@@ -138,3 +138,16 @@ pub async fn vocabulary(
         .map_err(|e| AppError::Internal(format!("equipment vocabulary failed: {e}")))?;
     Ok(Json(items))
 }
+
+/// `GET /api/pantry` — every ingredient the corpus cooks with, the list a kitchen's
+/// pantry picks from. Session-gated for the same reason as the equipment list: a
+/// person's picker, revealing nothing they could not read out of the corpus.
+pub async fn pantry_vocabulary(
+    State(state): State<AppState>,
+    axum::Extension(_user): axum::Extension<crate::auth::CurrentUser>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let items = crate::enrich::vocabulary(&state.db()?)
+        .await
+        .map_err(|e| AppError::Internal(format!("pantry vocabulary failed: {e}")))?;
+    Ok(Json(items))
+}

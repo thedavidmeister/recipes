@@ -65,6 +65,18 @@ export async function equipmentVocabulary(): Promise<string[]> {
   return (await res.json()) as string[];
 }
 
+/**
+ * Every ingredient any recipe cooks with — the only things a pantry may hold (#72).
+ *
+ * Unlike the equipment list this has content today: it is drawn from the ingredient
+ * readings, which have been enriched for a long time.
+ */
+export async function pantryVocabulary(): Promise<string[]> {
+  const res = await apiFetch("/api/pantry");
+  if (!res.ok) throw failed(res.status, "load the pantry list");
+  return (await res.json()) as string[];
+}
+
 /** A freshly minted invite. Mirrors `kitchens::Invite`. */
 export interface KitchenInvite {
   token: string;

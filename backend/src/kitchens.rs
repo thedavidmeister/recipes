@@ -282,21 +282,26 @@ pub async fn remove_equipment(
 }
 
 /// `POST /api/kitchens/{id}/pantry` — add an ingredient on hand.
+/// A kitchen's pantry holds only ingredients some recipe cooks with (#72). Same
+/// reasoning as equipment: stock nothing uses could never change what you can make.
+/// Sourced from the ingredient readings (#11), which — unlike equipment — have long
+/// been enriched, so this vocabulary has content today rather than after a backfill.
 pub async fn add_pantry(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
     Json(body): Json<ItemBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    mutate_item(
-        &state,
-        &user,
-        &id,
-        "kitchen_pantry",
-        body.item.trim(),
-        Op::Add,
-    )
-    .await
+    let raw = body.item.trim();
+    let item = crate::enrich::normalise_known(&state.db()?, raw)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "{raw:?} is not an ingredient any recipe uses — pick from the list"
+            ))
+        })?;
+    mutate_item(&state, &user, &id, "kitchen_pantry", &item, Op::Add).await
 }
 
 /// `DELETE /api/kitchens/{id}/pantry?item=…` — remove an ingredient on hand.
