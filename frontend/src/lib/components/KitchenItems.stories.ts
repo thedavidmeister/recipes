@@ -50,12 +50,26 @@ export const NothingKnownYet: Story = {
   },
 };
 
+/** The pantry is also a picker (#72), and unlike equipment its list has content today:
+ * it comes from the ingredient readings, long enriched. */
 export const Pantry: Story = {
   args: {
     status: "ready",
     title: "Pantry",
     items: kitchenDetail().pantry,
     placeholder: "Add to the pantry (rice, eggs…)",
+    options: [
+      "butter",
+      "chicken",
+      "egg",
+      "flour",
+      "garlic",
+      "milk",
+      "olive oil",
+      "onion",
+      "rice",
+      "salt",
+    ],
     backHref: "/kitchens/k1",
   },
 };

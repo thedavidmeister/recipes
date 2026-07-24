@@ -175,6 +175,7 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens/{id}/invite", post(kitchens::invite))
         // The vocabulary a kitchen picks from — a person's list, so session-gated.
         .route("/equipment", get(equipment_api::vocabulary))
+        .route("/pantry", get(equipment_api::pantry_vocabulary))
         .route(
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),
