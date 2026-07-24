@@ -253,7 +253,7 @@ export function kitchenDetail(): KitchenDetail {
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: null },
     ],
-    equipment: ["Blender", "Cast-iron pan", "Oven", "Stand mixer"],
-    pantry: ["Basmati rice", "Eggs", "Olive oil", "Soy sauce"],
+    equipment: ["blender", "cast-iron pan", "oven", "stand mixer"],
+    pantry: ["basmati rice", "eggs", "olive oil", "soy sauce"],
   };
 }

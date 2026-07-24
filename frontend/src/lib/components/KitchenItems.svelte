@@ -49,6 +49,16 @@
 
   let value = $state("");
 
+  /**
+   * How a stored name is shown. The key a kitchen holds is normalised — lowercase, so
+   * it matches a recipe by the same name (#81) — but "olive oil" in a chip reads worse
+   * than "Olive oil". So the lowercase form is what is stored, matched and submitted,
+   * and this is only what a person sees. Sentence case, not title case: capitalising
+   * every word turns "olive oil" into "Olive Oil", which is a claim about proper nouns
+   * the data does not make.
+   */
+  const display = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
   /** What is left to offer: known items this kitchen does not already have. */
   const available = $derived(
     options?.filter((o) => !items.includes(o)) ?? [],
@@ -105,7 +115,7 @@
             <li
               class="rounded-pill flex items-center gap-2 border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-700"
             >
-              {item}
+              {display(item)}
               <button
                 type="button"
                 aria-label={`Remove ${item}`}
@@ -135,7 +145,7 @@
           {#if options}
             <datalist id="known-items">
               {#each matches as option (option)}
-                <option value={option}></option>
+                <option value={display(option)}></option>
               {/each}
             </datalist>
           {/if}
