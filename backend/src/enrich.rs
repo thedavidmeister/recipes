@@ -259,6 +259,39 @@ async fn current_ingredient_count(
 
 /// Load every recipe's readings into a map so [`crate::derive`] can reattach in
 /// memory — one query, not a lookup per recipe.
+/// Every distinct ingredient the corpus knows about, normalised and ordered — the
+/// vocabulary a kitchen's pantry picks from (#72, #81's ruling applied to stock).
+///
+/// Sourced from the model's reading (`structured.item`, e.g. "flour" pulled out of
+/// "1 cup flour"), not the raw line. And normalised on the way *out* rather than in,
+/// because — unlike equipment, whose readings must arrive normalised — ingredient
+/// readings predate that rule and were never required to converge: "Onion" and "onion"
+/// exist side by side in the corpus, and would otherwise be two pantry entries for one
+/// thing. `normalise` settles spelling only; it does not decide that "scallion" and
+/// "spring onion" are the same, which is a judgement no lookup should make silently.
+pub async fn vocabulary(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let readings = load(conn).await?;
+    let mut names: std::collections::BTreeSet<String> = readings
+        .into_values()
+        .flatten()
+        .map(|m| recipe_core::equipment::normalise(&m.item))
+        .filter(|n| !n.is_empty())
+        .collect();
+    Ok(std::mem::take(&mut names).into_iter().collect())
+}
+
+/// The vocabulary's answer for one name: its normalised form if some recipe uses that
+/// ingredient, `None` if none does. Mirrors the equipment check — a pantry may hold
+/// only what the corpus cooks with, so owning something no recipe uses could never
+/// change what you are able to make.
+pub async fn normalise_known(conn: &Connection, raw: &str) -> anyhow::Result<Option<String>> {
+    let wanted = recipe_core::equipment::normalise(raw);
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    Ok(vocabulary(conn).await?.into_iter().find(|k| *k == wanted))
+}
+
 pub async fn load(conn: &Connection) -> anyhow::Result<HashMap<RecipeKey, Vec<StructuredMeasure>>> {
     let mut rows = conn
         .query(
@@ -345,6 +378,66 @@ mod tests {
             measure: measure.map(str::to_owned),
             structured: None,
         }
+    }
+
+    /// The pantry vocabulary is every distinct ingredient the corpus reads, normalised
+    /// so spelling variants collapse, and ordered. This is the list a pantry picks from.
+    #[tokio::test]
+    async fn the_pantry_vocabulary_is_every_ingredient_once() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("Onion", None), ing("flour", None)]).await;
+        insert_recipe(&conn, "2", &[ing("onion", None)]).await;
+        submit(
+            &conn,
+            vec![
+                SubmittedReadings {
+                    source: "themealdb".into(),
+                    id: "1".into(),
+                    // The model reads a capitalised source line into a capitalised item;
+                    // the corpus was never made to normalise ingredient names.
+                    readings: vec![item_reading("Onion"), item_reading("flour")],
+                },
+                SubmittedReadings {
+                    source: "themealdb".into(),
+                    id: "2".into(),
+                    readings: vec![item_reading("onion")],
+                },
+            ],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            vocabulary(&conn).await.unwrap(),
+            vec!["flour", "onion"],
+            "Onion and onion are one pantry entry, not two"
+        );
+    }
+
+    /// A pantry may hold only what recipes cook with, and a typed capital is understood
+    /// — the strictness is about which ingredients exist, not spelling.
+    #[tokio::test]
+    async fn a_pantry_can_only_hold_what_recipes_use() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("garlic", None)]).await;
+        submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("garlic")],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            normalise_known(&conn, "Garlic").await.unwrap(),
+            Some("garlic".to_string())
+        );
+        assert_eq!(normalise_known(&conn, "unobtainium").await.unwrap(), None);
     }
 
     /// A reading of a line as just its item — enough to prove plumbing without
