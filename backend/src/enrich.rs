@@ -257,8 +257,6 @@ async fn current_ingredient_count(
 
 // --- Storage + the derive-time join. -------------------------------------------
 
-/// Load every recipe's readings into a map so [`crate::derive`] can reattach in
-/// memory — one query, not a lookup per recipe.
 /// Every distinct ingredient the corpus knows about, normalised and ordered — the
 /// vocabulary a kitchen's pantry picks from (#72, #81's ruling applied to stock).
 ///
@@ -292,6 +290,8 @@ pub async fn normalise_known(conn: &Connection, raw: &str) -> anyhow::Result<Opt
     Ok(vocabulary(conn).await?.into_iter().find(|k| *k == wanted))
 }
 
+/// Load every recipe's readings into a map so [`crate::derive`] can reattach in
+/// memory — one query, not a lookup per recipe.
 pub async fn load(conn: &Connection) -> anyhow::Result<HashMap<RecipeKey, Vec<StructuredMeasure>>> {
     let mut rows = conn
         .query(
