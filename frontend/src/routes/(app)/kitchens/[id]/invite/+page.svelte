@@ -56,6 +56,7 @@
 
 <KitchenInvite
   status={loaded.status}
+  backHref="/kitchens/{id}/settings"
   kitchen={detail.data?.name}
   {link}
   {remaining}

@@ -26,7 +26,6 @@
     queryFn: equipmentVocabulary,
   }));
 
-
   let actionError = $state<string | null>(null);
 
   function cache(k: KitchenDetail) {
@@ -55,7 +54,7 @@
   items={detail.data?.equipment}
   options={known.data ?? []}
   placeholder="Add equipment (blender, wok…)"
-  backHref="/kitchens/{id}"
+  backHref="/kitchens/{id}/settings"
   error={detail.error}
   actionError={actionError ?? undefined}
   {onAdd}
