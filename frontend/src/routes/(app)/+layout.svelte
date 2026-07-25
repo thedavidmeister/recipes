@@ -248,8 +248,10 @@
 
     <!-- The page slides; the chrome around it stays. Keying on the path swaps the
          page on navigation, and the leaving and arriving pages share one grid cell so
-         neither shoves the other down mid-cross. -->
-    <div class="grid">
+         neither shoves the other down mid-cross. `overflow-x-clip` is the slide's
+         window: the page travels its own width (see `pageSlide`), so it clears exactly
+         this box and the off-screen half never reaches out to grow a scrollbar. -->
+    <div class="grid overflow-x-clip">
       {#key page.url.pathname}
         <div
           class="col-start-1 row-start-1"
