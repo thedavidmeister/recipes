@@ -273,35 +273,42 @@ pub async fn complete(
     Json(req): Json<CompleteRequest>,
 ) -> Result<Response, AppError> {
     let hash = hash_secret(&req.c);
+    let hash = hash.as_str();
 
-    let mut rows = state
-        .db()?
-        .query(
-            "SELECT telegram_user_id, username, expires_at
-             FROM login_completions WHERE completion_hash = ?1",
-            libsql::params![hash.clone()],
-        )
+    let found = state
+        .with_db(move |db| async move {
+            let mut rows = db
+                .query(
+                    "SELECT telegram_user_id, username, expires_at
+                     FROM login_completions WHERE completion_hash = ?1",
+                    libsql::params![hash.to_owned()],
+                )
+                .await?;
+            match rows.next().await? {
+                Some(row) => Ok(Some((
+                    row.get::<String>(0)?,
+                    row.get::<Option<String>>(1)?,
+                    row.get::<i64>(2)?,
+                ))),
+                None => Ok(None),
+            }
+        })
         .await
-        .map_err(|e| AppError::Internal(format!("login lookup failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("login lookup failed: {e:#}")))?;
 
     // An unknown secret and an expired one get the same answer on purpose: a
     // caller guessing secrets learns nothing about which ones ever existed.
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| AppError::Internal(format!("login lookup failed: {e}")))?
-    else {
+    let Some((telegram_user_id, username, expires_at)) = found else {
         return Err(AppError::Unauthorized(
             "that link is expired or used".into(),
         ));
     };
 
-    let telegram_user_id: String = row.get(0).map_err(row_err)?;
-    let username: Option<String> = row.get(1).map_err(row_err)?;
-    let expires_at: i64 = row.get(2).map_err(row_err)?;
-
     // Burn it first: redeemed or expired, it must not survive this call.
-    delete_completion(&state.db()?, &hash).await?;
+    state
+        .with_db(move |db| async move { delete_completion(&db, hash).await })
+        .await
+        .map_err(|e| AppError::Internal(format!("could not clear login: {e:#}")))?;
 
     // Checked here, not left to a sweep: a sweep that has not run yet must never
     // mean an expired credential still works.
@@ -311,8 +318,23 @@ pub async fn complete(
         ));
     }
 
-    let user_id = upsert_user(&state.db()?, &telegram_user_id, username.as_deref()).await?;
-    let token = issue_session(&state.db()?, user_id).await?;
+    let user_id = {
+        let telegram_user_id = telegram_user_id.as_str();
+        let username = &username;
+        state.with_db(move |db| async move {
+            upsert_user(&db, telegram_user_id, username.as_deref()).await
+        })
+    }
+    .await
+    .map_err(|e| AppError::Internal(format!("could not upsert user: {e:#}")))?;
+    // The session token is minted inside the retried closure, so each attempt
+    // writes its own row. If an attempt applied but its response was lost, the
+    // orphaned row is a hashed token nobody ever saw — unredeemable, and swept
+    // when it expires (#130).
+    let token = state
+        .with_db(move |db| async move { issue_session(&db, user_id).await })
+        .await
+        .map_err(|e| AppError::Internal(format!("could not issue session: {e:#}")))?;
 
     let mut res = Json(CompleteResponse { username }).into_response();
     res.headers_mut().insert(
@@ -349,17 +371,12 @@ fn session_cookie(token: &str, cfg: &CookieConfig) -> String {
     c
 }
 
-fn row_err(e: libsql::Error) -> AppError {
-    AppError::Internal(format!("row decode failed: {e}"))
-}
-
-async fn delete_completion(conn: &Connection, hash: &str) -> Result<(), AppError> {
+async fn delete_completion(conn: &Connection, hash: &str) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM login_completions WHERE completion_hash = ?1",
         libsql::params![hash.to_owned()],
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("could not clear login: {e}")))?;
+    .await?;
     Ok(())
 }
 
@@ -375,38 +392,34 @@ async fn upsert_user(
     conn: &Connection,
     telegram_user_id: &str,
     username: Option<&str>,
-) -> Result<i64, AppError> {
+) -> anyhow::Result<i64> {
     conn.execute(
         "INSERT INTO users (telegram_user_id, username) VALUES (?1, ?2)
          ON CONFLICT(telegram_user_id) DO UPDATE SET username = excluded.username",
         libsql::params![telegram_user_id.to_owned(), username.map(str::to_owned)],
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("could not upsert user: {e}")))?;
+    .await?;
 
     let mut rows = conn
         .query(
             "SELECT id FROM users WHERE telegram_user_id = ?1",
             libsql::params![telegram_user_id.to_owned()],
         )
-        .await
-        .map_err(|e| AppError::Internal(format!("could not read user: {e}")))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|e| AppError::Internal(format!("could not read user: {e}")))?
-        .ok_or_else(|| AppError::Internal("user vanished after upsert".into()))?;
-    row.get::<i64>(0).map_err(row_err)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("user vanished after upsert"))?;
+    Ok(row.get::<i64>(0)?)
 }
 
-async fn issue_session(conn: &Connection, user_id: i64) -> Result<String, AppError> {
+async fn issue_session(conn: &Connection, user_id: i64) -> anyhow::Result<String> {
     let token = mint_secret();
     conn.execute(
         "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?1, ?2, ?3)",
         libsql::params![hash_secret(&token), user_id, now() + SESSION_TTL_SECS],
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("could not issue session: {e}")))?;
+    .await?;
     Ok(token)
 }
 
@@ -433,36 +446,41 @@ pub async fn require_session(
     let token = session_from_cookie(req.headers())
         .ok_or_else(|| AppError::Unauthorized("a session is required".into()))?;
 
-    // Scoped deliberately. A result set holds an open statement, and an open statement
-    // holds a read on the database — so a `rows` living to the end of this function
-    // would hold one for the whole request, across `next.run` below. Every connection
-    // used to be the same connection, which SQLite forgives; they are now separate, and
-    // a handler trying to write behind a reader that never finishes is a deadlock, not
-    // a slow query. Read what is needed, then let go.
-    let (user_id, expires_at, telegram_user_id, username) = {
-        let db = state.db()?;
-        let mut rows = db
-            .query(
-                "SELECT s.user_id, s.expires_at, u.telegram_user_id, u.username
-                 FROM sessions s JOIN users u ON u.id = s.user_id
-                 WHERE s.token_hash = ?1",
-                libsql::params![hash_secret(&token)],
-            )
-            .await
-            .map_err(|e| AppError::Internal(format!("session lookup failed: {e}")))?;
+    // Scoped deliberately: the whole read happens inside the `with_db` closure. A
+    // result set holds an open statement, and an open statement holds a read on the
+    // database — so a `rows` living to the end of this function would hold one for
+    // the whole request, across `next.run` below. Every connection used to be the
+    // same connection, which SQLite forgives; they are now separate, and a handler
+    // trying to write behind a reader that never finishes is a deadlock, not a slow
+    // query. Read what is needed, then let go. This was also the incident's loudest
+    // failure ("session lookup failed" on every request, #130) — as a pure read it
+    // retries freely.
+    let token = token.as_str();
+    let looked_up = state
+        .with_db(move |db| async move {
+            let mut rows = db
+                .query(
+                    "SELECT s.user_id, s.expires_at, u.telegram_user_id, u.username
+                     FROM sessions s JOIN users u ON u.id = s.user_id
+                     WHERE s.token_hash = ?1",
+                    libsql::params![hash_secret(token)],
+                )
+                .await?;
+            match rows.next().await? {
+                Some(row) => Ok(Some((
+                    row.get::<i64>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<Option<String>>(3)?,
+                ))),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("session lookup failed: {e:#}")))?;
 
-        let row = rows
-            .next()
-            .await
-            .map_err(|e| AppError::Internal(format!("session lookup failed: {e}")))?
-            .ok_or_else(|| AppError::Unauthorized("unknown or expired session".into()))?;
-
-        (
-            row.get::<i64>(0).map_err(row_err)?,
-            row.get::<i64>(1).map_err(row_err)?,
-            row.get::<String>(2).map_err(row_err)?,
-            row.get::<Option<String>>(3).map_err(row_err)?,
-        )
+    let Some((user_id, expires_at, telegram_user_id, username)) = looked_up else {
+        return Err(AppError::Unauthorized("unknown or expired session".into()));
     };
 
     // Checked on read, not left to a sweep: an expired session must be dead the
@@ -521,14 +539,19 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     if let Some(token) = session_from_cookie(&headers) {
+        let token = token.as_str();
         state
-            .db()?
-            .execute(
-                "DELETE FROM sessions WHERE token_hash = ?1",
-                libsql::params![hash_secret(&token)],
-            )
+            .with_db(move |db| async move {
+                // A delete is idempotent, so a retried logout is still one logout.
+                db.execute(
+                    "DELETE FROM sessions WHERE token_hash = ?1",
+                    libsql::params![hash_secret(token)],
+                )
+                .await?;
+                Ok(())
+            })
             .await
-            .map_err(|e| AppError::Internal(format!("logout failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("logout failed: {e:#}")))?;
     }
 
     let mut res = StatusCode::NO_CONTENT.into_response();
@@ -774,11 +797,14 @@ async fn kitchen_invite_reply(
         return Ok(());
     }
 
-    let db = state.db()?;
-    let minted =
-        crate::kitchens::primary_invite(&db, &from.id.to_string(), from.username.as_deref())
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+    let user_id = from.id.to_string();
+    let user_id = user_id.as_str();
+    let minted = state
+        .with_db(move |db| async move {
+            crate::kitchens::primary_invite(&db, user_id, from.username.as_deref()).await
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let Some((kitchen, token, _expires_at)) = minted else {
         reply(
@@ -807,28 +833,40 @@ async fn kitchen_invite_reply(
 /// The user is not something a caller chose: it arrived from Telegram alongside a
 /// verified webhook secret.
 async fn mint_completion(state: &AppState, user: &TelegramUser) -> Result<String, AppError> {
+    // Minted outside the retryable closure: every attempt writes the same hash, so
+    // a re-run after a lost response collides on the primary key and fails honestly
+    // instead of leaving a second live login link (#130).
     let secret = mint_secret();
+    let hash = hash_secret(&secret);
+    let hash = hash.as_str();
+    let expires_at = now() + COMPLETION_TTL_SECS;
     state
-        .db()?
-        .execute(
-            "INSERT INTO login_completions (completion_hash, telegram_user_id, username, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            libsql::params![
-                hash_secret(&secret),
-                user.id.to_string(),
-                user.username.clone(),
-                now() + COMPLETION_TTL_SECS
-            ],
-        )
+        .with_db(move |db| async move {
+            db.execute(
+                "INSERT INTO login_completions (completion_hash, telegram_user_id, username, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                libsql::params![
+                    hash.to_owned(),
+                    user.id.to_string(),
+                    user.username.clone(),
+                    expires_at
+                ],
+            )
+            .await?;
+            Ok(())
+        })
         .await
-        .map_err(|e| AppError::Internal(format!("could not mint login: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("could not mint login: {e:#}")))?;
 
     // Cheap, and it is why this table cannot grow without bound: a login is the
     // only thing that writes it, and each one clears the dead rows behind it. No
     // scheduler, and no anonymous caller who could outrun it — reaching here at
     // all costs an authenticated Telegram round trip.
-    if let Err(e) = sweep_expired(&state.db()?).await {
-        tracing::warn!("could not sweep expired auth rows: {e}");
+    if let Err(e) = state
+        .with_db(move |db| async move { sweep_expired(&db).await })
+        .await
+    {
+        tracing::warn!("could not sweep expired auth rows: {e:#}");
     }
 
     Ok(format!(

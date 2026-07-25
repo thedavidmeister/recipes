@@ -288,9 +288,10 @@ pub async fn walk(
     Query(params): Query<WalkParams>,
 ) -> Result<Json<WalkResponse>, AppError> {
     let len = params.len.unwrap_or(DEFAULT_LEN).clamp(1, MAX_LEN);
-    let corpus = load_corpus(&state.db()?)
+    let corpus = state
+        .with_db(move |conn| async move { load_corpus(&conn).await })
         .await
-        .map_err(|e| AppError::Internal(format!("could not load the corpus: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("could not load the corpus: {e:#}")))?;
     let mut rng = StdRng::from_entropy();
     let stops = wander(&corpus, len, &mut rng);
     Ok(Json(WalkResponse { stops }))
