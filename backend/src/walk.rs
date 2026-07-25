@@ -238,9 +238,8 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     stops
 }
 
-/// Load the normalized corpus into a [`Corpus`]. One query; the ingredients
+/// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
 /// column is JSON, parsed here into names (measures are irrelevant to the graph).
-///
 /// `max_total_seconds` is a pick session's time cap (#80): recipes whose
 /// `total_seconds` estimate exceeds it never enter the graph, so a capped walk
 /// cannot surface them. The comparison is inclusive — a 30-minute recipe fits a
@@ -315,20 +314,21 @@ pub async fn walk(
     Query(params): Query<WalkParams>,
 ) -> Result<Json<WalkResponse>, AppError> {
     let len = params.len.unwrap_or(DEFAULT_LEN).clamp(1, MAX_LEN);
-    let conn = state.db()?;
     // The cap is read fresh from the session on every walk, so the walk always
     // enforces what the plan currently says — the client passes only the channel,
-    // never the cap itself, which keeps the bound server-authoritative.
-    let cap = match &params.channel {
-        Some(channel) => crate::session::time_cap(&conn, channel)
+    // never the cap itself, which keeps the bound server-authoritative (#80).
+    let cap = match params.channel.as_deref() {
+        Some(channel) => state
+            .with_db(move |conn| async move { crate::session::time_cap(&conn, channel).await })
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?
             .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?,
         None => None,
     };
-    let corpus = load_corpus(&conn, cap)
+    let corpus = state
+        .with_db(move |conn| async move { load_corpus(&conn, cap).await })
         .await
-        .map_err(|e| AppError::Internal(format!("could not load the corpus: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("could not load the corpus: {e:#}")))?;
     let mut rng = StdRng::from_entropy();
     let stops = wander(&corpus, len, &mut rng);
     Ok(Json(WalkResponse { stops }))

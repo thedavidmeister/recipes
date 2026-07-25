@@ -22,6 +22,7 @@
 mod admin;
 mod auth;
 mod db;
+mod db_retry;
 mod derive;
 mod enrich;
 mod enrich_api;
@@ -53,32 +54,63 @@ use tower_http::{
 /// Shared handler state: the SSRF-guarded HTTP client, the Turso/libSQL database,
 /// the Telegram config auth runs on, and the infra key that guards the ingest sync.
 impl AppState {
-    /// A connection for this request.
+    /// Run one logical database operation, retrying transient Turso failures.
     ///
-    /// Deliberately per-request rather than one held for the process lifetime. A
-    /// libsql connection owns a Hrana stream, and a stream does not survive the
-    /// database changing generation — a restart or a failover on Turso's side. The
-    /// long-lived connection we used to hold went stale exactly once and then failed
-    /// *every* request after it with `stream not found: generation mismatch`, because
-    /// nothing in the process ever asked for a new stream. Only a restart cleared it,
-    /// which is not a recovery plan.
+    /// Every request-path DB touch goes through here, so the retry (#130) is
+    /// inherited rather than sprinkled: `op` gets a connection, does its reads
+    /// or writes, and returns; if the transport to Turso blips
+    /// ([`db_retry::is_transient`]) the whole operation re-runs — bounded by
+    /// [`db_retry::POLICY`] — and real errors (constraint violations, bad SQL)
+    /// fail exactly as fast as they always did.
     ///
-    /// Connecting is cheap — it allocates a handle; the stream is established lazily
-    /// on first use — so the fix is simply to stop keeping one around.
-    pub fn db(&self) -> Result<libsql::Connection, error::AppError> {
+    /// **Each attempt gets a fresh connection**, and connections are deliberately
+    /// per-operation rather than held for the process lifetime. A libsql
+    /// connection owns a Hrana stream, and a stream does not survive the
+    /// database changing generation — a restart or a failover on Turso's side.
+    /// The long-lived connection we used to hold went stale exactly once and then
+    /// failed *every* request after it with `stream not found: generation
+    /// mismatch`, because nothing in the process ever asked for a new stream
+    /// (#99). Connecting is cheap — it allocates a handle; the stream is
+    /// established lazily on first use — so a fresh one per operation (and per
+    /// retry: the stream that just broke is exactly what must not be reused)
+    /// costs nothing.
+    ///
+    /// The closure must be safe to re-run. Reads trivially are; this app's
+    /// writes are upserts, guarded (`run_id`) writes, deletes, or inserts keyed
+    /// on values minted *outside* the closure — see #130 for the per-write
+    /// audit. Mint ids/tokens before calling, not inside `op`, so every attempt
+    /// writes the same row.
+    pub async fn with_db<T, F, Fut>(&self, mut op: F) -> anyhow::Result<T>
+    where
+        F: FnMut(libsql::Connection) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        use futures_util::future::Either;
+        db_retry::retry(db_retry::POLICY, |_attempt| match self.fresh_conn() {
+            // `op` is called here, synchronously, so the future it returns is
+            // its own value — independent of the borrow of `op` — which is what
+            // keeps every handler's future provably `Send` (see
+            // [`db_retry::retry`] for why this is not an `AsyncFnMut`).
+            Ok(conn) => Either::Left(op(conn)),
+            Err(e) => Either::Right(std::future::ready(Err(e))),
+        })
+        .await
+    }
+
+    /// One fresh connection, configured the way every caller assumes.
+    fn fresh_conn(&self) -> anyhow::Result<libsql::Connection> {
+        use anyhow::Context as _;
         let conn = self
             .database
             .connect()
-            .map_err(|e| error::AppError::Internal(format!("could not reach the database: {e}")))?;
-        // Wait for a busy database rather than failing at once. Turso serves the
-        // deployed app and has no file lock to contend for, but a local file does —
-        // and SQLite's default is to give up immediately, so two connections to a dev
-        // or test database would collide the moment one of them wrote. Waiting is the
-        // behaviour every other caller already assumes.
+            .context("could not reach the database")?;
+        // Wait for a busy database rather than failing at once. Turso serves
+        // the deployed app and has no file lock to contend for, but a local
+        // file does — and SQLite's default is to give up immediately, so two
+        // connections to a dev or test database would collide the moment one
+        // of them wrote. Waiting is the behaviour every caller assumes.
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| {
-                error::AppError::Internal(format!("could not configure the database: {e}"))
-            })?;
+            .context("could not configure the database")?;
         Ok(conn)
     }
 }
@@ -162,6 +194,8 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/join", post(session::join_lobby))
         .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/seat", post(session::seat))
+        .route("/session/{channel}/meal-type", post(session::set_meal_type))
+        .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
@@ -456,6 +490,13 @@ mod tests {
     /// one still serves everything else), so the tests reach that state the same
     /// way the process does.
     async fn test_app_with_ingest_key(ingest_key: Option<String>) -> (Router, libsql::Connection) {
+        let (state, conn) = test_state(ingest_key).await;
+        (app(state), conn)
+    }
+
+    /// The state itself, for tests that exercise [`AppState`] directly (the
+    /// `with_db` retry) rather than through the router.
+    async fn test_state(ingest_key: Option<String>) -> (AppState, libsql::Connection) {
         // A file rather than `:memory:`, because SQLite gives every connection to
         // `:memory:` its own private database — and the app now takes a fresh
         // connection per request, so an in-memory one would hand each request an empty
@@ -490,7 +531,71 @@ mod tests {
             admin_id: Some("4242".into()),
             rooms: session::rooms(),
         };
-        (app(state), conn)
+        (state, conn)
+    }
+
+    /// The retry composition end to end: a transient failure re-runs the closure,
+    /// and the re-run holds a *working* connection to the same database — the
+    /// fresh-connection-per-attempt half of #130 that the `db_retry` unit tests
+    /// cannot see.
+    #[tokio::test]
+    async fn with_db_rides_out_a_transient_failure_on_a_fresh_connection() {
+        let (state, _conn) = test_state(None).await;
+        let failures_left = std::cell::Cell::new(2u32);
+        let failures_left = &failures_left;
+        let answer = state
+            .with_db(move |conn| async move {
+                // Prove every attempt's connection actually works before the
+                // injected failure decides this attempt's fate.
+                let mut rows = conn.query("SELECT 41 + 1", ()).await?;
+                let value = rows
+                    .next()
+                    .await?
+                    .expect("one row")
+                    .get::<i64>(0)
+                    .expect("one column");
+                if failures_left.get() > 0 {
+                    failures_left.set(failures_left.get() - 1);
+                    // The incident error, verbatim (#130) — transient.
+                    return Err(libsql::Error::Hrana(
+                        r#"api error: `status=502 Bad Gateway, body={"error":"upstream forward failed"}`"#
+                            .to_string()
+                            .into(),
+                    )
+                    .into());
+                }
+                Ok(value)
+            })
+            .await
+            .expect("two blips then success must succeed");
+        assert_eq!(answer, 42);
+        assert_eq!(
+            failures_left.get(),
+            0,
+            "both injected failures were consumed"
+        );
+    }
+
+    /// The other half of the bound: a fatal error is never retried, so a real
+    /// database ruling costs exactly one attempt.
+    #[tokio::test]
+    async fn with_db_does_not_retry_a_database_ruling() {
+        let (state, _conn) = test_state(None).await;
+        let calls = std::cell::Cell::new(0u32);
+        let calls = &calls;
+        let result = state
+            .with_db(move |conn| async move {
+                calls.set(calls.get() + 1);
+                conn.execute("NOT EVEN SQL", ()).await?;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.get(),
+            1,
+            "malformed SQL must fail on the first attempt"
+        );
     }
 
     /// A `GET /api/me` — the session-gated route the gate tests probe. `/me` is
@@ -1002,6 +1107,187 @@ mod tests {
                 &format!("/api/session/{channel}/seat"),
                 Some(&cookie),
                 r#"{"user_id":"a-stranger"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A plan is born for dinner (#114): name no meal at creation and the lobby says
+    /// so. The host then repoints it, and the answer — a full lobby view — carries the
+    /// new meal for every screen to agree on.
+    #[tokio::test]
+    async fn the_host_names_the_meal_and_the_lobby_carries_it() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/session/{channel}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["meal_type"], "dinner");
+        assert_eq!(body["additions"], serde_json::json!([]), "a plain meal");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"breakfast"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["meal_type"], "breakfast");
+
+        // And what comes with it — replied in canonical order, however the host's
+        // client happened to say it.
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/additions"),
+                Some(&cookie),
+                r#"{"additions":["drink","dessert"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(res).await["additions"],
+            serde_json::json!(["dessert", "drink"])
+        );
+    }
+
+    /// A plan can be created *for* a meal — the API takes the type up front, so a
+    /// future create flow that asks first needs no second request.
+    #[tokio::test]
+    async fn a_plan_can_be_created_for_a_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"snack","additions":["drink"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/session/{channel}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(res).await;
+        assert_eq!(body["meal_type"], "snack");
+        assert_eq!(body["additions"], serde_json::json!(["drink"]));
+    }
+
+    /// The vocabulary is closed server-side: a meal outside it is refused at the
+    /// wire, on create and on change alike. "dessert" is deliberate: it is an
+    /// addition *to* a meal, not a meal you sit down to, so it is as refused as a
+    /// made-up word.
+    #[tokio::test]
+    async fn a_meal_outside_the_vocabulary_is_refused() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"dessert"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"brunch"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Only the host names the meal — a guest cannot repoint someone else's plan.
+    #[tokio::test]
+    async fn only_the_host_can_name_the_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let other = auth::issue_test_session(&conn, "other").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&format!("recipes_session={other}")),
+                r#"{"meal_type":"lunch"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Once the swiping starts the meal is fixed: people voted on *that* meal, so
+    /// even the host cannot move it under them.
+    #[tokio::test]
+    async fn a_started_plan_keeps_its_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&cookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"lunch"}"#,
             ))
             .await
             .unwrap();

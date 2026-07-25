@@ -9,7 +9,6 @@
   import MusicSwitch from "$lib/components/MusicSwitch.svelte";
   import KitchenBackdrop from "$lib/components/KitchenBackdrop.svelte";
   import PickBackdrop from "$lib/components/PickBackdrop.svelte";
-  import { pageSlide } from "$lib/transition";
 
   let { children } = $props();
   const queryClient = useQueryClient();
@@ -243,8 +242,8 @@
   /**
    * Which room you are in — the top path segment. It chooses the backdrop, the way it
    * chooses the music (`poolFor`): the photograph behind the kitchens and pick routes
-   * lives here, rendered once and held still while the page slides over it, rather than
-   * being repeated in each section's layout where it would ride along with the motion.
+   * lives here, rendered once for the whole room, rather than being repeated in each
+   * section's layout.
    */
   const section = $derived(page.url.pathname.split("/")[1]);
 
@@ -270,8 +269,8 @@
     error={session.error instanceof Error ? session.error.message : undefined}
   />
 {:else}
-  <!-- The room's backdrop, held out here rather than in the page so it stays still
-       while the page slides over it (see `pageSlide`). -->
+  <!-- The room's backdrop, rendered once here for the whole room (see `section`)
+       rather than repeated in each section's layout. -->
   {#if section === "kitchens"}
     <KitchenBackdrop />
   {:else if section === "pick"}
@@ -287,9 +286,8 @@
     <Nav {current} />
   {/if}
 
-  <!-- Account links: chrome, kept in a persistent centred column above the page
-       rather than riding along with the slide. -->
-  <div class="mx-auto max-w-2xl px-4">
+  <div class="mx-auto max-w-2xl px-4 pb-16">
+    <!-- Account links: chrome, sitting above the page content. -->
     <div class="flex justify-end gap-3 py-2 text-sm">
       {#if session.data?.username}
         <span class="text-stone-500">@{session.data.username}</span>
@@ -309,26 +307,8 @@
         Sign out
       </button>
     </div>
-  </div>
 
-  <!-- The page slides; the chrome around it stays. The sliding element spans the full
-       viewport (the content column sits centred inside it), so `translateX(100%)`
-       carries the page right off the screen rather than only across its own narrow
-       column — and `overflow-x-clip` clips that travel at the viewport edge, so it
-       grows no scrollbar. The leaving and arriving pages share one grid cell so neither
-       shoves the other down mid-cross. -->
-  <div class="grid overflow-x-clip">
-    {#key page.url.pathname}
-      <div
-        class="col-start-1 row-start-1"
-        in:pageSlide={{ kind: "in" }}
-        out:pageSlide={{ kind: "out" }}
-      >
-        <div class="mx-auto max-w-2xl px-4 pb-16">
-          {@render children()}
-        </div>
-      </div>
-    {/key}
+    {@render children()}
   </div>
 
   <MusicSwitch playing={on} onToggle={toggleMusic} />

@@ -39,9 +39,10 @@ pub async fn pending(
     Query(params): Query<PendingParams>,
 ) -> Result<Json<Vec<steps::PendingStepRecipe>>, AppError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let recipes = steps::pending(&state.db()?, limit)
+    let recipes = state
+        .with_db(move |conn| async move { steps::pending(&conn, limit).await })
         .await
-        .map_err(|e| AppError::Internal(format!("steps pending failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("steps pending failed: {e:#}")))?;
     Ok(Json(recipes))
 }
 
@@ -64,9 +65,14 @@ pub async fn results(
             "model is required — it is the reading's provenance".into(),
         ));
     }
-    let report = steps::submit(&state.db()?, req.readings, req.model.trim())
+    // Safe to re-run on a transient failure: every write in `submit` is a
+    // `run_id`-guarded upsert (#11, #130).
+    let readings = &req.readings;
+    let model = req.model.trim();
+    let report = state
+        .with_db(move |conn| async move { steps::submit(&conn, readings.clone(), model).await })
         .await
-        .map_err(|e| AppError::Internal(format!("steps results failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("steps results failed: {e:#}")))?;
     Ok(Json(report))
 }
 

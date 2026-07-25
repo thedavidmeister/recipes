@@ -57,84 +57,80 @@ pub async fn health(
         return Err(AppError::Forbidden("admin only".into()));
     }
 
-    let db = &state.db()?;
-    let recipes = scalar(db, "SELECT count(*) FROM recipes").await?;
-    let raw = scalar(db, "SELECT count(*) FROM raw_imports").await?;
-    let enriched = scalar(db, "SELECT count(*) FROM ingredient_structures").await?;
-    let running = scalar(db, "SELECT count(*) FROM runs WHERE status = 'running'").await?;
-    let enriched_pct = if recipes > 0 {
-        (enriched as f64) * 100.0 / (recipes as f64)
-    } else {
-        0.0
-    };
+    // One retryable unit: all reads, so re-running on a transient Turso failure
+    // (#130) can only re-read.
+    let stats = state
+        .with_db(move |db| async move {
+            let recipes = scalar(&db, "SELECT count(*) FROM recipes").await?;
+            let raw = scalar(&db, "SELECT count(*) FROM raw_imports").await?;
+            let enriched = scalar(&db, "SELECT count(*) FROM ingredient_structures").await?;
+            let running = scalar(&db, "SELECT count(*) FROM runs WHERE status = 'running'").await?;
+            let enriched_pct = if recipes > 0 {
+                (enriched as f64) * 100.0 / (recipes as f64)
+            } else {
+                0.0
+            };
+            Ok(HealthStats {
+                recipes,
+                raw,
+                enriched,
+                enriched_pct,
+                by_model: model_counts(&db).await?,
+                recent_runs: recent_runs(&db).await?,
+                running,
+            })
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("health query failed: {e:#}")))?;
 
-    Ok(Json(HealthStats {
-        recipes,
-        raw,
-        enriched,
-        enriched_pct,
-        by_model: model_counts(db).await?,
-        recent_runs: recent_runs(db).await?,
-        running,
-    }))
+    Ok(Json(stats))
 }
 
 /// A one-row, one-column `i64` query — the `count(*)`s.
-async fn scalar(conn: &Connection, sql: &str) -> Result<i64, AppError> {
-    let mut rows = conn.query(sql, ()).await.map_err(query_err)?;
+async fn scalar(conn: &Connection, sql: &str) -> anyhow::Result<i64> {
+    let mut rows = conn.query(sql, ()).await?;
     let row = rows
         .next()
-        .await
-        .map_err(query_err)?
-        .ok_or_else(|| AppError::Internal("health query returned no row".into()))?;
-    row.get::<i64>(0).map_err(decode_err)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("health query returned no row"))?;
+    Ok(row.get::<i64>(0)?)
 }
 
-async fn model_counts(conn: &Connection) -> Result<Vec<ModelCount>, AppError> {
+async fn model_counts(conn: &Connection) -> anyhow::Result<Vec<ModelCount>> {
     let mut rows = conn
         .query(
             "SELECT model, count(*) FROM ingredient_structures
              GROUP BY model ORDER BY count(*) DESC",
             (),
         )
-        .await
-        .map_err(query_err)?;
+        .await?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next().await.map_err(query_err)? {
+    while let Some(row) = rows.next().await? {
         out.push(ModelCount {
-            model: row.get::<String>(0).map_err(decode_err)?,
-            count: row.get::<i64>(1).map_err(decode_err)?,
+            model: row.get::<String>(0)?,
+            count: row.get::<i64>(1)?,
         });
     }
     Ok(out)
 }
 
-async fn recent_runs(conn: &Connection) -> Result<Vec<RunRow>, AppError> {
+async fn recent_runs(conn: &Connection) -> anyhow::Result<Vec<RunRow>> {
     let mut rows = conn
         .query(
             "SELECT id, kind, status, started_at, finished_at
              FROM runs ORDER BY id DESC LIMIT 20",
             (),
         )
-        .await
-        .map_err(query_err)?;
+        .await?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next().await.map_err(query_err)? {
+    while let Some(row) = rows.next().await? {
         out.push(RunRow {
-            id: row.get::<i64>(0).map_err(decode_err)?,
-            kind: row.get::<String>(1).map_err(decode_err)?,
-            status: row.get::<String>(2).map_err(decode_err)?,
-            started_at: row.get::<i64>(3).map_err(decode_err)?,
-            finished_at: row.get::<Option<i64>>(4).map_err(decode_err)?,
+            id: row.get::<i64>(0)?,
+            kind: row.get::<String>(1)?,
+            status: row.get::<String>(2)?,
+            started_at: row.get::<i64>(3)?,
+            finished_at: row.get::<Option<i64>>(4)?,
         });
     }
     Ok(out)
-}
-
-fn query_err(e: libsql::Error) -> AppError {
-    AppError::Internal(format!("health query failed: {e}"))
-}
-
-fn decode_err(e: libsql::Error) -> AppError {
-    AppError::Internal(format!("health decode failed: {e}"))
 }
