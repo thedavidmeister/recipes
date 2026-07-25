@@ -21,22 +21,30 @@
   interface Props {
     status: "pending" | "error" | "ready";
     voters?: Voter[];
+    /** Kitchen members not yet in — the host can add them without a link (#72). */
+    candidates?: Voter[];
     /** The shareable URL that seats whoever opens it. */
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
     host?: boolean;
     error?: string;
     onStart?: () => void;
+    /** Add a kitchen member by id. Host only. */
+    onSeat?: (userId: string) => void;
   }
 
   let {
     status,
     voters = [],
+    candidates = [],
     inviteLink,
     host = false,
     error,
     onStart,
+    onSeat,
   }: Props = $props();
+
+  const name = (v: Voter) => (v.username ? `@${v.username}` : v.telegram_user_id);
 
   let copied = $state(false);
 
@@ -74,11 +82,27 @@
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>
       <ul class="flex flex-col gap-1.5">
         {#each voters as v (v.telegram_user_id)}
-          <li class="font-display text-stone-900">
-            {v.username ? `@${v.username}` : v.telegram_user_id}
-          </li>
+          <li class="font-display text-stone-900">{name(v)}</li>
         {/each}
       </ul>
+
+      {#if host && candidates.length}
+        <p class="mt-8 mb-3 text-xs text-stone-500">In this kitchen</p>
+        <ul class="flex flex-col gap-2">
+          {#each candidates as c (c.telegram_user_id)}
+            <li class="flex items-center justify-between">
+              <span class="font-display text-stone-900">{name(c)}</span>
+              <button
+                type="button"
+                onclick={() => onSeat?.(c.telegram_user_id)}
+                class="rounded-pill border-cocoa-500 text-cocoa-500 border px-3 py-1 text-sm"
+              >
+                Add
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
       {#if inviteLink}
         <p class="mt-8 mb-3 text-xs text-stone-500">Invite someone to decide</p>

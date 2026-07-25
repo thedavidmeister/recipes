@@ -36,6 +36,21 @@ export const Gathered: Story = {
   },
 };
 
+/** In a kitchen: its members who are not yet deciding are offered as one-tap adds,
+ * so the host does not have to send a link to people already in the kitchen (#72). */
+export const KitchenMembers: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+    candidates: [
+      { telegram_user_id: "5150", username: "mel" },
+      { telegram_user_id: "6161", username: "sam" },
+    ],
+  },
+};
+
 /** A guest waits: starting is the host's call, so a late arrival cannot close the
  * door on whoever is still inviting people. */
 export const Guest: Story = {

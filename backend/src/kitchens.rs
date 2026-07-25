@@ -370,7 +370,11 @@ async fn require_member(conn: &Connection, kitchen_id: &str, user: &str) -> Resu
 /// Both writes go in one transaction. A kitchen row without its membership row is a
 /// kitchen nobody is in: `list_kitchens` joins `kitchen_members`, so it would show up
 /// for no one and be reachable by no one.
-async fn create_kitchen(conn: &Connection, name: &str, owner: &str) -> anyhow::Result<String> {
+pub(crate) async fn create_kitchen(
+    conn: &Connection,
+    name: &str,
+    owner: &str,
+) -> anyhow::Result<String> {
     create_owned(conn, name, owner, false).await
 }
 
@@ -452,6 +456,41 @@ async fn rename_kitchen(conn: &Connection, kitchen_id: &str, name: &str) -> anyh
     )
     .await?;
     Ok(())
+}
+
+/// Test-only: put someone in a kitchen directly. Production seats members through
+/// creation and invite redemption; a test that needs a populated kitchen should not
+/// have to replay a whole invite flow.
+#[cfg(test)]
+pub async fn seat_member_for_test(conn: &Connection, kitchen_id: &str, user: &str) {
+    conn.execute(
+        "INSERT INTO kitchen_members (kitchen_id, user_id) VALUES (?1, ?2)
+         ON CONFLICT(kitchen_id, user_id) DO NOTHING",
+        libsql::params![kitchen_id.to_owned(), user.to_owned()],
+    )
+    .await
+    .unwrap();
+}
+
+/// Whether `user` is in this kitchen at all — the gate for pulling them into a meal
+/// plan (#72). A meal is planned *in* a kitchen, so only its members are seatable as
+/// deciders; anyone else joins by the shareable link like a guest from outside.
+pub async fn is_member(conn: &Connection, kitchen_id: &str, user: &str) -> anyhow::Result<bool> {
+    Ok(membership(conn, kitchen_id, user).await?.is_some())
+}
+
+/// The kitchen's members as `(telegram_user_id, username)`, oldest first — the pool a
+/// meal plan's lobby offers as deciders (#72). Public so the pick lobby can present
+/// "who's in this kitchen" without reaching into the members table itself.
+pub async fn member_list(
+    conn: &Connection,
+    kitchen_id: &str,
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
+    Ok(load_members(conn, kitchen_id)
+        .await?
+        .into_iter()
+        .map(|m| (m.telegram_user_id, m.username))
+        .collect())
 }
 
 /// The caller's membership of a kitchen — whether it is their primary — or `None` if

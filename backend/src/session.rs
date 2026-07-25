@@ -158,6 +158,12 @@ pub async fn create(
     Ok(Json(Created { channel_id }))
 }
 
+/// Who the host is pulling into the plan — a member of its kitchen, by their id.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SeatBody {
+    pub user_id: String,
+}
+
 /// A person in a plan. `username` is display convenience; identity is the id (#25).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Voter {
@@ -174,6 +180,10 @@ pub struct LobbyView {
     pub host: String,
     pub started: bool,
     pub voters: Vec<Voter>,
+    /// Members of the plan's kitchen who are not yet deciding — the host can seat any
+    /// of them without a link (#72). Empty when the plan has no kitchen, or once
+    /// everyone in the kitchen is already in.
+    pub candidates: Vec<Voter>,
 }
 
 /// `GET /api/session/{channel}` — the lobby: the roster, and whether it has started.
@@ -237,6 +247,62 @@ pub async fn start(
         ));
     }
     begin_session(&state.db()?, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, &channel).await?;
+    Ok(Json(view))
+}
+
+/// `POST /api/session/{channel}/seat` — the host pulls a kitchen member into the plan.
+///
+/// The counterpart to the invite link: the link is for people outside the kitchen, this
+/// is for people already in it, who should not have to be sent anything. A meal is
+/// planned *in* a kitchen (#72), so the seatable pool is exactly that kitchen's
+/// members — seating an arbitrary id is refused.
+///
+/// Host only, and only before the swiping starts: the roster is what consensus is
+/// measured against (#93), so it must not grow once people are voting.
+///
+/// A seated member is a decider whether or not they have opened the app yet — the
+/// plan then waits on them, which is the point ("we're waiting on Mel"). If they are
+/// not in fact cooking tonight, the host does not seat them, or they leave (#96).
+pub async fn seat(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<SeatBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    let db = state.db()?;
+    let view = load_lobby(&db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can add people to it".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+    let Some(kitchen_id) = view.kitchen_id.as_deref() else {
+        return Err(AppError::BadRequest(
+            "this plan is not in a kitchen, so it has no members to add — share the link".into(),
+        ));
+    };
+    if !crate::kitchens::is_member(&db, kitchen_id, &body.user_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::BadRequest(
+            "that person is not in this kitchen — share the link instead".into(),
+        ));
+    }
+
+    seat_voter(&db, &channel, &body.user_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, &channel).await?;
@@ -442,12 +508,32 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         });
     }
 
+    // The pool the host can pull in without a link: this kitchen's members who are not
+    // already deciding. A plan with no kitchen has no such pool — it is invite-only.
+    let candidates = match &kitchen_id {
+        Some(kid) => {
+            let seated: std::collections::HashSet<&str> =
+                voters.iter().map(|v| v.telegram_user_id.as_str()).collect();
+            crate::kitchens::member_list(conn, kid)
+                .await?
+                .into_iter()
+                .filter(|(id, _)| !seated.contains(id.as_str()))
+                .map(|(telegram_user_id, username)| Voter {
+                    telegram_user_id,
+                    username,
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
     Ok(Some(LobbyView {
         channel_id: channel.to_owned(),
         kitchen_id,
         host,
         started: started_at.is_some(),
         voters,
+        candidates,
     }))
 }
 
@@ -599,6 +685,52 @@ mod tests {
         assert_eq!(view.voters.len(), 1);
         assert_eq!(view.voters[0].telegram_user_id, "4242");
         assert_eq!(view.voters[0].username.as_deref(), Some("dave"));
+    }
+
+    /// A plan in a kitchen offers that kitchen's members as candidates, minus whoever
+    /// is already deciding — the pool the host can pull in without a link (#72).
+    #[tokio::test]
+    async fn a_kitchen_plan_offers_its_members_as_candidates() {
+        let conn = conn().await;
+        let kid = crate::kitchens::create_kitchen(&conn, "Home", "host")
+            .await
+            .unwrap();
+        crate::kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        crate::kitchens::seat_member_for_test(&conn, &kid, "sam").await;
+
+        create_session(&conn, "c", "host", None, Some(&kid))
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "host").await.unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        let candidates: Vec<&str> = view
+            .candidates
+            .iter()
+            .map(|v| v.telegram_user_id.as_str())
+            .collect();
+        assert!(candidates.contains(&"mel"), "{candidates:?}");
+        assert!(candidates.contains(&"sam"), "{candidates:?}");
+        assert!(
+            !candidates.contains(&"host"),
+            "the host is deciding, not a candidate"
+        );
+    }
+
+    /// A plan with no kitchen has no candidate pool — it is invite-only.
+    #[tokio::test]
+    async fn a_kitchenless_plan_has_no_candidates() {
+        let conn = conn().await;
+        create_session(&conn, "c", "host", None, None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "host").await.unwrap();
+        assert!(load_lobby(&conn, "c")
+            .await
+            .unwrap()
+            .unwrap()
+            .candidates
+            .is_empty());
     }
 
     /// Starting twice must not move the moment the roster closed — a second press is
