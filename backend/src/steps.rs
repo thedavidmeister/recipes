@@ -370,6 +370,23 @@ mod tests {
         serde_json::from_str(&json).unwrap_or_default()
     }
 
+    /// Read `recipes.total_seconds` — the #79 estimate `derive` stored via `upsert`.
+    async fn read_recipe_total_seconds(conn: &Connection, id: &str) -> Option<i64> {
+        let mut rows = conn
+            .query(
+                "SELECT total_seconds FROM recipes WHERE id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<Option<i64>>(0)
+            .unwrap()
+    }
+
     async fn last_run_id(conn: &Connection, kind: &str) -> i64 {
         let mut rows = conn
             .query(
@@ -541,6 +558,12 @@ mod tests {
         let steps = read_recipe_steps(&conn, "1").await;
         assert_eq!(steps.len(), 2, "the reading attached onto recipes.steps");
         assert_eq!(steps[1].seconds, Some(60));
+        // The #79 estimate rides through the same derive: critical path 0 -> 1 = 60s.
+        assert_eq!(
+            read_recipe_total_seconds(&conn, "1").await,
+            Some(60),
+            "the total-time estimate is stored alongside the steps it summarises"
+        );
 
         let store = last_run_id(&conn, "enrich_steps").await;
         let der = last_run_id(&conn, "derive").await;

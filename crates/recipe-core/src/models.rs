@@ -75,10 +75,23 @@ pub struct Recipe {
     pub video_url: Option<String>,
 }
 
+impl Recipe {
+    /// This recipe's estimated total time start to finish, prep included (#79) — the
+    /// critical path through its step DAG, or `None` when the steps carry no timing to
+    /// sum (un-read, or nothing timed). A thin wrapper over [`step::total_seconds`]
+    /// (crate::step) so the estimate lives with the graph it reads; `derive` computes it
+    /// here and the `recipes` view stores it, keeping the arithmetic single-sourced in
+    /// `recipe-core` — the browser reads Turso directly and cannot run this (no WASM).
+    pub fn total_seconds(&self) -> Option<u32> {
+        crate::step::total_seconds(&self.steps)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::measure::{Amount, Quantity, StructuredMeasure};
+    use crate::step::{StepKind, StructuredStep};
 
     /// An un-enriched line must serialize exactly as it did before the field
     /// existed — no `"structured"` key — so the 700-odd rows already in Turso
@@ -124,5 +137,49 @@ mod tests {
         assert_eq!(ing, back);
         // Raw stays the source of truth next to the enrichment.
         assert_eq!(back.measure.as_deref(), Some("500 g"));
+    }
+
+    fn recipe_with_steps(steps: Vec<StructuredStep>) -> Recipe {
+        Recipe {
+            id: "1".into(),
+            source: "themealdb".into(),
+            title: "T".into(),
+            image: None,
+            category: None,
+            area: None,
+            tags: vec![],
+            ingredients: vec![],
+            instructions: "go".into(),
+            steps,
+            equipment: vec![],
+            source_url: None,
+            video_url: None,
+        }
+    }
+
+    /// `Recipe::total_seconds` reads the critical path off the recipe's own step DAG
+    /// (#79) — the arithmetic `derive` stores on the `recipes` view. A read recipe with
+    /// timed steps yields its longest path; an un-read one (no steps) yields `None`.
+    #[test]
+    fn recipe_total_seconds_reads_the_critical_path_of_its_steps() {
+        let cook = |id: u32, seconds: Option<u32>, after: &[u32]| StructuredStep {
+            id,
+            text: format!("step {id}"),
+            kind: StepKind::Cook,
+            seconds,
+            after: after.to_vec(),
+        };
+
+        // 0 (60) -> {1 (120), 2 (300)} -> 3 (30): critical path 60+300+30 = 390.
+        let read = recipe_with_steps(vec![
+            cook(0, Some(60), &[]),
+            cook(1, Some(120), &[0]),
+            cook(2, Some(300), &[0]),
+            cook(3, Some(30), &[1, 2]),
+        ]);
+        assert_eq!(read.total_seconds(), Some(390));
+
+        // An un-read recipe carries no steps, so there is no estimate.
+        assert_eq!(recipe_with_steps(vec![]).total_seconds(), None);
     }
 }

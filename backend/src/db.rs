@@ -44,6 +44,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         14,
         include_str!("../migrations/0014_equipment_structures.sql"),
     ),
+    (
+        15,
+        include_str!("../migrations/0015_recipe_total_seconds.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
