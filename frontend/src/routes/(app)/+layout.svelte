@@ -50,12 +50,16 @@
     return POOLS[pathname.split("/")[1]] ?? NONE;
   }
 
-  /** A random track from `pool`, never `exclude` unless it is the only one. */
+  /**
+   * A random track from `pool`, avoiding `exclude` so a pool of several does not repeat
+   * back to back. The rule relaxes when there is nothing else to honour it with — a
+   * single-track pool, or one whose remaining tracks are all `exclude` — and returns
+   * what there is, so a lone track just keeps playing.
+   */
   function pickFrom(pool: string[], exclude: string | null): string {
-    if (pool.length <= 1) return pool[0];
-    let next = pool[Math.floor(Math.random() * pool.length)];
-    while (next === exclude) next = pool[Math.floor(Math.random() * pool.length)];
-    return next;
+    const others = pool.filter((track) => track !== exclude);
+    const options = others.length ? others : pool;
+    return options[Math.floor(Math.random() * options.length)];
   }
 
   const wantedPool = $derived(poolFor(page.url.pathname));
