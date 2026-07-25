@@ -52,7 +52,7 @@
       </ul>
 
       <div class="mt-8">
-        <Button onclick={onPlan} dot="pesto">Plan a meal here</Button>
+        <Button onclick={onPlan} dot="pesto">Let's cook!</Button>
       </div>
 
       <div class="mt-8">
