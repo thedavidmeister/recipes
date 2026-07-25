@@ -203,6 +203,8 @@ export interface Lobby {
   host: string;
   started: boolean;
   voters: Voter[];
+  /** Kitchen members not yet deciding — the host can add any without a link (#72). */
+  candidates: Voter[];
 }
 
 function lobbyFailed(status: number, action: string): ApiError {
@@ -225,6 +227,19 @@ export async function joinLobby(channel: string): Promise<Lobby> {
     method: "POST",
   });
   if (!res.ok) throw lobbyFailed(res.status, "join this meal plan");
+  return (await res.json()) as Lobby;
+}
+
+/** Add a kitchen member to the plan without a link. Host only, before it starts. */
+export async function seatMember(
+  channel: string,
+  userId: string,
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/seat`,
+    { method: "POST", body: JSON.stringify({ user_id: userId }) },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "add that person");
   return (await res.json()) as Lobby;
 }
 

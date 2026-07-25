@@ -11,6 +11,7 @@
     getLobby,
     joinLobby,
     startPlan,
+    seatMember,
     type ConnStatus,
     type Lobby,
   } from "$lib/pick";
@@ -201,6 +202,15 @@
     }
   }
 
+  async function seat(userId: string) {
+    try {
+      lobby = await seatMember(channel, userId);
+      deciders = lobby.voters.length;
+    } catch (e) {
+      lobbyError = e instanceof Error ? e.message : "Couldn't add that person.";
+    }
+  }
+
   // Who is looking, so the lobby knows whether to offer the start. The layout has
   // already fetched this, so it is a cache read rather than a request.
   const session = createQuery(() => ({
@@ -336,9 +346,11 @@
   <PlanLobby
     status={lobbyError ? "error" : lobby ? "ready" : "pending"}
     voters={lobby?.voters}
+    candidates={lobby?.candidates}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     inviteLink={page.url.href}
     error={lobbyError}
     onStart={begin}
+    onSeat={seat}
   />
 {/if}

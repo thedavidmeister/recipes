@@ -161,6 +161,7 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}", get(session::lobby))
         .route("/session/{channel}/join", post(session::join_lobby))
         .route("/session/{channel}/start", post(session::start))
+        .route("/session/{channel}/seat", post(session::seat))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -923,6 +924,87 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         body_json(res).await["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Start a meal plan in `kitchen`, as `cookie`, and return its channel.
+    async fn make_plan(app: &Router, cookie: &str, kitchen: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(cookie),
+                &format!(r#"{{"kitchen_id":"{kitchen}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Seating someone into a plan is gated like everything a person reaches (#25).
+    #[tokio::test]
+    async fn seating_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                None,
+                r#"{"user_id":"mel"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Only the host curates the roster — a guest cannot add people to someone else's
+    /// plan.
+    #[tokio::test]
+    async fn only_the_host_can_seat() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let other = auth::issue_test_session(&conn, "other").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                Some(&format!("recipes_session={other}")),
+                r#"{"user_id":"mel"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The seatable pool is exactly the kitchen's members — the host cannot pull in a
+    /// stranger, only offer the link.
+    #[tokio::test]
+    async fn seating_a_non_member_is_refused() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                Some(&cookie),
+                r#"{"user_id":"a-stranger"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Minting an invite is gated like everything else a person reaches (#25).
