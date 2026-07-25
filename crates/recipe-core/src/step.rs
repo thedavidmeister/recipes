@@ -13,6 +13,8 @@
 //! [`StructuredMeasure`](crate::StructuredMeasure) reading this is a point-in-time
 //! artifact, kept rather than re-extracted. No arithmetic lives here.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Whether a step is mise en place or active cooking. Prep steps — including prep
@@ -71,6 +73,54 @@ pub fn validate(steps: &[StructuredStep]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The critical-path duration of a step DAG, in whole seconds — the recipe's total
+/// time start to finish, **prep included** (#79). Prep steps are just nodes on the
+/// graph, so "including prep" is free.
+///
+/// **Not** the sum of every step's `seconds`: parallel branches overlap, so the time
+/// a cook actually spends is the *longest* dependency chain by summed duration — "chop
+/// the onion (2 min) *while* the oil heats (3 min)" costs 3 min, not 5. Reading that
+/// off a graph rather than a flat list is exactly why the DAG (#75) was worth building.
+///
+/// One forward pass, no arithmetic the model does: `finish(step) = max(finish of its
+/// `after` deps) + step.seconds`, and the total is the greatest finish. The list is
+/// its own topological sort ([`validate`] pins ids to `0..len` with `after` edges
+/// pointing strictly earlier), so every dependency's finish is known before the step
+/// that waits on it. A `finish` map keyed by id (not position) plus reading only deps
+/// already seen means a malformed, out-of-order list degrades to a smaller estimate
+/// rather than panicking — degrade-not-die, the same defence `stepDepths` takes.
+///
+/// Returns `None` when the number would be meaningless rather than a wrong one:
+/// **no steps**, or **not one step is timed** (every `seconds` is `None`), so there is
+/// no timing signal to sum. A graph with at least one timed step yields `Some`, and
+/// that total is a **lower bound** when some steps are untimed — an untimed step adds
+/// 0 to the running total but still carries its predecessors' time forward, so it can
+/// never inflate the estimate. Accumulation is in `u64` and clamped back to `u32`, so
+/// a pathological chain cannot overflow.
+pub fn total_seconds(steps: &[StructuredStep]) -> Option<u32> {
+    // Empty (vacuously all-none) and fully-untimed both fall here: no signal to sum.
+    if steps.iter().all(|s| s.seconds.is_none()) {
+        return None;
+    }
+
+    let mut finish: HashMap<u32, u64> = HashMap::with_capacity(steps.len());
+    let mut total: u64 = 0;
+    for step in steps {
+        // `after` points only at earlier steps (validated), so their finishes are
+        // already in the map; an unknown id (malformed input) is treated as a root.
+        let deps_done = step
+            .after
+            .iter()
+            .filter_map(|dep| finish.get(dep).copied())
+            .max()
+            .unwrap_or(0);
+        let f = deps_done + u64::from(step.seconds.unwrap_or(0));
+        finish.insert(step.id, f);
+        total = total.max(f);
+    }
+    Some(total.min(u64::from(u32::MAX)) as u32)
 }
 
 #[cfg(test)]
@@ -144,5 +194,94 @@ mod tests {
             step(1, StepKind::Cook, None, &[]),
         ];
         assert!(validate(&forward).is_err());
+    }
+
+    /// A straight chain has no parallelism, so its total is the plain sum of the
+    /// durations along it — the degenerate case the critical path must still get right.
+    #[test]
+    fn total_of_a_linear_chain_is_the_sum() {
+        let steps = vec![
+            step(0, StepKind::Prep, Some(120), &[]),
+            step(1, StepKind::Cook, Some(300), &[0]),
+            step(2, StepKind::Cook, Some(600), &[1]),
+        ];
+        assert!(validate(&steps).is_ok());
+        assert_eq!(total_seconds(&steps), Some(1020));
+    }
+
+    /// A diamond: one root feeds two parallel branches that rejoin. The total is the
+    /// **longer** branch plus the shared head and tail — strictly less than summing
+    /// every step, which is the whole point of reading a DAG rather than a flat list.
+    #[test]
+    fn total_of_a_diamond_is_the_critical_path_not_the_naive_sum() {
+        // 0 (60) -> {1 (120), 2 (300)} -> 3 (30). Longest path is 0->2->3 = 390.
+        let steps = vec![
+            step(0, StepKind::Prep, Some(60), &[]),
+            step(1, StepKind::Prep, Some(120), &[0]),
+            step(2, StepKind::Cook, Some(300), &[0]),
+            step(3, StepKind::Cook, Some(30), &[1, 2]),
+        ];
+        assert!(validate(&steps).is_ok());
+        let naive_sum: u32 = steps.iter().filter_map(|s| s.seconds).sum();
+        assert_eq!(
+            naive_sum, 510,
+            "the flat sum double-counts the parallel branches"
+        );
+        assert_eq!(
+            total_seconds(&steps),
+            Some(390),
+            "critical path overlaps the shorter branch with the longer one"
+        );
+    }
+
+    /// Two independent parallel roots (no edges between them): the total is the longer
+    /// of the two, never their sum — "chop while the oil heats".
+    #[test]
+    fn total_of_independent_parallel_roots_is_the_longest() {
+        let steps = vec![
+            step(0, StepKind::Prep, Some(120), &[]), // chop the onion
+            step(1, StepKind::Cook, Some(180), &[]), // heat the oil, meanwhile
+        ];
+        assert_eq!(total_seconds(&steps), Some(180));
+    }
+
+    /// Untimed steps make the estimate a lower bound: they carry a predecessor's time
+    /// forward but add nothing, so they neither inflate nor blank a total that has at
+    /// least one timed step.
+    #[test]
+    fn untimed_steps_contribute_zero_but_carry_predecessors_forward() {
+        let steps = vec![
+            step(0, StepKind::Prep, Some(300), &[]),
+            step(1, StepKind::Cook, None, &[0]), // "until golden" — no timer
+            step(2, StepKind::Cook, Some(60), &[1]),
+        ];
+        assert_eq!(total_seconds(&steps), Some(360));
+    }
+
+    /// Degenerate: no steps at all yields no estimate — absence, not a wrong `0`.
+    #[test]
+    fn total_of_no_steps_is_none() {
+        assert_eq!(total_seconds(&[]), None);
+    }
+
+    /// Degenerate: a real graph where nothing is timed has no timing signal to sum, so
+    /// the total is `None` (a lower bound of 0 would read as "instant", which is worse
+    /// than admitting we don't know).
+    #[test]
+    fn total_of_a_fully_untimed_graph_is_none() {
+        let steps = vec![
+            step(0, StepKind::Prep, None, &[]),
+            step(1, StepKind::Cook, None, &[0]),
+        ];
+        assert_eq!(total_seconds(&steps), None);
+    }
+
+    /// A single timed step is enough to yield an estimate.
+    #[test]
+    fn total_of_a_single_timed_step_is_that_duration() {
+        assert_eq!(
+            total_seconds(&[step(0, StepKind::Cook, Some(45), &[])]),
+            Some(45)
+        );
     }
 }

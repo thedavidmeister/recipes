@@ -82,10 +82,15 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     let tags = serde_json::to_string(&recipe.tags)?;
     let ingredients = serde_json::to_string(&recipe.ingredients)?;
     let steps = serde_json::to_string(&recipe.steps)?;
+    // The total-time estimate (#79) is pure arithmetic over the very steps being
+    // written — the critical path through the DAG — computed here in recipe-core so the
+    // stored column always matches the `steps` beside it. `None` (→ NULL) when there is
+    // no timing signal (un-read, or nothing timed): absence, not a wrong `0`.
+    let total_seconds = recipe.total_seconds().map(i64::from);
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -99,6 +104,11 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
                                 THEN excluded.instructions ELSE recipes.instructions END,
             steps        = CASE WHEN json_array_length(excluded.steps) > 0
                                 THEN excluded.steps ELSE recipes.steps END,
+            -- Move in lockstep with `steps`: the estimate is a function of the steps,
+            -- so it must follow whichever `steps` wins the merge. A partial browse
+            -- (empty steps) keeps both the stored steps and their stored estimate.
+            total_seconds = CASE WHEN json_array_length(excluded.steps) > 0
+                                THEN excluded.total_seconds ELSE recipes.total_seconds END,
             source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
             video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch(),
@@ -117,6 +127,7 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             recipe.source_url.clone(),
             recipe.video_url.clone(),
             steps,
+            total_seconds,
             run_id,
         ],
     )
@@ -127,7 +138,33 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use recipe_core::Ingredient;
+    use recipe_core::{Ingredient, StepKind, StructuredStep};
+
+    fn cook_step(id: u32, seconds: Option<u32>, after: &[u32]) -> StructuredStep {
+        StructuredStep {
+            id,
+            text: format!("step {id}"),
+            kind: StepKind::Cook,
+            seconds,
+            after: after.to_vec(),
+        }
+    }
+
+    async fn read_total_seconds(conn: &Connection, id: &str) -> Option<i64> {
+        let mut rows = conn
+            .query(
+                "SELECT total_seconds FROM recipes WHERE source = 'themealdb' AND id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<Option<i64>>(0)
+            .unwrap()
+    }
 
     fn sample() -> Recipe {
         Recipe {
@@ -389,5 +426,65 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), 1);
         assert_eq!(row.get::<String>(1).unwrap(), "Better Soup");
+    }
+
+    /// The derived `recipes` view carries the #79 total-time estimate: `upsert`
+    /// computes the critical path from the steps it is writing and stores it. A diamond
+    /// DAG stores its longest path (390s here: 60 -> 300 -> 30), not the flat sum.
+    #[tokio::test]
+    async fn upsert_stores_the_critical_path_total() {
+        let conn = conn().await;
+        let mut r = sample();
+        r.steps = vec![
+            cook_step(0, Some(60), &[]),
+            cook_step(1, Some(120), &[0]),
+            cook_step(2, Some(300), &[0]),
+            cook_step(3, Some(30), &[1, 2]),
+        ];
+        upsert(&conn, &r, 1).await.unwrap();
+        assert_eq!(read_total_seconds(&conn, "1").await, Some(390));
+    }
+
+    /// Degrade-not-die at the column: a recipe whose steps carry no timer stores NULL,
+    /// never a wrong `0`. A recipe with no steps at all likewise has no estimate.
+    #[tokio::test]
+    async fn upsert_stores_null_when_there_is_no_timing_signal() {
+        let conn = conn().await;
+
+        let mut untimed = sample();
+        untimed.steps = vec![cook_step(0, None, &[]), cook_step(1, None, &[0])];
+        upsert(&conn, &untimed, 1).await.unwrap();
+        assert_eq!(
+            read_total_seconds(&conn, "1").await,
+            None,
+            "a fully-untimed graph has no estimate"
+        );
+
+        // sample() has no steps at all — also no estimate.
+        let mut stepless = sample();
+        stepless.id = "2".into();
+        upsert(&conn, &stepless, 1).await.unwrap();
+        assert_eq!(read_total_seconds(&conn, "2").await, None);
+    }
+
+    /// The estimate moves in lockstep with `steps`: a partial browse (empty steps)
+    /// must not blank a full record's stored steps *or* its stored total — the two
+    /// would otherwise desync.
+    #[tokio::test]
+    async fn a_partial_does_not_clobber_the_stored_total() {
+        let conn = conn().await;
+
+        let mut full = sample();
+        full.steps = vec![cook_step(0, Some(300), &[]), cook_step(1, Some(60), &[0])];
+        upsert(&conn, &full, 1).await.unwrap();
+        assert_eq!(read_total_seconds(&conn, "1").await, Some(360));
+
+        // A category browse carries no steps; it must leave the estimate intact.
+        upsert(&conn, &partial(), 1).await.unwrap();
+        assert_eq!(
+            read_total_seconds(&conn, "1").await,
+            Some(360),
+            "an empty-steps partial must not blank the stored estimate"
+        );
     }
 }

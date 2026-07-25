@@ -1,0 +1,20 @@
+-- Total-time estimate (#79): how long a recipe actually takes start to finish, prep
+-- included, in whole seconds. Unlike `steps`/`equipment` this is neither a source
+-- field nor a model capture: it is pure arithmetic over the step DAG — the critical
+-- path (the longest dependency chain by summed duration), computed by recipe-core's
+-- `total_seconds`. Parallel branches overlap, so "chop while the oil heats" costs the
+-- longer of the two, not their sum; reading that off the DAG is why the graph (#75)
+-- was worth building.
+--
+-- The sole writer of `recipes` (`recipes::upsert`) recomputes it from `steps` on every
+-- derive, gated on the same "incoming steps non-empty" condition as `steps` itself, so
+-- the number can never drift from the graph it summarises and a partial browse never
+-- clobbers a full record's estimate.
+--
+-- NULL — not 0 — when there is no meaningful estimate: the step-reading worker has not
+-- read this recipe yet, or not one of its steps is timed ("until golden"). Degrade-not-
+-- die: an absent number reads as "unknown", a `0` would read as "instant". The browser
+-- reads Turso directly and cannot run recipe-core (there is no WASM, deliberately), so
+-- storing the computed value keeps the arithmetic single-sourced server-side rather
+-- than forcing a re-implementation of the critical path in JS.
+ALTER TABLE recipes ADD COLUMN total_seconds INTEGER;
