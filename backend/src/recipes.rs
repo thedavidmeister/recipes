@@ -487,4 +487,27 @@ mod tests {
             "an empty-steps partial must not blank the stored estimate"
         );
     }
+
+    /// Lockstep also when the news is bad: a fresh reading whose steps carry no timers
+    /// replaces the stored steps, so it must take the stored estimate down to NULL with
+    /// it — keeping the old number would leave it describing steps that are gone.
+    #[tokio::test]
+    async fn a_fresh_untimed_reading_nulls_the_stored_estimate() {
+        let conn = conn().await;
+
+        let mut timed = sample();
+        timed.steps = vec![cook_step(0, Some(300), &[]), cook_step(1, Some(60), &[0])];
+        upsert(&conn, &timed, 1).await.unwrap();
+        assert_eq!(read_total_seconds(&conn, "1").await, Some(360));
+
+        // The recipe is re-read and the new DAG has no timers ("until golden", twice).
+        let mut untimed = sample();
+        untimed.steps = vec![cook_step(0, None, &[]), cook_step(1, None, &[0])];
+        upsert(&conn, &untimed, 2).await.unwrap();
+        assert_eq!(
+            read_total_seconds(&conn, "1").await,
+            None,
+            "the estimate follows the steps it summarises, even down to NULL"
+        );
+    }
 }
