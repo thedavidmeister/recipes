@@ -163,8 +163,11 @@ pub enum MealAddition {
 impl MealAddition {
     /// Every addition, in canonical order — the order stored, and the order the
     /// picker shows.
-    pub const ALL: [MealAddition; 3] =
-        [MealAddition::Dessert, MealAddition::Side, MealAddition::Drink];
+    pub const ALL: [MealAddition; 3] = [
+        MealAddition::Dessert,
+        MealAddition::Side,
+        MealAddition::Drink,
+    ];
 }
 
 /// The canonical form of a chosen-additions list: each addition at most once, in
@@ -1271,10 +1274,7 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<CreateBody>(bad).is_err(), "{bad}");
         }
-        for bad in [
-            r#"{"meal_type":"brunch"}"#,
-            r#"{"meal_type":"dessert"}"#,
-        ] {
+        for bad in [r#"{"meal_type":"brunch"}"#, r#"{"meal_type":"dessert"}"#] {
             assert!(serde_json::from_str::<MealTypeBody>(bad).is_err(), "{bad}");
         }
         for bad in [
@@ -1321,7 +1321,9 @@ mod tests {
         create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
-        update_additions(&conn, "c", &[MealAddition::Side]).await.unwrap();
+        update_additions(&conn, "c", &[MealAddition::Side])
+            .await
+            .unwrap();
         assert_eq!(
             load_lobby(&conn, "c").await.unwrap().unwrap().additions,
             vec![MealAddition::Side]

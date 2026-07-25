@@ -6,7 +6,7 @@ const invite = "https://recipes.lehlehleh.com/pick/8f2a1c4e9b7d";
 const meta = {
   title: "recipes/PlanLobby",
   component: PlanLobby,
-  args: { onStart: () => {}, onMealType: () => {} },
+  args: { onStart: () => {}, onMealType: () => {}, onAdditions: () => {} },
 } satisfies Meta<typeof PlanLobby>;
 export default meta;
 
@@ -51,6 +51,20 @@ export const Breakfast: Story = {
   },
 };
 
+/** Dinner with things alongside (#114): the host toggled dessert and drinks on,
+ * so the chosen pills fill in and the heading gains its quiet "with dessert &
+ * drink" line — the room decides the dinner; these come with it. */
+export const WithAdditions: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    mealType: "dinner",
+    additions: ["dessert", "drink"],
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
 /** In a kitchen: its members who are not yet deciding are offered as one-tap adds,
  * so the host does not have to send a link to people already in the kitchen (#72). */
 export const KitchenMembers: Story = {
@@ -68,13 +82,14 @@ export const KitchenMembers: Story = {
 };
 
 /** A guest waits: starting is the host's call, so a late arrival cannot close the
- * door on whoever is still inviting people. The heading still names the meal —
- * a guest reads it, only the host changes it. */
+ * door on whoever is still inviting people. The heading still names the meal and
+ * what comes with it — a guest reads both, only the host changes them. */
 export const Guest: Story = {
   args: {
     status: "ready",
     host: false,
     mealType: "snack",
+    additions: ["drink"],
     voters: [
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: "mel" },

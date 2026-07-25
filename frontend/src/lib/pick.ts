@@ -1,6 +1,6 @@
 import { ApiError, apiFetch, backendUrl } from "./client";
 import { turso } from "./turso";
-import type { MealType, RecipeCard } from "./types";
+import type { MealAddition, MealType, RecipeCard } from "./types";
 
 /**
  * The live, shared machinery of `pick` (#20).
@@ -197,6 +197,8 @@ export interface Lobby {
   kitchen_id: string | null;
   /** Which meal this plans (#114). Every plan has one; dinner until the host says. */
   meal_type: MealType;
+  /** What comes with it (#114) — each at most once, in vocabulary order. */
+  additions: MealAddition[];
   host: string;
   started: boolean;
   voters: Voter[];
@@ -255,6 +257,20 @@ export async function setMealType(
     { method: "POST", body: JSON.stringify({ meal_type: mealType }) },
   );
   if (!res.ok) throw lobbyFailed(res.status, "change the meal");
+  return (await res.json()) as Lobby;
+}
+
+/** Name what comes with the meal (#114) — the whole chosen set each time.
+ * Host only, before it starts. */
+export async function setAdditions(
+  channel: string,
+  additions: MealAddition[],
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/additions`,
+    { method: "POST", body: JSON.stringify({ additions }) },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "change the additions");
   return (await res.json()) as Lobby;
 }
 

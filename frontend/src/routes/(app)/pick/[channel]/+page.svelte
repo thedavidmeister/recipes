@@ -12,6 +12,7 @@
     joinLobby,
     startPlan,
     seatMember,
+    setAdditions,
     setMealType,
     type ConnStatus,
     type Lobby,
@@ -19,7 +20,13 @@
   import PlanLobby from "$lib/components/PlanLobby.svelte";
   import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
-  import type { MealType, Match, PickStatus, RecipeCard } from "$lib/types";
+  import type {
+    MealAddition,
+    MealType,
+    Match,
+    PickStatus,
+    RecipeCard,
+  } from "$lib/types";
   import Pick from "$lib/components/Pick.svelte";
 
   /**
@@ -233,6 +240,16 @@
     }
   }
 
+  /** The host names what comes with the meal (#114) — the whole chosen set. */
+  async function chooseAdditions(additions: MealAddition[]) {
+    try {
+      lobby = await setAdditions(channel, additions);
+    } catch (e) {
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't change the additions.";
+    }
+  }
+
   // Who is looking, so the lobby knows whether to offer the start. The layout has
   // already fetched this, so it is a cache read rather than a request.
   const session = createQuery(() => ({
@@ -369,11 +386,13 @@
     voters={lobby?.voters}
     candidates={lobby?.candidates}
     mealType={lobby?.meal_type}
+    additions={lobby?.additions}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     inviteLink={page.url.href}
     error={lobbyError}
     onStart={begin}
     onSeat={seat}
     onMealType={chooseMeal}
+    onAdditions={chooseAdditions}
   />
 {/if}

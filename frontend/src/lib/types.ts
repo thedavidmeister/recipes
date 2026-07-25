@@ -125,18 +125,22 @@ export interface WalkStop {
 // ---- pick (#20) ------------------------------------------------------------
 
 /**
- * The fixed meal-type vocabulary (#114), in the order the lobby's picker shows it.
- * Mirrors `session::MealType` — exactly the meals you sit down to. A dessert, a
- * side, or a drink is an addition *to* a meal, a different concept deliberately
- * not in this set (the server refuses those words like any other unknown). A
- * closed set, so the picker is exhaustive and stable. The wire value is always
- * this lowercase word; sentence-casing is display-only. It lives here, not in
- * `pick.ts`, because components render it and this module is pure — a value
- * import must not drag the network client (and its `$env` read, absent under
- * Storybook) into a story.
+ * The meal vocabulary (#114) is two tiers, and the tier is the type — mirroring
+ * `session::MealType` / `session::MealAddition`. `MEAL_TYPES` is the primary
+ * tier: the meals you sit down to, of which a plan is for exactly one.
+ * `MEAL_ADDITIONS` is the secondary tier: what comes *with* a meal — dessert, a
+ * side, drinks — of which a plan can carry several, or none. The server refuses
+ * a word outside its tier (a plan "for dessert" is unrepresentable), so these
+ * lists are pickers over closed sets, exhaustive and stable, in the order shown.
+ * The wire value is always the lowercase word; sentence-casing is display-only.
+ * They live here, not in `pick.ts`, because components render them and this
+ * module is pure — a value import must not drag the network client (and its
+ * `$env` read, absent under Storybook) into a story.
  */
 export const MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"] as const;
 export type MealType = (typeof MEAL_TYPES)[number];
+export const MEAL_ADDITIONS = ["dessert", "side", "drink"] as const;
+export type MealAddition = (typeof MEAL_ADDITIONS)[number];
 
 /**
  * Render state of a pick's swipe view.
