@@ -41,7 +41,7 @@
       </h1>
 
       <div class="mt-5">
-        <Button onclick={onPlan} dot="pesto">Plan a meal here</Button>
+        <Button onclick={onPlan} dot="pesto">Let's cook!</Button>
       </div>
 
       <p class="mt-8 mb-3 text-xs text-stone-500">Who's in it</p>
