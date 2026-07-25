@@ -7,6 +7,9 @@
   import Login from "$lib/components/Login.svelte";
   import Nav from "$lib/components/Nav.svelte";
   import MusicSwitch from "$lib/components/MusicSwitch.svelte";
+  import KitchenBackdrop from "$lib/components/KitchenBackdrop.svelte";
+  import PickBackdrop from "$lib/components/PickBackdrop.svelte";
+  import { pageSlide } from "$lib/transition";
 
   let { children } = $props();
   const queryClient = useQueryClient();
@@ -176,6 +179,14 @@
     SECTIONS.find((s) => s === page.url.pathname.split("/")[1]),
   );
 
+  /**
+   * Which room you are in — the top path segment. It chooses the backdrop, the way it
+   * chooses the music (`trackFor`): the photograph behind the kitchens and pick routes
+   * lives here, rendered once and held still while the page slides over it, rather than
+   * being repeated in each section's layout where it would ride along with the motion.
+   */
+  const section = $derived(page.url.pathname.split("/")[1]);
+
   async function signOut() {
     await logout();
     queryClient.clear();
@@ -197,6 +208,14 @@
     error={session.error instanceof Error ? session.error.message : undefined}
   />
 {:else}
+  <!-- The room's backdrop, held out here rather than in the page so it stays still
+       while the page slides over it (see `pageSlide`). -->
+  {#if section === "kitchens"}
+    <KitchenBackdrop />
+  {:else if section === "pick"}
+    <PickBackdrop />
+  {/if}
+
   <!--
     The nav is the heading: `pick · buy · cook · joy` names where you are more
     clearly than an <h1> repeating the same word underneath it would. So the
@@ -227,7 +246,22 @@
       </button>
     </div>
 
-    {@render children()}
+    <!-- The page slides; the chrome around it stays. Keying on the path swaps the
+         page on navigation, and the leaving and arriving pages share one grid cell so
+         neither shoves the other down mid-cross. `overflow-x-clip` is the slide's
+         window: the page travels its own width (see `pageSlide`), so it clears exactly
+         this box and the off-screen half never reaches out to grow a scrollbar. -->
+    <div class="grid overflow-x-clip">
+      {#key page.url.pathname}
+        <div
+          class="col-start-1 row-start-1"
+          in:pageSlide={{ kind: "in" }}
+          out:pageSlide={{ kind: "out" }}
+        >
+          {@render children()}
+        </div>
+      {/key}
+    </div>
   </div>
 
   <MusicSwitch playing={on} onToggle={toggleMusic} />
