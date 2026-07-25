@@ -26,7 +26,7 @@
      * the corpus has not been read, so there is genuinely nothing legitimate to pick.
      */
     options?: string[];
-    /** Back to the kitchen this belongs to. */
+    /** Back to the kitchen's settings, the hub this page is reached from. */
     backHref: string;
     error?: string;
     actionError?: string;
@@ -57,12 +57,11 @@
    * every word turns "olive oil" into "Olive Oil", which is a claim about proper nouns
    * the data does not make.
    */
-  const display = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const display = (s: string) =>
+    s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 
   /** What is left to offer: known items this kitchen does not already have. */
-  const available = $derived(
-    options?.filter((o) => !items.includes(o)) ?? [],
-  );
+  const available = $derived(options?.filter((o) => !items.includes(o)) ?? []);
 
   /** Narrowed by what has been typed — a picker, not a search. */
   const matches = $derived(
@@ -97,23 +96,27 @@
 
 <div class="pt-48 pb-16">
   <Panel>
-    <a href={backHref} class="text-sm text-stone-500 underline">← Kitchen</a>
-    <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">{title}</h1>
+    <a href={backHref} class="text-sm text-stone-500 underline">← Settings</a>
+    <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">
+      {title}
+    </h1>
 
     {#if status === "error"}
-      <p class="mt-4 text-sm text-stone-600">{error ?? `Couldn't load the ${title.toLowerCase()}.`}</p>
+      <p class="mt-4 text-sm text-stone-600">
+        {error ?? `Couldn't load the ${title.toLowerCase()}.`}
+      </p>
     {:else if status === "pending"}
       <div class="mt-4"><Skeleton /></div>
     {:else}
       {#if actionError}
-        <p role="alert" class="mt-3 text-sm text-paprika-500">{actionError}</p>
+        <p role="alert" class="text-paprika-500 mt-3 text-sm">{actionError}</p>
       {/if}
 
       {#if items.length}
         <ul class="mt-5 flex flex-wrap gap-2">
           {#each items as item (item)}
             <li
-              class="rounded-pill flex items-center gap-2 border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-700"
+              class="rounded-pill bg-cream-100 flex items-center gap-2 border border-stone-200 px-3 py-1 text-sm text-stone-700"
             >
               {display(item)}
               <button
@@ -131,8 +134,9 @@
 
       {#if options !== undefined && options.length === 0}
         <p class="mt-6 text-sm text-stone-600">
-          Nothing to choose from yet — no recipe has been read for the equipment it
-          needs. Once the corpus has been read, what you can own appears here.
+          Nothing to choose from yet — no recipe has been read for the equipment
+          it needs. Once the corpus has been read, what you can own appears
+          here.
         </p>
       {:else}
         <form class="mt-6 flex gap-2" onsubmit={add}>
@@ -140,7 +144,7 @@
             bind:value
             {placeholder}
             list={options ? "known-items" : undefined}
-            class="rounded-card flex-1 border border-stone-200 bg-cream-50 px-3 py-2 text-sm text-stone-900"
+            class="rounded-card bg-cream-50 flex-1 border border-stone-200 px-3 py-2 text-sm text-stone-900"
           />
           {#if options}
             <datalist id="known-items">
@@ -152,7 +156,7 @@
           <button
             type="submit"
             disabled={!choosable}
-            class="rounded-card flex-none bg-cocoa-500 px-4 py-2 text-sm font-medium text-cream-50 disabled:opacity-40"
+            class="rounded-card bg-cocoa-500 text-cream-50 flex-none px-4 py-2 text-sm font-medium disabled:opacity-40"
           >
             Add
           </button>

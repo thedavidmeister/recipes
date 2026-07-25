@@ -29,7 +29,6 @@
     queryFn: pantryVocabulary,
   }));
 
-
   let actionError = $state<string | null>(null);
 
   function cache(k: KitchenDetail) {
@@ -58,7 +57,7 @@
   items={detail.data?.pantry}
   options={known.data ?? []}
   placeholder="Add to the pantry (rice, eggs…)"
-  backHref="/kitchens/{id}"
+  backHref="/kitchens/{id}/settings"
   error={detail.error}
   actionError={actionError ?? undefined}
   {onAdd}

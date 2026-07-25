@@ -34,6 +34,7 @@
 {#if detail.data}
   <KitchenRename
     current={detail.data.name}
+    backHref="/kitchens/{id}/settings"
     error={error ?? undefined}
     {onRename}
   />

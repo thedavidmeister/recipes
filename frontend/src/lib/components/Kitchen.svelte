@@ -1,13 +1,14 @@
 <script lang="ts">
-  import RowLink from "./RowLink.svelte";
   import Skeleton from "./Skeleton.svelte";
   import Panel from "./Panel.svelte";
   import Button from "./Button.svelte";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
 
   /**
-   * One kitchen (#72): what it is and who is in it. Everything you *do* to it — invite
-   * someone, rename it, stock it — is its own page, so this one stays a single idea.
+   * One kitchen (#72): what it is, who is in it, and the thing you come here to do —
+   * start a meal. Changing the kitchen — its name, who's in it, what it owns — lives
+   * on its settings page (#117), reached by a single quiet link, so this page is about
+   * being in the kitchen rather than administering it.
    *
    * Nobody here has a role. Everyone in a kitchen is an owner of it — being a guest is
    * something you are at a meal, not in a room — so the list of people is a list of
@@ -43,29 +44,6 @@
         <Button onclick={onPlan} dot="pesto">Plan a meal here</Button>
       </div>
 
-      <ul class="mt-5 flex flex-col gap-2">
-        <li>
-          <RowLink href="/kitchens/{kitchen.id}/name">
-          Rename
-        </RowLink>
-        </li>
-        <li>
-          <RowLink href="/kitchens/{kitchen.id}/invite">
-          Invite someone
-        </RowLink>
-        </li>
-        <li>
-          <RowLink href="/kitchens/{kitchen.id}/equipment" trailing={kitchen.equipment.length}>
-          Equipment
-        </RowLink>
-        </li>
-        <li>
-          <RowLink href="/kitchens/{kitchen.id}/pantry" trailing={kitchen.pantry.length}>
-          Pantry
-        </RowLink>
-        </li>
-      </ul>
-
       <p class="mt-8 mb-3 text-xs text-stone-500">Who's in it</p>
       <ul class="flex flex-col gap-1.5">
         {#each kitchen.members as m (m.telegram_user_id)}
@@ -75,6 +53,14 @@
         {/each}
       </ul>
 
+      <div class="mt-8">
+        <a
+          href="/kitchens/{kitchen.id}/settings"
+          class="text-sm text-stone-500 underline hover:text-stone-700"
+        >
+          Settings
+        </a>
+      </div>
     {/if}
   </Panel>
 </div>

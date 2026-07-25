@@ -19,6 +19,8 @@
    */
   interface Props {
     status: "pending" | "error" | "ready";
+    /** Back to the kitchen's settings, the hub this page is reached from. */
+    backHref: string;
     /** The shareable URL that seats whoever opens it. */
     link?: string;
     kitchen?: string;
@@ -36,7 +38,8 @@
     onRenew?: () => void;
   }
 
-  let { status, link, kitchen, remaining, error, onRenew }: Props = $props();
+  let { status, backHref, link, kitchen, remaining, error, onRenew }: Props =
+    $props();
 
   const dead = $derived(remaining !== undefined && remaining <= 0);
 
@@ -65,11 +68,10 @@
 
 <div class="pt-48 pb-16">
   <Panel>
-    <p class="font-display flex items-center gap-2 text-stone-600">
-      <a href="/kitchens" class="text-stone-500 underline">Kitchens</a>
-      <span aria-hidden="true">·</span>
+    <a href={backHref} class="text-sm text-stone-500 underline">← Settings</a>
+    <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">
       Invite
-    </p>
+    </h1>
 
     {#if status === "error"}
       <p class="mt-4 text-sm text-stone-600">
@@ -77,8 +79,8 @@
       </p>
     {:else if dead}
       <p class="mt-4 text-sm text-stone-600">
-        This link has run out. Links last two hours, so one that has been sitting open
-        is no use to anybody — including whoever finds it.
+        This link has run out. Links last two hours, so one that has been
+        sitting open is no use to anybody — including whoever finds it.
       </p>
       <div class="mt-6">
         <Button onclick={onRenew} dot="cocoa">Make a new link</Button>
@@ -86,26 +88,26 @@
     {:else if status === "pending" || !link}
       <div class="mt-4"><Skeleton /></div>
     {:else}
-        <p class="mt-4 text-sm text-stone-600">
-          Anyone who opens this joins {kitchen ?? "the kitchen"} — the same as
-          everyone else in it.
-        </p>
-        <p class="mt-1 text-sm text-stone-500">
-          {countdown
-            ? `Good for ${countdown}, then it stops working.`
-            : "Good for two hours, then it stops working."}
-        </p>
+      <p class="mt-4 text-sm text-stone-600">
+        Anyone who opens this joins {kitchen ?? "the kitchen"} — the same as everyone
+        else in it.
+      </p>
+      <p class="mt-1 text-sm text-stone-500">
+        {countdown
+          ? `Good for ${countdown}, then it stops working.`
+          : "Good for two hours, then it stops working."}
+      </p>
 
-        <div class="mt-8 flex flex-col items-center gap-5">
-          <QrCode value={link} label="Scan to join {kitchen ?? 'this kitchen'}" />
-          <button
-            type="button"
-            onclick={copy}
-            class="rounded-pill border-cocoa-500 text-cocoa-500 border px-4 py-2 text-sm font-medium"
-          >
-            {copied ? "Copied" : "Copy invite link"}
-          </button>
-        </div>
+      <div class="mt-8 flex flex-col items-center gap-5">
+        <QrCode value={link} label="Scan to join {kitchen ?? 'this kitchen'}" />
+        <button
+          type="button"
+          onclick={copy}
+          class="rounded-pill border-cocoa-500 text-cocoa-500 border px-4 py-2 text-sm font-medium"
+        >
+          {copied ? "Copied" : "Copy invite link"}
+        </button>
+      </div>
     {/if}
   </Panel>
 </div>

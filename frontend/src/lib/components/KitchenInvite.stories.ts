@@ -6,7 +6,7 @@ const link = "https://recipes.lehlehleh.com/kitchens?join=a1b2c3d4e5f6a7b8";
 const meta = {
   title: "recipes/KitchenInvite",
   component: KitchenInvite,
-  args: { onRenew: () => {} },
+  args: { backHref: "/kitchens/k1/settings", onRenew: () => {} },
 } satisfies Meta<typeof KitchenInvite>;
 export default meta;
 

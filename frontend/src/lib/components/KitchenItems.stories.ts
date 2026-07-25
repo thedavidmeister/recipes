@@ -32,7 +32,7 @@ export const Equipment: Story = {
       "whisk",
       "wok",
     ],
-    backHref: "/kitchens/k1",
+    backHref: "/kitchens/k1/settings",
   },
 };
 
@@ -46,7 +46,7 @@ export const NothingKnownYet: Story = {
     items: [],
     placeholder: "Add equipment (blender, wok…)",
     options: [],
-    backHref: "/kitchens/k1",
+    backHref: "/kitchens/k1/settings",
   },
 };
 
@@ -70,7 +70,7 @@ export const Pantry: Story = {
       "rice",
       "salt",
     ],
-    backHref: "/kitchens/k1",
+    backHref: "/kitchens/k1/settings",
   },
 };
 
@@ -81,6 +81,6 @@ export const Empty: Story = {
     title: "Equipment",
     items: [],
     placeholder: "Add equipment (blender, wok…)",
-    backHref: "/kitchens/k1",
+    backHref: "/kitchens/k1/settings",
   },
 };

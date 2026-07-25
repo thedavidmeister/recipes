@@ -4,7 +4,7 @@ import KitchenRename from "./KitchenRename.svelte";
 const meta = {
   title: "recipes/KitchenRename",
   component: KitchenRename,
-  args: { onRename: () => {} },
+  args: { backHref: "/kitchens/k1/settings", onRename: () => {} },
 } satisfies Meta<typeof KitchenRename>;
 export default meta;
 
