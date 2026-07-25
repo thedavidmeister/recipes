@@ -137,24 +137,33 @@ pub async fn create(
     Extension(user): Extension<CurrentUser>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
+    // Minted once, *outside* the retryable closure, so every attempt writes the
+    // same plan: a re-run after a lost response then hits the primary key and
+    // fails honestly instead of minting a second plan (#130).
     let channel_id = mint_channel_id();
-    // One connection for both writes: the plan and its first voter are one act, and
-    // two connections to a local database can contend for the same write lock.
-    let db = state.db()?;
-    create_session(
-        &db,
-        &channel_id,
-        &user.telegram_user_id,
-        body.filter.as_deref(),
-        body.kitchen_id.as_deref(),
-    )
+    // One closure — one connection per attempt — for both writes: the plan and
+    // its first voter are one act, and two connections to a local database can
+    // contend for the same write lock.
+    {
+        let channel_id = &channel_id;
+        let user = &user;
+        let body = &body;
+        state.with_db(move |db| async move {
+            create_session(
+                &db,
+                channel_id,
+                &user.telegram_user_id,
+                body.filter.as_deref(),
+                body.kitchen_id.as_deref(),
+            )
+            .await?;
+            // The host is in their own plan from the moment it exists, so a lobby is
+            // never empty and a plan never has nobody deciding it.
+            seat_voter(&db, channel_id, &user.telegram_user_id).await
+        })
+    }
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
-    // The host is in their own plan from the moment it exists, so a lobby is never
-    // empty and a plan never has nobody deciding it.
-    seat_voter(&db, &channel_id, &user.telegram_user_id)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(Created { channel_id }))
 }
 
@@ -192,7 +201,9 @@ pub async fn lobby(
     Extension(_user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    load_lobby(&state.db()?, &channel)
+    let channel = channel.as_str();
+    state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))
@@ -210,7 +221,10 @@ pub async fn join_lobby(
     Extension(user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    let view = load_lobby(&state.db()?, &channel)
+    let channel = channel.as_str();
+    let user = &user;
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -224,10 +238,11 @@ pub async fn join_lobby(
             "this meal plan has already started".into(),
         ));
     }
-    seat_voter(&state.db()?, &channel, &user.telegram_user_id)
+    state
+        .with_db(move |db| async move { seat_voter(&db, channel, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let view = reload_and_announce(&state, &channel).await?;
+    let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
 }
 
@@ -237,7 +252,9 @@ pub async fn start(
     Extension(user): Extension<CurrentUser>,
     Path(channel): Path<String>,
 ) -> Result<Json<LobbyView>, AppError> {
-    let view = load_lobby(&state.db()?, &channel)
+    let channel = channel.as_str();
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -246,10 +263,11 @@ pub async fn start(
             "only whoever started this plan can begin it".into(),
         ));
     }
-    begin_session(&state.db()?, &channel)
+    state
+        .with_db(move |db| async move { begin_session(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let view = reload_and_announce(&state, &channel).await?;
+    let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
 }
 
@@ -272,8 +290,10 @@ pub async fn seat(
     Path(channel): Path<String>,
     Json(body): Json<SeatBody>,
 ) -> Result<Json<LobbyView>, AppError> {
-    let db = state.db()?;
-    let view = load_lobby(&db, &channel)
+    let channel = channel.as_str();
+    let body = &body;
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -293,7 +313,10 @@ pub async fn seat(
             "this plan is not in a kitchen, so it has no members to add — share the link".into(),
         ));
     };
-    if !crate::kitchens::is_member(&db, kitchen_id, &body.user_id)
+    if !state
+        .with_db(move |db| async move {
+            crate::kitchens::is_member(&db, kitchen_id, &body.user_id).await
+        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
     {
@@ -302,17 +325,19 @@ pub async fn seat(
         ));
     }
 
-    seat_voter(&db, &channel, &body.user_id)
+    state
+        .with_db(move |db| async move { seat_voter(&db, channel, &body.user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let view = reload_and_announce(&state, &channel).await?;
+    let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
 }
 
 /// Re-read the lobby and tell the room, so every open client moves together — a guest
 /// arriving, or the host pressing start, lands on everyone's screen at once.
 async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyView, AppError> {
-    let view = load_lobby(&state.db()?, channel)
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
@@ -338,9 +363,12 @@ pub async fn ws(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     // An unknown channel is a client bug, not a new room to conjure.
-    if !session_exists(&state.db()?, &channel)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
+    if !{
+        let channel = channel.as_str();
+        state.with_db(move |db| async move { session_exists(&db, channel).await })
+    }
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
     {
         return Err(AppError::BadRequest(format!("unknown session: {channel}")));
     }

@@ -36,9 +36,10 @@ pub async fn pending(
     Query(params): Query<PendingParams>,
 ) -> Result<Json<Vec<equipment::PendingEquipmentRecipe>>, AppError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let recipes = equipment::pending(&state.db()?, limit)
+    let recipes = state
+        .with_db(move |conn| async move { equipment::pending(&conn, limit).await })
         .await
-        .map_err(|e| AppError::Internal(format!("equipment pending failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("equipment pending failed: {e:#}")))?;
     Ok(Json(recipes))
 }
 
@@ -58,9 +59,14 @@ pub async fn results(
             "model is required — it is the reading's provenance".into(),
         ));
     }
-    let report = equipment::submit(&state.db()?, req.readings, req.model.trim())
+    // Safe to re-run on a transient failure: every write in `submit` is a
+    // `run_id`-guarded upsert (#11, #130).
+    let readings = &req.readings;
+    let model = req.model.trim();
+    let report = state
+        .with_db(move |conn| async move { equipment::submit(&conn, readings.clone(), model).await })
         .await
-        .map_err(|e| AppError::Internal(format!("equipment results failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("equipment results failed: {e:#}")))?;
     Ok(Json(report))
 }
 
@@ -133,9 +139,10 @@ pub async fn vocabulary(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<crate::auth::CurrentUser>,
 ) -> Result<Json<Vec<String>>, AppError> {
-    let items = equipment::vocabulary(&state.db()?)
+    let items = state
+        .with_db(move |conn| async move { equipment::vocabulary(&conn).await })
         .await
-        .map_err(|e| AppError::Internal(format!("equipment vocabulary failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("equipment vocabulary failed: {e:#}")))?;
     Ok(Json(items))
 }
 
@@ -146,8 +153,9 @@ pub async fn pantry_vocabulary(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<crate::auth::CurrentUser>,
 ) -> Result<Json<Vec<String>>, AppError> {
-    let items = crate::enrich::vocabulary(&state.db()?)
+    let items = state
+        .with_db(move |conn| async move { crate::enrich::vocabulary(&conn).await })
         .await
-        .map_err(|e| AppError::Internal(format!("pantry vocabulary failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("pantry vocabulary failed: {e:#}")))?;
     Ok(Json(items))
 }

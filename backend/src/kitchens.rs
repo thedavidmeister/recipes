@@ -99,10 +99,20 @@ pub async fn create(
     if name.is_empty() {
         return Err(AppError::BadRequest("kitchen name is required".into()));
     }
-    let id = create_kitchen(&state.db()?, name, &user.telegram_user_id)
+    // Minted *outside* the retryable closure so every attempt writes the same
+    // kitchen: a re-run after a lost response then hits the primary key and fails
+    // honestly, instead of minting a second kitchen the caller is also in (#130).
+    let id = mint(16);
+    let id = id.as_str();
+    let user = &user;
+    state
+        .with_db(move |conn| async move {
+            create_owned(&conn, id, name, &user.telegram_user_id, false).await
+        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db()?, &id, &user.telegram_user_id)
+    state
+        .with_db(move |conn| async move { load_detail(&conn, id, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -118,14 +128,15 @@ pub async fn list(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<CurrentUser>,
 ) -> Result<Json<Vec<KitchenSummary>>, AppError> {
-    ensure_primary(
-        &state.db()?,
-        &user.telegram_user_id,
-        user.username.as_deref(),
-    )
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
-    list_kitchens(&state.db()?, &user.telegram_user_id)
+    let user = &user;
+    state
+        .with_db(move |conn| async move {
+            ensure_primary(&conn, &user.telegram_user_id, user.username.as_deref()).await
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .with_db(move |conn| async move { list_kitchens(&conn, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -137,8 +148,11 @@ pub async fn get(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    require_member(&state.db()?, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db()?, &id, &user.telegram_user_id)
+    let id = id.as_str();
+    let user = &user;
+    require_member(&state, id, &user.telegram_user_id).await?;
+    state
+        .with_db(move |conn| async move { load_detail(&conn, id, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -155,15 +169,19 @@ pub async fn rename(
     Path(id): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    require_member(&state.db()?, &id, &user.telegram_user_id).await?;
+    let id = id.as_str();
+    let user = &user;
+    require_member(&state, id, &user.telegram_user_id).await?;
     let name = body.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("kitchen name is required".into()));
     }
-    rename_kitchen(&state.db()?, &id, name)
+    state
+        .with_db(move |conn| async move { rename_kitchen(&conn, id, name).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db()?, &id, &user.telegram_user_id)
+    state
+        .with_db(move |conn| async move { load_detail(&conn, id, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -205,14 +223,22 @@ pub async fn invite(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<Invite>, AppError> {
-    let db = state.db()?;
-    require_member(&db, &id, &user.telegram_user_id).await?;
+    require_member(&state, &id, &user.telegram_user_id).await?;
 
+    // Minted outside the retryable closure: every attempt stores the same hash,
+    // so a re-run after a lost response cannot leave a second live invite (#130).
     let token = mint(16);
     let expires_at = now() + INVITE_TTL_SECS;
-    store_invite(&db, &token, &id, &user.telegram_user_id, expires_at)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    {
+        let token = token.as_str();
+        let id = id.as_str();
+        let user = &user;
+        state.with_db(move |conn| async move {
+            store_invite(&conn, token, id, &user.telegram_user_id, expires_at).await
+        })
+    }
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(Invite { token, expires_at }))
 }
 
@@ -222,12 +248,19 @@ pub async fn join(
     axum::Extension(user): axum::Extension<CurrentUser>,
     Json(body): Json<JoinBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    let id = join_by_token(&state.db()?, body.token.trim(), &user.telegram_user_id)
+    let token = body.token.trim();
+    let user = &user;
+    let id = state
+        .with_db(
+            move |conn| async move { join_by_token(&conn, token, &user.telegram_user_id).await },
+        )
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest("no kitchen for that invite".into()))?;
-    require_member(&state.db()?, &id, &user.telegram_user_id).await?;
-    load_detail(&state.db()?, &id, &user.telegram_user_id)
+    let id = id.as_str();
+    require_member(&state, id, &user.telegram_user_id).await?;
+    state
+        .with_db(move |conn| async move { load_detail(&conn, id, &user.telegram_user_id).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
@@ -252,7 +285,8 @@ pub async fn add_equipment(
     Json(body): Json<ItemBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
     let raw = body.item.trim();
-    let item = crate::equipment::normalise_known(&state.db()?, raw)
+    let item = state
+        .with_db(move |conn| async move { crate::equipment::normalise_known(&conn, raw).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| {
@@ -293,7 +327,8 @@ pub async fn add_pantry(
     Json(body): Json<ItemBody>,
 ) -> Result<Json<KitchenDetail>, AppError> {
     let raw = body.item.trim();
-    let item = crate::enrich::normalise_known(&state.db()?, raw)
+    let item = state
+        .with_db(move |conn| async move { crate::enrich::normalise_known(&conn, raw).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| {
@@ -338,25 +373,40 @@ async fn mutate_item(
     item: &str,
     op: Op,
 ) -> Result<Json<KitchenDetail>, AppError> {
-    require_member(&state.db()?, kitchen_id, &user.telegram_user_id).await?;
+    require_member(state, kitchen_id, &user.telegram_user_id).await?;
     if item.is_empty() {
         return Err(AppError::BadRequest("item is required".into()));
     }
     let res = match op {
-        Op::Add => add_item(&state.db()?, table, kitchen_id, item).await,
-        Op::Remove => remove_item(&state.db()?, table, kitchen_id, item).await,
+        Op::Add => {
+            state
+                .with_db(move |conn| async move { add_item(&conn, table, kitchen_id, item).await })
+                .await
+        }
+        Op::Remove => {
+            state
+                .with_db(
+                    move |conn| async move { remove_item(&conn, table, kitchen_id, item).await },
+                )
+                .await
+        }
     };
     res.map_err(|e| AppError::Internal(e.to_string()))?;
-    load_detail(&state.db()?, kitchen_id, &user.telegram_user_id)
+    state
+        .with_db(
+            move |conn| async move { load_detail(&conn, kitchen_id, &user.telegram_user_id).await },
+        )
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
         .map(Json)
 }
 
 /// Whether this kitchen is the caller's primary, or `Forbidden` if they are not in it
-/// — the gate every kitchen-scoped read/write passes through.
-async fn require_member(conn: &Connection, kitchen_id: &str, user: &str) -> Result<bool, AppError> {
-    membership(conn, kitchen_id, user)
+/// — the gate every kitchen-scoped read/write passes through. A read, so it takes the
+/// state and rides the transient-failure retry (#130) like every other handler read.
+async fn require_member(state: &AppState, kitchen_id: &str, user: &str) -> Result<bool, AppError> {
+    state
+        .with_db(move |conn| async move { membership(&conn, kitchen_id, user).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::Forbidden("not a member of this kitchen".into()))
@@ -364,28 +414,36 @@ async fn require_member(conn: &Connection, kitchen_id: &str, user: &str) -> Resu
 
 // --- persistence (pure, testable) ----------------------------------------------
 
-/// Create a kitchen owned by `owner` and seat the owner as its first member. Returns
-/// the new kitchen's id.
-///
-/// Both writes go in one transaction. A kitchen row without its membership row is a
-/// kitchen nobody is in: `list_kitchens` joins `kitchen_members`, so it would show up
-/// for no one and be reachable by no one.
+/// Test-only convenience: create a kitchen owned by `owner`, minting the id, and
+/// return it. Production goes through [`create_owned`] with an id minted *outside*
+/// the retryable closure (#130) — minting in here would give every retry attempt a
+/// fresh id, so a re-run after a lost response could create a second kitchen.
+#[cfg(test)]
 pub(crate) async fn create_kitchen(
     conn: &Connection,
     name: &str,
     owner: &str,
 ) -> anyhow::Result<String> {
-    create_owned(conn, name, owner, false).await
+    let id = mint(16);
+    create_owned(conn, &id, name, owner, false).await?;
+    Ok(id)
 }
 
-/// Create a kitchen owned by `owner`, optionally as their primary.
+/// Create the kitchen `id` owned by `owner`, optionally as their primary, and seat
+/// the owner as its first member. The id comes from the caller so a retried create
+/// writes the same row every attempt (#130).
+///
+/// Both writes go in one transaction. A kitchen row without its membership row is a
+/// kitchen nobody is in: `list_kitchens` joins `kitchen_members`, so it would show up
+/// for no one and be reachable by no one.
 async fn create_owned(
     conn: &Connection,
+    id: &str,
     name: &str,
     owner: &str,
     primary: bool,
-) -> anyhow::Result<String> {
-    let id = mint(16);
+) -> anyhow::Result<()> {
+    let id = id.to_owned();
     let tx = conn.transaction().await?;
     tx.execute(
         "INSERT INTO kitchens (id, name, owner_id) VALUES (?1, ?2, ?3)",
@@ -399,7 +457,7 @@ async fn create_owned(
     )
     .await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(())
 }
 
 /// The name a kitchen arrives with: the person's, when Telegram gave us one to use.
@@ -436,7 +494,9 @@ async fn ensure_primary(
     if has_primary(conn, user).await? {
         return Ok(());
     }
-    match create_owned(conn, &default_kitchen_name(username), user, true).await {
+    // The id may be minted per call: two racing creates (or a #130 retry) are
+    // settled by the unique primary index, not by id equality.
+    match create_owned(conn, &mint(16), &default_kitchen_name(username), user, true).await {
         Ok(_) => Ok(()),
         Err(e) => {
             if has_primary(conn, user).await? {
