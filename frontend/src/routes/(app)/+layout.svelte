@@ -41,8 +41,13 @@
       "/music/title-4.mp3",
     ],
     pick: ["/pick.mp3"],
-    // Their own tracks are still to come (#125 and siblings); empty until then.
-    buy: [],
+    buy: [
+      "/music/buy-1.mp3",
+      "/music/buy-2.mp3",
+      "/music/buy-3.mp3",
+      "/music/buy-4.mp3",
+    ],
+    // Their own tracks are still to come; empty until then.
     cook: [],
     joy: [],
   };
