@@ -163,6 +163,7 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/seat", post(session::seat))
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
+        .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -1031,9 +1032,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(body_json(res).await["meal_type"], "dinner");
+        let body = body_json(res).await;
+        assert_eq!(body["meal_type"], "dinner");
+        assert_eq!(body["additions"], serde_json::json!([]), "a plain meal");
 
         let res = app
+            .clone()
             .oneshot(json_post(
                 &format!("/api/session/{channel}/meal-type"),
                 Some(&cookie),
@@ -1043,6 +1047,22 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_json(res).await["meal_type"], "breakfast");
+
+        // And what comes with it — replied in canonical order, however the host's
+        // client happened to say it.
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/additions"),
+                Some(&cookie),
+                r#"{"additions":["drink","dessert"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(res).await["additions"],
+            serde_json::json!(["dessert", "drink"])
+        );
     }
 
     /// A plan can be created *for* a meal — the API takes the type up front, so a
@@ -1058,7 +1078,7 @@ mod tests {
             .oneshot(json_post(
                 "/api/session",
                 Some(&cookie),
-                r#"{"meal_type":"snack"}"#,
+                r#"{"meal_type":"snack","additions":["drink"]}"#,
             ))
             .await
             .unwrap();
@@ -1078,11 +1098,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(body_json(res).await["meal_type"], "snack");
+        let body = body_json(res).await;
+        assert_eq!(body["meal_type"], "snack");
+        assert_eq!(body["additions"], serde_json::json!(["drink"]));
     }
 
     /// The vocabulary is closed server-side: a meal outside it is refused at the
-    /// wire, on create and on change alike — nothing stores "brunch".
+    /// wire, on create and on change alike. "dessert" is deliberate: it is an
+    /// addition *to* a meal, not a meal you sit down to, so it is as refused as a
+    /// made-up word.
     #[tokio::test]
     async fn a_meal_outside_the_vocabulary_is_refused() {
         let (app, conn) = test_app().await;
@@ -1096,7 +1120,7 @@ mod tests {
             .oneshot(json_post(
                 "/api/session",
                 Some(&cookie),
-                r#"{"meal_type":"brunch"}"#,
+                r#"{"meal_type":"dessert"}"#,
             ))
             .await
             .unwrap();

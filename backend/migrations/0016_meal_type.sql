@@ -1,13 +1,26 @@
--- A meal plan is FOR a meal (#114): breakfast, lunch, dinner, snack, dessert,
--- side, drink. The type is one column on the session — not free text and not a
--- table of its own — because unlike ingredients it is a small closed set, chosen
--- once, up front, in the lobby (#93), and a picker over it should be exhaustive
--- and stable. The backend validates every write against that fixed vocabulary
--- (session::MealType), always lowercase; the browser sentence-cases for display.
+-- A meal plan is FOR a meal (#114), in a two-tier vocabulary. The primary tier
+-- is the meals you sit down to — breakfast, lunch, dinner, snack — and a plan is
+-- for exactly one of them. The secondary tier is what comes WITH a meal —
+-- dessert, side, drink — and a plan can carry several, or none. The tiers are
+-- separate Rust types (session::MealType / session::MealAddition), so a plan
+-- "for dessert" or an addition of "dinner" is unrepresentable, refused at the
+-- wire before any handler runs. Both are fixed closed sets — not free text —
+-- chosen by the host, up front, in the lobby (#93), so a picker over them can be
+-- exhaustive and stable. Always lowercase; the browser sentence-cases for
+-- display.
 --
--- NOT NULL DEFAULT 'dinner': a plan is always for *some* meal, and dinner is the
--- meal a group most plausibly plans together — the same default the create
--- handler applies when a caller names none, so a pre-migration row and an
--- unstated choice read identically. The host can change it in the lobby until
--- the swiping starts; after that the roster voted under it, so it is fixed.
+-- meal_type NOT NULL DEFAULT 'dinner': a plan is always for *some* meal, and
+-- dinner is the meal a group most plausibly plans together — the same default
+-- the create handler applies when a caller names none, so a pre-migration row
+-- and an unstated choice read identically. The host can change it in the lobby
+-- until the swiping starts; after that the roster voted under it, so it is
+-- fixed.
+--
+-- additions: a JSON array of secondary words ('["dessert","drink"]'), each at
+-- most once, in vocabulary order; '[]' is a plain meal and the backfill for
+-- pre-migration rows. Same lobby-open editability, same freeze at start.
+-- Chosen additions are recorded and shown to the room; the pick itself still
+-- runs one round, for the meal — a pick round per addition is a possible future
+-- feature, deliberately not built here.
 ALTER TABLE pick_sessions ADD COLUMN meal_type TEXT NOT NULL DEFAULT 'dinner';
+ALTER TABLE pick_sessions ADD COLUMN additions TEXT NOT NULL DEFAULT '[]';
