@@ -120,7 +120,7 @@
 
       {#if host}
         <div class="mt-8">
-          <Button onclick={onStart} dot="pesto">Start swiping</Button>
+          <Button onclick={onStart} dot="pesto">Start</Button>
         </div>
       {:else}
         <p class="mt-8 text-sm text-stone-500">
