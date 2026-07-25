@@ -21,21 +21,19 @@
   const FADE = 2500;
 
   /**
-   * The music (#88, #121, #125), **per section** and now a **pool** per section rather
-   * than one fixed track. The kitchens routes are the main theme and carry several
-   * tracks; pick has its own; the rest of the app is quiet. Entering a section starts a
-   * random track from its pool, and when a track ends another random one from the same
-   * pool follows — never the same twice running — so the theme cycles instead of
-   * looping one song. Moving *between* sections does not cut: one track fades down as
-   * the next fades up, so a navigation feels like walking from one room into another.
+   * The music (#88, #121, #125): a **pool of tracks per section**, every section played
+   * by the same code — only the list differs. Entering a section starts a random track
+   * from its pool, and when one ends another random one from the same pool follows —
+   * never the same twice running — so a section cycles through its set instead of
+   * looping a single song. A pool of one track just loops it; an empty pool is silence,
+   * where a section sits until its tracks arrive. Moving *between* sections does not cut:
+   * one track fades down as the next fades up, like walking from one room into another.
    *
    * A crossfade needs two things playing at once, so there are two voices. Whichever is
-   * audible fades out and pauses; the other loads the next track and fades in. A section
-   * with no pool is silence, reached the same way — the audible voice fades to nothing.
+   * audible fades out and pauses; the other loads the next track and fades in.
    */
   const NONE: string[] = [];
   const POOLS: Record<string, string[]> = {
-    // The main theme, over the landing kitchen and everything under /kitchens.
     kitchens: [
       "/music/title-1.mp3",
       "/music/title-2.mp3",
@@ -43,6 +41,10 @@
       "/music/title-4.mp3",
     ],
     pick: ["/pick.mp3"],
+    // Their own tracks are still to come (#125 and siblings); empty until then.
+    buy: [],
+    cook: [],
+    joy: [],
   };
   function poolFor(pathname: string): string[] {
     return POOLS[pathname.split("/")[1]] ?? NONE;
@@ -93,7 +95,14 @@
     if (voices.length < 2) return;
 
     const src = pickFrom(pool, playingSrc);
-    const next = voices.find((v) => v !== live) ?? voices[0];
+    // Prefer a genuinely idle voice. `live` alone is not enough: after a fade to silence
+    // `live` is cleared while the old voice is still fading out, and picking that voice
+    // would cut its fade mid-decay and leave the truly idle one unused. So skip any voice
+    // with a fade in flight first, and only fall back if both are busy.
+    const next =
+      voices.find((v) => v !== live && !fades.has(v)) ??
+      voices.find((v) => v !== live) ??
+      voices[0];
     if (next.getAttribute("src") !== src) next.src = src;
     next.currentTime = 0;
     // One track loops itself seamlessly; a pool of several advances on `ended` (see
