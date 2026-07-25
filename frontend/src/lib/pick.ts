@@ -1,6 +1,6 @@
 import { ApiError, apiFetch, backendUrl } from "./client";
 import { turso } from "./turso";
-import type { RecipeCard } from "./types";
+import type { MealAddition, MealType, RecipeCard } from "./types";
 
 /**
  * The live, shared machinery of `pick` (#20).
@@ -92,12 +92,7 @@ export interface PickHandlers {
    * change to either. */
   onLobby: (deciders: number, started: boolean) => void;
   /** One live vote from any peer (including this client's own echo). */
-  onVote: (
-    voter: string,
-    source: string,
-    id: string,
-    vote: boolean,
-  ) => void;
+  onVote: (voter: string, source: string, id: string, vote: boolean) => void;
   onStatus: (status: ConnStatus) => void;
 }
 
@@ -200,6 +195,10 @@ export interface Voter {
 export interface Lobby {
   channel_id: string;
   kitchen_id: string | null;
+  /** Which meal this plans (#114). Every plan has one; dinner until the host says. */
+  meal_type: MealType;
+  /** What comes with it (#114) — each at most once, in vocabulary order. */
+  additions: MealAddition[];
   host: string;
   started: boolean;
   voters: Voter[];
@@ -210,7 +209,9 @@ export interface Lobby {
 function lobbyFailed(status: number, action: string): ApiError {
   return new ApiError(
     status,
-    status === 401 ? "Your session has expired." : `could not ${action} (${status})`,
+    status === 401
+      ? "Your session has expired."
+      : `could not ${action} (${status})`,
   );
 }
 
@@ -223,9 +224,12 @@ export async function getLobby(channel: string): Promise<Lobby> {
 
 /** Join a plan as a decider. Refused once the swiping has begun. */
 export async function joinLobby(channel: string): Promise<Lobby> {
-  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/join`, {
-    method: "POST",
-  });
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/join`,
+    {
+      method: "POST",
+    },
+  );
   if (!res.ok) throw lobbyFailed(res.status, "join this meal plan");
   return (await res.json()) as Lobby;
 }
@@ -243,11 +247,41 @@ export async function seatMember(
   return (await res.json()) as Lobby;
 }
 
+/** Name which meal the plan is for (#114). Host only, before it starts. */
+export async function setMealType(
+  channel: string,
+  mealType: MealType,
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/meal-type`,
+    { method: "POST", body: JSON.stringify({ meal_type: mealType }) },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "change the meal");
+  return (await res.json()) as Lobby;
+}
+
+/** Name what comes with the meal (#114) — the whole chosen set each time.
+ * Host only, before it starts. */
+export async function setAdditions(
+  channel: string,
+  additions: MealAddition[],
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/additions`,
+    { method: "POST", body: JSON.stringify({ additions }) },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "change the additions");
+  return (await res.json()) as Lobby;
+}
+
 /** Close the lobby and start swiping. Host only. */
 export async function startPlan(channel: string): Promise<Lobby> {
-  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/start`, {
-    method: "POST",
-  });
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/start`,
+    {
+      method: "POST",
+    },
+  );
   if (!res.ok) throw lobbyFailed(res.status, "start this meal plan");
   return (await res.json()) as Lobby;
 }

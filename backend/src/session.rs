@@ -112,6 +112,109 @@ struct TallyRow {
     no: i64,
 }
 
+// ---- meal type -------------------------------------------------------------
+
+/// Which meal a plan is for (#114): the strongest filter there is on what belongs
+/// in the deck — nobody swipes pancakes and a lamb roast in the same session.
+///
+/// The full vocabulary is two tiers, and the tier is the type. This enum is the
+/// **primary** tier — the meals you sit down to: breakfast, lunch, dinner, a
+/// snack. The **secondary** tier ([`MealAddition`]: dessert, side, drink) is the
+/// things that come *with* a meal. Splitting them into two types is what makes
+/// the invalid states unrepresentable: a plan's meal type simply cannot be
+/// "dessert" (it would claim the whole session for something that accompanies
+/// it), and a chosen addition cannot be "dinner" — serde refuses both at the
+/// wire, no handler checks anything.
+///
+/// A **fixed vocabulary**, not free text: unlike ingredients this is a small
+/// closed set, so a picker over it can be exhaustive and stable, and the coming
+/// meal-type reading of the corpus can share the same words (the union of both
+/// tiers). Serde owns the wire form — always the lowercase name, and an unknown
+/// or wrongly-cased value is rejected at deserialization, so no handler ever
+/// holds a word outside its tier. The browser sentence-cases for display; the
+/// wire and the database stay lowercase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MealType {
+    Breakfast,
+    Lunch,
+    Dinner,
+    Snack,
+}
+
+/// A secondary choice on a plan (#114): something that comes *with* the meal —
+/// dessert, a side, drinks — never the meal itself. See [`MealType`] for the
+/// two-tier split; this is the tier a plan can carry **several** of, alongside
+/// exactly one meal.
+///
+/// Chosen additions are recorded on the session and shown in the lobby, so the
+/// room knows dinner comes with dessert. Whether a chosen addition one day gets
+/// its **own pick round** (swipe the dinner, then swipe the dessert) is a real
+/// possibility and deliberately not built here — this slice records and shows
+/// the choice; the pick still runs one round, for the meal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MealAddition {
+    Dessert,
+    Side,
+    Drink,
+}
+
+impl MealAddition {
+    /// Every addition, in canonical order — the order stored, and the order the
+    /// picker shows.
+    pub const ALL: [MealAddition; 3] = [
+        MealAddition::Dessert,
+        MealAddition::Side,
+        MealAddition::Drink,
+    ];
+}
+
+/// The canonical form of a chosen-additions list: each addition at most once, in
+/// vocabulary order. The list means a *set* — "dessert and drinks" — so a double
+/// tap or a reordered client must not mint a different plan.
+fn normalize_additions(input: &[MealAddition]) -> Vec<MealAddition> {
+    MealAddition::ALL
+        .iter()
+        .copied()
+        .filter(|a| input.contains(a))
+        .collect()
+}
+
+/// A plan that names no meal is for dinner — the meal a group most plausibly
+/// plans together. The same word migration 0016 backfills, so an unstated choice
+/// and a pre-migration row read identically. Not time-of-day inference: the
+/// default is one fixed word, and the host changes it in the lobby if it is wrong.
+impl Default for MealType {
+    fn default() -> Self {
+        MealType::Dinner
+    }
+}
+
+impl MealType {
+    /// The lowercase canonical form — what the wire carries and the DB stores.
+    fn as_str(self) -> &'static str {
+        match self {
+            MealType::Breakfast => "breakfast",
+            MealType::Lunch => "lunch",
+            MealType::Dinner => "dinner",
+            MealType::Snack => "snack",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`], for reading a stored row back. `None` for
+    /// anything outside the vocabulary — the caller decides how loud to be.
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "breakfast" => MealType::Breakfast,
+            "lunch" => MealType::Lunch,
+            "dinner" => MealType::Dinner,
+            "snack" => MealType::Snack,
+            _ => return None,
+        })
+    }
+}
+
 // ---- HTTP handlers ---------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +227,14 @@ pub struct CreateBody {
     /// outside one.
     #[serde(default)]
     kitchen_id: Option<String>,
+    /// Which meal this plans (#114). Optional — an unstated choice is dinner
+    /// ([`MealType::default`]) and the host can change it in the lobby.
+    #[serde(default)]
+    meal_type: Option<MealType>,
+    /// What comes with it (#114) — dessert, a side, drinks. Optional; none is a
+    /// plain meal, and the host can add them in the lobby.
+    #[serde(default)]
+    additions: Vec<MealAddition>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +266,8 @@ pub async fn create(
                 &user.telegram_user_id,
                 body.filter.as_deref(),
                 body.kitchen_id.as_deref(),
+                body.meal_type.unwrap_or_default(),
+                &body.additions,
             )
             .await?;
             // The host is in their own plan from the moment it exists, so a lobby is
@@ -185,6 +298,13 @@ pub struct Voter {
 pub struct LobbyView {
     pub channel_id: String,
     pub kitchen_id: Option<String>,
+    /// Which meal this plans (#114) — what the room is deciding, so every voter
+    /// sees it, and what the deck will one day be filtered by.
+    pub meal_type: MealType,
+    /// What comes with it (#114) — the chosen secondary things, each at most
+    /// once, in vocabulary order. Recorded and shown; the pick itself still runs
+    /// one round, for the meal.
+    pub additions: Vec<MealAddition>,
     /// The telegram id that started it — only they can start the swiping.
     pub host: String,
     pub started: bool,
@@ -327,6 +447,102 @@ pub async fn seat(
 
     state
         .with_db(move |db| async move { seat_voter(&db, channel, &body.user_id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, channel).await?;
+    Ok(Json(view))
+}
+
+/// The meal the host is declaring the plan to be for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct MealTypeBody {
+    pub meal_type: MealType,
+}
+
+/// `POST /api/session/{channel}/meal-type` — the host names which meal this plans.
+///
+/// Every plan is born for dinner (the create default), so this is how the lobby
+/// "picks one" (#114): the host flicks it to breakfast, lunch, a snack — and the
+/// room announcement re-reads the lobby on every open client, so the whole roster
+/// sees what it is deciding.
+///
+/// Host only, and only before the swiping starts — same shape as [`seat`], for the
+/// same reason: once people are voting, the terms of the plan must not move under
+/// them. A dinner nobody agreed on cannot retroactively become an agreed breakfast.
+pub async fn set_meal_type(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<MealTypeBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    let channel = channel.as_str();
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can change which meal it is for".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+
+    state
+        .with_db(move |db| async move { update_meal_type(&db, channel, body.meal_type).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, channel).await?;
+    Ok(Json(view))
+}
+
+/// The secondary things the host is declaring alongside the meal. The whole
+/// chosen set each time — a set, not a delta — so the picker's state and the
+/// stored state cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AdditionsBody {
+    pub additions: Vec<MealAddition>,
+}
+
+/// `POST /api/session/{channel}/additions` — the host names what comes with the
+/// meal: dessert, a side, drinks.
+///
+/// Same guards as [`set_meal_type`], for the same reason — host only, and only
+/// while the lobby is open; once people are voting, the terms of the plan must
+/// not move under them. Announced to the room so every open client re-reads the
+/// lobby.
+pub async fn set_additions(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<AdditionsBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    let channel = channel.as_str();
+    let body = &body;
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can change what comes with the meal".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+
+    state
+        .with_db(move |db| async move { update_additions(&db, channel, &body.additions).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, channel).await?;
@@ -507,7 +723,8 @@ async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
 async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
     let mut rows = conn
         .query(
-            "SELECT created_by, kitchen_id, started_at FROM pick_sessions WHERE channel_id = ?1",
+            "SELECT created_by, kitchen_id, started_at, meal_type, additions
+             FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
         .await?;
@@ -517,6 +734,18 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     let host: String = row.get(0)?;
     let kitchen_id: Option<String> = row.get(1)?;
     let started_at: Option<i64> = row.get(2)?;
+    // Every writer of these two columns validates against its tier's vocabulary,
+    // so a stored word outside it is corruption — fail loud rather than serve a
+    // plan for a meal that does not exist (the db.rs lesson: a wrong database
+    // must not run beautifully).
+    let meal_raw: String = row.get(3)?;
+    let meal_type = MealType::parse(&meal_raw).ok_or_else(|| {
+        anyhow::anyhow!("pick_sessions.meal_type outside the vocabulary: {meal_raw:?}")
+    })?;
+    let additions_raw: String = row.get(4)?;
+    let additions: Vec<MealAddition> = serde_json::from_str(&additions_raw).map_err(|e| {
+        anyhow::anyhow!("pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}")
+    })?;
 
     let mut vrows = conn
         .query(
@@ -558,6 +787,8 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     Ok(Some(LobbyView {
         channel_id: channel.to_owned(),
         kitchen_id,
+        meal_type,
+        additions,
         host,
         started: started_at.is_some(),
         voters,
@@ -582,11 +813,53 @@ pub async fn create_session(
     created_by: &str,
     filter: Option<&str>,
     kitchen_id: Option<&str>,
+    meal_type: MealType,
+    additions: &[MealAddition],
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id)
-         VALUES (?1, ?2, ?3, ?4)",
-        libsql::params![channel_id, created_by, filter, kitchen_id],
+        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id, meal_type, additions)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        libsql::params![
+            channel_id,
+            created_by,
+            filter,
+            kitchen_id,
+            meal_type.as_str(),
+            serde_json::to_string(&normalize_additions(additions))?
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Point a plan at a different meal (#114). The handler guards host + not-started;
+/// this just writes the (already-validated, typed) word.
+async fn update_meal_type(
+    conn: &Connection,
+    channel: &str,
+    meal_type: MealType,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE pick_sessions SET meal_type = ?2 WHERE channel_id = ?1",
+        libsql::params![channel, meal_type.as_str()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Replace what comes with the meal (#114). The handler guards host + not-started;
+/// this writes the (already-validated, typed) set in its canonical form.
+async fn update_additions(
+    conn: &Connection,
+    channel: &str,
+    additions: &[MealAddition],
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE pick_sessions SET additions = ?2 WHERE channel_id = ?1",
+        libsql::params![
+            channel,
+            serde_json::to_string(&normalize_additions(additions))?
+        ],
     )
     .await?;
     Ok(())
@@ -677,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn seating_is_idempotent_and_the_lobby_reads_back() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, Some("k1"))
+        create_session(&conn, "c", "alice", None, Some("k1"), MealType::Dinner, &[])
             .await
             .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
@@ -704,7 +977,7 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(&conn, "c", "4242", None, None)
+        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
         seat_voter(&conn, "c", "4242").await.unwrap();
@@ -726,7 +999,7 @@ mod tests {
         crate::kitchens::seat_member_for_test(&conn, &kid, "mel").await;
         crate::kitchens::seat_member_for_test(&conn, &kid, "sam").await;
 
-        create_session(&conn, "c", "host", None, Some(&kid))
+        create_session(&conn, "c", "host", None, Some(&kid), MealType::Dinner, &[])
             .await
             .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
@@ -749,7 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn a_kitchenless_plan_has_no_candidates() {
         let conn = conn().await;
-        create_session(&conn, "c", "host", None, None)
+        create_session(&conn, "c", "host", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
@@ -766,7 +1039,7 @@ mod tests {
     #[tokio::test]
     async fn starting_is_idempotent() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
         begin_session(&conn, "c").await.unwrap();
@@ -806,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn create_vote_and_tally() {
         let conn = conn().await;
-        create_session(&conn, "chan1", "alice", None, None)
+        create_session(&conn, "chan1", "alice", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
 
@@ -833,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
         record_vote(&conn, "c", "s", "1", "alice", true)
@@ -854,7 +1127,7 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
             .await
             .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
@@ -866,9 +1139,231 @@ mod tests {
     async fn session_existence_gates_join() {
         let conn = conn().await;
         assert!(!session_exists(&conn, "nope").await.unwrap());
-        create_session(&conn, "yep", "alice", Some(r#"{"area":"Japanese"}"#), None)
+        create_session(
+            &conn,
+            "yep",
+            "alice",
+            Some(r#"{"area":"Japanese"}"#),
+            None,
+            MealType::Dinner,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(session_exists(&conn, "yep").await.unwrap());
+    }
+
+    /// A plan is for a meal (#114): created for breakfast, its lobby says breakfast —
+    /// stored and read back through the typed vocabulary, never a raw string.
+    #[tokio::test]
+    async fn a_plan_carries_its_meal_type() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Breakfast, &[])
             .await
             .unwrap();
-        assert!(session_exists(&conn, "yep").await.unwrap());
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.meal_type, MealType::Breakfast);
+    }
+
+    /// An unstated choice is dinner, twice over and identically: the create handler
+    /// fills `None` with [`MealType::default`], and migration 0016 backfills rows
+    /// that predate the column with the same word — so a pre-#114 plan and a
+    /// caller who named nothing read the same.
+    #[tokio::test]
+    async fn an_unstated_meal_type_is_dinner() {
+        assert_eq!(MealType::default(), MealType::Dinner);
+
+        // A body naming no meal deserializes, and resolves to the default —
+        // exactly what the create handler does with it.
+        let body: CreateBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(body.meal_type.unwrap_or_default(), MealType::Dinner);
+
+        // A row written without the columns — the shape of every plan that existed
+        // before migration 0016 — reads back as a plain dinner via the column
+        // defaults: 'dinner', with nothing alongside.
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by) VALUES ('old', 'alice')",
+            (),
+        )
+        .await
+        .unwrap();
+        let view = load_lobby(&conn, "old").await.unwrap().unwrap();
+        assert_eq!(view.meal_type, MealType::Dinner);
+        assert!(view.additions.is_empty(), "a plain meal, nothing alongside");
+    }
+
+    /// The host repoints the plan at a different meal; the lobby follows.
+    #[tokio::test]
+    async fn the_meal_type_can_change_while_the_lobby_is_open() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+            .await
+            .unwrap();
+        update_meal_type(&conn, "c", MealType::Lunch).await.unwrap();
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.meal_type, MealType::Lunch);
+    }
+
+    /// The whole vocabulary survives the trip through storage: what `as_str` writes,
+    /// `parse` reads, and the wire form serde emits is the same lowercase word — one
+    /// canonical spelling everywhere, no second list to drift.
+    #[test]
+    fn the_meal_type_vocabulary_round_trips() {
+        for t in [
+            MealType::Breakfast,
+            MealType::Lunch,
+            MealType::Dinner,
+            MealType::Snack,
+        ] {
+            assert_eq!(MealType::parse(t.as_str()), Some(t), "{t:?}");
+            assert_eq!(
+                serde_json::to_value(t).unwrap(),
+                serde_json::Value::String(t.as_str().to_owned()),
+                "the wire form and the stored form are the same word"
+            );
+        }
+    }
+
+    /// The two tiers partition the whole vocabulary: every word belongs to exactly
+    /// one of [`MealType`] and [`MealAddition`], and each tier's serde refuses the
+    /// other tier's words. This is the classification made checkable — "dessert is
+    /// not a meal" is a type error, not a handler's opinion.
+    #[test]
+    fn the_two_tiers_partition_the_vocabulary() {
+        let primary = ["breakfast", "lunch", "dinner", "snack"];
+        let secondary = ["dessert", "side", "drink"];
+        for word in primary {
+            let q = format!("{word:?}");
+            assert!(serde_json::from_str::<MealType>(&q).is_ok(), "{word}");
+            assert!(
+                serde_json::from_str::<MealAddition>(&q).is_err(),
+                "{word} is a meal, not an addition"
+            );
+        }
+        for word in secondary {
+            let q = format!("{word:?}");
+            assert!(serde_json::from_str::<MealAddition>(&q).is_ok(), "{word}");
+            assert!(
+                serde_json::from_str::<MealType>(&q).is_err(),
+                "{word} is an addition to a meal, not a meal"
+            );
+        }
+        assert_eq!(
+            secondary.len(),
+            MealAddition::ALL.len(),
+            "ALL is the whole secondary tier"
+        );
+    }
+
+    /// The vocabulary is closed at the wire: a word outside a field's tier — a
+    /// made-up word, the right word in the wrong case, or the *other* tier's word —
+    /// never reaches a handler, on create or on change. "dessert" as a meal type is
+    /// the ruling made fixture: an addition *to* a meal is not a meal.
+    #[test]
+    fn a_word_outside_the_tier_is_rejected() {
+        for bad in [
+            r#"{"meal_type":"brunch"}"#,
+            r#"{"meal_type":"Dinner"}"#,
+            r#"{"meal_type":"dessert"}"#,
+            r#"{"meal_type":"side"}"#,
+            r#"{"meal_type":"drink"}"#,
+            r#"{"additions":["dinner"]}"#,
+            r#"{"additions":["Dessert"]}"#,
+            r#"{"additions":["dessert","nonsense"]}"#,
+        ] {
+            assert!(serde_json::from_str::<CreateBody>(bad).is_err(), "{bad}");
+        }
+        for bad in [r#"{"meal_type":"brunch"}"#, r#"{"meal_type":"dessert"}"#] {
+            assert!(serde_json::from_str::<MealTypeBody>(bad).is_err(), "{bad}");
+        }
+        for bad in [
+            r#"{"additions":["dinner"]}"#,
+            r#"{"additions":["dessert","nonsense"]}"#,
+        ] {
+            assert!(serde_json::from_str::<AdditionsBody>(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A plan carries what comes with the meal: stored once each, in vocabulary
+    /// order, however noisily the client said it — the list means a set.
+    #[tokio::test]
+    async fn additions_are_stored_deduped_in_vocabulary_order() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[
+                MealAddition::Drink,
+                MealAddition::Dessert,
+                MealAddition::Drink,
+            ],
+        )
+        .await
+        .unwrap();
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(
+            view.additions,
+            vec![MealAddition::Dessert, MealAddition::Drink],
+            "once each, dessert before drink"
+        );
+    }
+
+    /// The host reshapes what comes with the meal while the lobby is open; the
+    /// lobby follows, and clearing is just the empty set.
+    #[tokio::test]
+    async fn additions_can_change_while_the_lobby_is_open() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+            .await
+            .unwrap();
+        update_additions(&conn, "c", &[MealAddition::Side])
+            .await
+            .unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c").await.unwrap().unwrap().additions,
+            vec![MealAddition::Side]
+        );
+        update_additions(&conn, "c", &[]).await.unwrap();
+        assert!(load_lobby(&conn, "c")
+            .await
+            .unwrap()
+            .unwrap()
+            .additions
+            .is_empty());
+    }
+
+    /// A stored additions list outside the secondary tier is corruption — fail
+    /// loud, exactly like a corrupt meal type.
+    #[tokio::test]
+    async fn corrupt_additions_fail_loud() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by, additions)
+             VALUES ('bad', 'alice', '[\"dinner\"]')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(load_lobby(&conn, "bad").await.is_err());
+    }
+
+    /// Every writer validates, so a stored word outside the vocabulary is corruption —
+    /// and the lobby fails loud rather than shrugging it into some default meal.
+    #[tokio::test]
+    async fn a_corrupt_meal_type_fails_loud() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by, meal_type)
+             VALUES ('bad', 'alice', 'brunch')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(load_lobby(&conn, "bad").await.is_err());
     }
 }

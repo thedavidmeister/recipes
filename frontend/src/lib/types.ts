@@ -125,6 +125,24 @@ export interface WalkStop {
 // ---- pick (#20) ------------------------------------------------------------
 
 /**
+ * The meal vocabulary (#114) is two tiers, and the tier is the type — mirroring
+ * `session::MealType` / `session::MealAddition`. `MEAL_TYPES` is the primary
+ * tier: the meals you sit down to, of which a plan is for exactly one.
+ * `MEAL_ADDITIONS` is the secondary tier: what comes *with* a meal — dessert, a
+ * side, drinks — of which a plan can carry several, or none. The server refuses
+ * a word outside its tier (a plan "for dessert" is unrepresentable), so these
+ * lists are pickers over closed sets, exhaustive and stable, in the order shown.
+ * The wire value is always the lowercase word; sentence-casing is display-only.
+ * They live here, not in `pick.ts`, because components render them and this
+ * module is pure — a value import must not drag the network client (and its
+ * `$env` read, absent under Storybook) into a story.
+ */
+export const MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"] as const;
+export type MealType = (typeof MEAL_TYPES)[number];
+export const MEAL_ADDITIONS = ["dessert", "side", "drink"] as const;
+export type MealAddition = (typeof MEAL_ADDITIONS)[number];
+
+/**
  * Render state of a pick's swipe view.
  * - `connecting` — starting the pick: opening the socket + loading the first deck.
  * - `reconnecting` — the socket dropped (Render's 5-min idle close, or a spin-down);
