@@ -124,6 +124,32 @@ pub struct CreateBody {
     /// outside one.
     #[serde(default)]
     kitchen_id: Option<String>,
+    /// The plan's total-time cap in seconds (#80); `None` = no cap ("Any"). Not
+    /// opaque like `filter`: the walk enforces it server-side against
+    /// `recipes.total_seconds`, so the backend must understand it.
+    #[serde(default)]
+    max_total_seconds: Option<i64>,
+}
+
+/// The bounds a time cap must sit in: at least a minute, at most a day.
+///
+/// The UI presents fixed buckets (30 min / 1 hour / 2 hours / Any); the API
+/// deliberately accepts any sane number of seconds instead of that enum, so the
+/// buckets stay a presentation choice rather than a schema — changing them is a
+/// frontend edit, not a migration (#80).
+const MIN_CAP_SECONDS: i64 = 60;
+const MAX_CAP_SECONDS: i64 = 86_400;
+
+/// Refuse a nonsense cap. `None` is "any" and always fine; zero, negative, and
+/// longer-than-a-day are author errors, not bounds anyone cooks to.
+fn validate_cap(cap: Option<i64>) -> Result<(), AppError> {
+    match cap {
+        None => Ok(()),
+        Some(s) if (MIN_CAP_SECONDS..=MAX_CAP_SECONDS).contains(&s) => Ok(()),
+        Some(s) => Err(AppError::BadRequest(format!(
+            "max_total_seconds must be between {MIN_CAP_SECONDS} and {MAX_CAP_SECONDS}, got {s}"
+        ))),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +163,7 @@ pub async fn create(
     Extension(user): Extension<CurrentUser>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
+    validate_cap(body.max_total_seconds)?;
     let channel_id = mint_channel_id();
     // One connection for both writes: the plan and its first voter are one act, and
     // two connections to a local database can contend for the same write lock.
@@ -147,6 +174,7 @@ pub async fn create(
         &user.telegram_user_id,
         body.filter.as_deref(),
         body.kitchen_id.as_deref(),
+        body.max_total_seconds,
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -179,6 +207,9 @@ pub struct LobbyView {
     /// The telegram id that started it — only they can start the swiping.
     pub host: String,
     pub started: bool,
+    /// The plan's total-time cap in seconds (#80); `None` = no cap. Everyone in the
+    /// lobby sees the bound they will be swiping within.
+    pub max_total_seconds: Option<i64>,
     pub voters: Vec<Voter>,
     /// Members of the plan's kitchen who are not yet deciding — the host can seat any
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
@@ -303,6 +334,50 @@ pub async fn seat(
     }
 
     seat_voter(&db, &channel, &body.user_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let view = reload_and_announce(&state, &channel).await?;
+    Ok(Json(view))
+}
+
+/// What the host is bounding the plan to — seconds, or `null` to lift the cap.
+#[derive(Debug, Deserialize)]
+pub struct CapBody {
+    #[serde(default)]
+    max_total_seconds: Option<i64>,
+}
+
+/// `POST /api/session/{channel}/cap` — the host sets (or lifts) the plan's time cap.
+///
+/// Host only, and only while the lobby is open: the cap defines the shared corpus
+/// everyone in the session swipes within (#80), so it must not move once people are
+/// voting — the same reason the roster freezes at start. Until then the host is
+/// still deciding what tonight is (the session itself is minted the moment the pick
+/// page opens, before any choice could be made), so the lobby is where the choice
+/// lands. The room is told, so every open lobby shows the new bound at once.
+pub async fn set_cap(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<CapBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    validate_cap(body.max_total_seconds)?;
+    let db = state.db()?;
+    let view = load_lobby(&db, &channel)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can set its time cap".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+    set_time_cap(&db, &channel, body.max_total_seconds)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, &channel).await?;
@@ -479,7 +554,8 @@ async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
 async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
     let mut rows = conn
         .query(
-            "SELECT created_by, kitchen_id, started_at FROM pick_sessions WHERE channel_id = ?1",
+            "SELECT created_by, kitchen_id, started_at, max_total_seconds
+             FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
         .await?;
@@ -489,6 +565,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     let host: String = row.get(0)?;
     let kitchen_id: Option<String> = row.get(1)?;
     let started_at: Option<i64> = row.get(2)?;
+    let max_total_seconds: Option<i64> = row.get(3)?;
 
     let mut vrows = conn
         .query(
@@ -532,6 +609,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         kitchen_id,
         host,
         started: started_at.is_some(),
+        max_total_seconds,
         voters,
         candidates,
     }))
@@ -554,14 +632,53 @@ pub async fn create_session(
     created_by: &str,
     filter: Option<&str>,
     kitchen_id: Option<&str>,
+    max_total_seconds: Option<i64>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id)
-         VALUES (?1, ?2, ?3, ?4)",
-        libsql::params![channel_id, created_by, filter, kitchen_id],
+        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id, max_total_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        libsql::params![
+            channel_id,
+            created_by,
+            filter,
+            kitchen_id,
+            max_total_seconds
+        ],
     )
     .await?;
     Ok(())
+}
+
+/// Set (or lift, with `None`) a plan's time cap. The handler guards host + not-yet-
+/// started; this is just the write.
+async fn set_time_cap(
+    conn: &Connection,
+    channel: &str,
+    max_total_seconds: Option<i64>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE pick_sessions SET max_total_seconds = ?2 WHERE channel_id = ?1",
+        libsql::params![channel, max_total_seconds],
+    )
+    .await?;
+    Ok(())
+}
+
+/// A session's time cap, for the walk (#80): `Ok(None)` is an unknown session,
+/// `Ok(Some(None))` a session with no cap ("Any"), `Ok(Some(Some(secs)))` a capped
+/// one. The two layers are deliberate — an unknown channel must surface as an
+/// error to the caller, never read as "uncapped".
+pub async fn time_cap(conn: &Connection, channel: &str) -> anyhow::Result<Option<Option<i64>>> {
+    let mut rows = conn
+        .query(
+            "SELECT max_total_seconds FROM pick_sessions WHERE channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(row.get::<Option<i64>>(0)?)),
+        None => Ok(None),
+    }
 }
 
 /// Record (or update) a voter's call on a recipe. Re-voting overwrites — a swipe is
@@ -649,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn seating_is_idempotent_and_the_lobby_reads_back() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, Some("k1"))
+        create_session(&conn, "c", "alice", None, Some("k1"), None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
@@ -676,7 +793,7 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(&conn, "c", "4242", None, None)
+        create_session(&conn, "c", "4242", None, None, None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "4242").await.unwrap();
@@ -698,7 +815,7 @@ mod tests {
         crate::kitchens::seat_member_for_test(&conn, &kid, "mel").await;
         crate::kitchens::seat_member_for_test(&conn, &kid, "sam").await;
 
-        create_session(&conn, "c", "host", None, Some(&kid))
+        create_session(&conn, "c", "host", None, Some(&kid), None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
@@ -721,7 +838,7 @@ mod tests {
     #[tokio::test]
     async fn a_kitchenless_plan_has_no_candidates() {
         let conn = conn().await;
-        create_session(&conn, "c", "host", None, None)
+        create_session(&conn, "c", "host", None, None, None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
@@ -738,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn starting_is_idempotent() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, None)
             .await
             .unwrap();
         begin_session(&conn, "c").await.unwrap();
@@ -778,7 +895,7 @@ mod tests {
     #[tokio::test]
     async fn create_vote_and_tally() {
         let conn = conn().await;
-        create_session(&conn, "chan1", "alice", None, None)
+        create_session(&conn, "chan1", "alice", None, None, None)
             .await
             .unwrap();
 
@@ -805,7 +922,7 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, None)
             .await
             .unwrap();
         record_vote(&conn, "c", "s", "1", "alice", true)
@@ -826,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None)
+        create_session(&conn, "c", "alice", None, None, None)
             .await
             .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
@@ -838,9 +955,98 @@ mod tests {
     async fn session_existence_gates_join() {
         let conn = conn().await;
         assert!(!session_exists(&conn, "nope").await.unwrap());
-        create_session(&conn, "yep", "alice", Some(r#"{"area":"Japanese"}"#), None)
+        create_session(
+            &conn,
+            "yep",
+            "alice",
+            Some(r#"{"area":"Japanese"}"#),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(session_exists(&conn, "yep").await.unwrap());
+    }
+
+    /// The cap bounds (#80): `None` is "any", the presented buckets all pass, and
+    /// nonsense — zero, negative, longer than a day — is refused.
+    #[test]
+    fn a_cap_is_validated_within_sane_bounds() {
+        for ok in [
+            None,
+            Some(60),
+            Some(1800),
+            Some(3600),
+            Some(7200),
+            Some(86_400),
+        ] {
+            assert!(validate_cap(ok).is_ok(), "{ok:?} must be accepted");
+        }
+        for bad in [Some(0), Some(-1), Some(59), Some(86_401), Some(i64::MIN)] {
+            assert!(validate_cap(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// A plan created with a time cap reads it back in the lobby; one created
+    /// without is uncapped — "Any" is the default, and every session from before
+    /// the column existed stays that way.
+    #[tokio::test]
+    async fn a_plan_carries_its_time_cap_and_defaults_to_any() {
+        let conn = conn().await;
+        create_session(&conn, "capped", "alice", None, None, Some(1800))
             .await
             .unwrap();
-        assert!(session_exists(&conn, "yep").await.unwrap());
+        create_session(&conn, "open", "alice", None, None, None)
+            .await
+            .unwrap();
+
+        let capped = load_lobby(&conn, "capped").await.unwrap().unwrap();
+        assert_eq!(capped.max_total_seconds, Some(1800));
+        let open = load_lobby(&conn, "open").await.unwrap().unwrap();
+        assert_eq!(open.max_total_seconds, None);
+    }
+
+    /// The host can move the cap while the lobby is open, and lift it back to
+    /// "any"; the lobby reads whatever the plan currently says.
+    #[tokio::test]
+    async fn the_cap_can_be_set_and_lifted() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, None)
+            .await
+            .unwrap();
+        set_time_cap(&conn, "c", Some(3600)).await.unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .max_total_seconds,
+            Some(3600)
+        );
+        set_time_cap(&conn, "c", None).await.unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .max_total_seconds,
+            None
+        );
+    }
+
+    /// The walk's read of the cap distinguishes "no such session" from "no cap":
+    /// an unknown channel must surface as an error, never silently walk uncapped.
+    #[tokio::test]
+    async fn time_cap_distinguishes_unknown_from_uncapped() {
+        let conn = conn().await;
+        assert_eq!(time_cap(&conn, "nope").await.unwrap(), None);
+        create_session(&conn, "open", "alice", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(time_cap(&conn, "open").await.unwrap(), Some(None));
+        create_session(&conn, "capped", "alice", None, None, Some(7200))
+            .await
+            .unwrap();
+        assert_eq!(time_cap(&conn, "capped").await.unwrap(), Some(Some(7200)));
     }
 }

@@ -12,6 +12,7 @@
     joinLobby,
     startPlan,
     seatMember,
+    setPlanCap,
     type ConnStatus,
     type Lobby,
   } from "$lib/pick";
@@ -127,7 +128,9 @@
       // Top up toward the buffer target. A walk is a different journey each call,
       // so a couple of fetches surface fresh cards even as `queued` grows.
       for (let fetches = 0; deck.length < bufferTarget && fetches < 3; fetches++) {
-        const stops = await getWalk(30);
+        // The channel travels with the walk so the server bounds it to the plan's
+        // time cap (#80) — the cap itself never comes from the client.
+        const stops = await getWalk(30, channel);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
           const k = key(s.recipe.source, s.recipe.id);
@@ -160,8 +163,20 @@
 
   // Prefetch before the deck runs low, sized to the swiper — the buffer stays ahead
   // of the swiping so the next card is always ready. Stops once the pick is decided.
+  //
+  // The deck only builds once the plan has *started*: while the lobby is open the
+  // host can still be moving the time cap (#80), so a deck fetched earlier could
+  // hold cards outside the bound everyone agreed to swipe within. Start freezes
+  // the cap; only then is a card worth dealing.
   $effect(() => {
-    if (deck.length < bufferTarget && !refilling && !dry && !decided) void refill();
+    if (
+      started === true &&
+      deck.length < bufferTarget &&
+      !refilling &&
+      !dry &&
+      !decided
+    )
+      void refill();
   });
 
   /**
@@ -208,6 +223,17 @@
       deciders = lobby.voters.length;
     } catch (e) {
       lobbyError = e instanceof Error ? e.message : "Couldn't add that person.";
+    }
+  }
+
+  async function capPlan(cap: number | null) {
+    try {
+      lobby = await setPlanCap(channel, cap);
+      deciders = lobby.voters.length;
+      started = lobby.started;
+    } catch (e) {
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't set the time cap.";
     }
   }
 
@@ -348,9 +374,11 @@
     voters={lobby?.voters}
     candidates={lobby?.candidates}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
+    cap={lobby?.max_total_seconds ?? null}
     inviteLink={page.url.href}
     error={lobbyError}
     onStart={begin}
     onSeat={seat}
+    onCap={capPlan}
   />
 {/if}

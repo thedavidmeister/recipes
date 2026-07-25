@@ -27,10 +27,14 @@
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
     host?: boolean;
+    /** The plan's total-time cap in seconds (#80); null = "Any". */
+    cap?: number | null;
     error?: string;
     onStart?: () => void;
     /** Add a kitchen member by id. Host only. */
     onSeat?: (userId: string) => void;
+    /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
+    onCap?: (cap: number | null) => void;
   }
 
   let {
@@ -39,12 +43,34 @@
     candidates = [],
     inviteLink,
     host = false,
+    cap = null,
     error,
     onStart,
     onSeat,
+    onCap,
   }: Props = $props();
 
   const name = (v: Voter) => (v.username ? `@${v.username}` : v.telegram_user_id);
+
+  /**
+   * The presented buckets (#80). A UI vocabulary, deliberately not a schema: the
+   * backend stores plain seconds, so changing these is an edit here, not a
+   * migration there.
+   */
+  const BUCKETS: { label: string; seconds: number | null }[] = [
+    { label: "Any", seconds: null },
+    { label: "30 min", seconds: 1800 },
+    { label: "1 hour", seconds: 3600 },
+    { label: "2 hours", seconds: 7200 },
+  ];
+
+  /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */
+  const capLabel = (s: number) =>
+    s % 3600 === 0
+      ? s === 3600
+        ? "1 hour"
+        : `${s / 3600} hours`
+      : `${Math.round(s / 60)} min`;
 
   let copied = $state(false);
 
@@ -78,6 +104,41 @@
           ? "Just you so far. Start whenever you like, or invite someone first."
           : `${voters.length} deciding. Everyone here has to agree before a recipe wins.`}
       </p>
+
+      {#if host}
+        <!-- The host bounds the plan while the lobby is open; it freezes at start
+             (#80). The estimate it filters on is a lower bound, so the honesty
+             note is part of the control, not a footnote. -->
+        <p class="mt-6 mb-3 text-xs text-stone-500">How much time do you have?</p>
+        <div class="flex flex-wrap gap-2">
+          {#each BUCKETS as b (b.label)}
+            <button
+              type="button"
+              onclick={() => onCap?.(b.seconds)}
+              class="rounded-pill border px-3 py-1 text-sm {cap === b.seconds
+                ? 'border-honey-500 bg-honey-100 font-medium text-stone-900'
+                : 'border-stone-200 text-stone-600'}"
+            >
+              {b.label}
+            </button>
+          {/each}
+        </div>
+        {#if cap !== null}
+          <p class="mt-2 text-xs text-stone-500">
+            Only recipes estimated at {capLabel(cap)} or less. Estimates are a
+            lower bound, and recipes we can't time yet still show.
+          </p>
+        {/if}
+      {:else if cap !== null}
+        <p class="mt-6 text-sm text-stone-600">
+          <span
+            class="rounded-pill border-honey-500 bg-honey-100 mr-1 border px-3 py-1 text-sm font-medium text-stone-900"
+            >{capLabel(cap)}</span
+          >
+          Recipes estimated over this are left out. Estimates are a lower bound,
+          and recipes we can't time yet still show.
+        </p>
+      {/if}
 
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>
       <ul class="flex flex-col gap-1.5">

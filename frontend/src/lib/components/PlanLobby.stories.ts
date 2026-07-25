@@ -51,6 +51,34 @@ export const KitchenMembers: Story = {
   },
 };
 
+/** The host has capped the plan to 30 minutes (#80): the bucket reads selected and
+ * the honest fine print is attached — the estimate is a lower bound, and recipes
+ * without timings still show. */
+export const TimeCapped: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    inviteLink: invite,
+    cap: 1800,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+    onCap: () => {},
+  },
+};
+
+/** A guest in a capped plan sees the bound they will be swiping within — shown,
+ * not settable: the cap is the host's call (#80). */
+export const GuestSeesTheCap: Story = {
+  args: {
+    status: "ready",
+    host: false,
+    cap: 3600,
+    voters: [
+      { telegram_user_id: "4242", username: "dave" },
+      { telegram_user_id: "9317", username: "mel" },
+    ],
+  },
+};
+
 /** A guest waits: starting is the host's call, so a late arrival cannot close the
  * door on whoever is still inviting people. */
 export const Guest: Story = {

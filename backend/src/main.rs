@@ -162,6 +162,7 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/join", post(session::join_lobby))
         .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/seat", post(session::seat))
+        .route("/session/{channel}/cap", post(session::set_cap))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -1124,6 +1125,250 @@ mod tests {
             0,
             "an empty corpus walks to nowhere"
         );
+    }
+
+    /// A `GET` with a cookie, for the session/lobby and walk reads below.
+    fn get_req(uri: &str, cookie: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// A plan created with a time cap (#80) shows it in the lobby view, so everyone
+    /// sees the bound they will be swiping within; one created without is "Any".
+    #[tokio::test]
+    async fn a_plan_created_with_a_cap_shows_it_in_the_lobby() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"max_total_seconds":1800}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .clone()
+            .oneshot(get_req(&format!("/api/session/{channel}"), &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["max_total_seconds"], 1800);
+
+        // Created without a cap → "Any", read back as null.
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let res = app
+            .oneshot(get_req(&format!("/api/session/{channel}"), &cookie))
+            .await
+            .unwrap();
+        assert!(body_json(res).await["max_total_seconds"].is_null());
+    }
+
+    /// A nonsense cap — zero, negative, longer than a day — is refused at create.
+    #[tokio::test]
+    async fn a_plan_with_a_nonsense_cap_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        for body in [
+            r#"{"max_total_seconds":0}"#,
+            r#"{"max_total_seconds":-60}"#,
+            r#"{"max_total_seconds":90000}"#,
+        ] {
+            let res = app
+                .clone()
+                .oneshot(json_post("/api/session", Some(&cookie), body))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "{body} must be refused"
+            );
+        }
+    }
+
+    /// The cap is the host's to move, and only while the lobby is open: a guest
+    /// cannot rebound someone else's plan, and once the swiping starts the corpus
+    /// everyone is voting within must not shift under them (#80).
+    #[tokio::test]
+    async fn the_cap_is_the_hosts_and_freezes_at_start() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let guest = auth::issue_test_session(&conn, "guest").await;
+        let hcookie = format!("recipes_session={host}");
+        let gcookie = format!("recipes_session={guest}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&hcookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let cap_uri = format!("/api/session/{channel}/cap");
+
+        // Not the host → forbidden.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &cap_uri,
+                Some(&gcookie),
+                r#"{"max_total_seconds":1800}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // The host, lobby open → the cap moves and the new lobby comes back.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &cap_uri,
+                Some(&hcookie),
+                r#"{"max_total_seconds":1800}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["max_total_seconds"], 1800);
+
+        // A nonsense cap is refused here too.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &cap_uri,
+                Some(&hcookie),
+                r#"{"max_total_seconds":-1}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // Start the plan; the cap is now frozen, even for the host.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&hcookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .oneshot(json_post(
+                &cap_uri,
+                Some(&hcookie),
+                r#"{"max_total_seconds":3600}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// End to end through the router (#80): the walk a capped session deals
+    /// excludes recipes estimated over the cap, keeps under-cap ones, and keeps
+    /// the un-estimated (`NULL`) — the lower-bound policy (see `walk::load_corpus`).
+    /// The same corpus walked without a channel is the whole corpus.
+    #[tokio::test]
+    async fn a_capped_sessions_walk_excludes_over_cap_recipes() {
+        let (app, conn) = test_app().await;
+        for (id, secs) in [
+            ("quick", Some(900i64)),
+            ("slow", Some(7200i64)),
+            ("unknown", None),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, total_seconds)
+                 VALUES ('t', ?1, ?1, ?2)",
+                libsql::params![id, secs],
+            )
+            .await
+            .unwrap();
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"max_total_seconds":1800}"#,
+            ))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stops = body_json(res).await["stops"].clone();
+        let ids: std::collections::HashSet<String> = stops
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains("quick"), "under the cap stays: {ids:?}");
+        assert!(ids.contains("unknown"), "no estimate stays: {ids:?}");
+        assert!(!ids.contains("slow"), "over the cap is excluded: {ids:?}");
+
+        // The same walk without a channel wanders the whole corpus.
+        let res = app
+            .oneshot(get_req("/api/walk?len=10", &cookie))
+            .await
+            .unwrap();
+        let stops = body_json(res).await["stops"].clone();
+        assert_eq!(stops.as_array().unwrap().len(), 3);
+    }
+
+    /// A walk naming a session that does not exist is refused — never silently
+    /// walked uncapped, which would hand a mistyped channel the whole corpus.
+    #[tokio::test]
+    async fn a_walk_for_an_unknown_session_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(get_req(
+                "/api/walk?channel=nope",
+                &format!("recipes_session={token}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     /// An expired session is dead on read, not merely swept later.

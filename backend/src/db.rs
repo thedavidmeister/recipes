@@ -48,6 +48,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
         15,
         include_str!("../migrations/0015_recipe_total_seconds.sql"),
     ),
+    // 0016 is reserved by the meal-type work (#114), in flight alongside this.
+    // The runner skips anything <= MAX(_migrations.version), so a lower number
+    // added after a higher one has run would never apply — whichever of the two
+    // lands second must confirm its number is still above every deployed one.
+    (17, include_str!("../migrations/0017_pick_time_cap.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

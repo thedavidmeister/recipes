@@ -1,0 +1,12 @@
+-- A pick session's total-time cap (#80): the plan is bounded to recipes that fit
+-- the time the group actually has. NULL = no cap ("Any" — the whole corpus, the
+-- behaviour every existing session keeps). One bound per plan, set by the host
+-- while the lobby is open and frozen when the swiping starts: it defines the
+-- shared corpus everyone in the session swipes within, not a per-swiper
+-- preference.
+--
+-- Stored canonically in whole seconds — the same unit as `recipes.total_seconds`
+-- (#79), the estimate it is compared against. The UI presents fixed buckets
+-- (30 min / 1 hour / 2 hours / Any); the column deliberately does not enshrine
+-- them, so the buckets can change without a migration.
+ALTER TABLE pick_sessions ADD COLUMN max_total_seconds INTEGER;
