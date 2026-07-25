@@ -21,24 +21,44 @@
   const FADE = 2500;
 
   /**
-   * The music (#88, #121), now **per section**: kitchens has its bed, pick has its
-   * own, and the rest of the app is quiet. Moving between them does not cut — one
-   * track fades down as the next fades up, so a navigation feels like walking from
-   * one room into another rather than a hard edit.
+   * The music (#88, #121, #125): a **pool of tracks per section**, every section played
+   * by the same code — only the list differs. Entering a section starts a random track
+   * from its pool, and when one ends another random one from the same pool follows —
+   * never the same twice running — so a section cycles through its set instead of
+   * looping a single song. A pool of one track just loops it; an empty pool is silence,
+   * where a section sits until its tracks arrive. Moving *between* sections does not cut:
+   * one track fades down as the next fades up, like walking from one room into another.
    *
-   * A crossfade needs two things playing at once, so there are two voices. Whichever
-   * is audible fades out and pauses; the other loads the new section's track and fades
-   * in. A section with no track is silence, reached the same way — the audible voice
-   * just fades to nothing.
+   * A crossfade needs two things playing at once, so there are two voices. Whichever is
+   * audible fades out and pauses; the other loads the next track and fades in.
    */
-  function trackFor(pathname: string): string | null {
-    const section = pathname.split("/")[1];
-    if (section === "kitchens") return "/kitchen.mp3";
-    if (section === "pick") return "/pick.mp3";
-    return null; // the rest of the app is quiet, for now
+  const NONE: string[] = [];
+  const POOLS: Record<string, string[]> = {
+    kitchens: [
+      "/music/title-1.mp3",
+      "/music/title-2.mp3",
+      "/music/title-3.mp3",
+      "/music/title-4.mp3",
+    ],
+    pick: ["/pick.mp3"],
+    // Their own tracks are still to come (#125 and siblings); empty until then.
+    buy: [],
+    cook: [],
+    joy: [],
+  };
+  function poolFor(pathname: string): string[] {
+    return POOLS[pathname.split("/")[1]] ?? NONE;
   }
 
-  const wanted = $derived(trackFor(page.url.pathname));
+  /** A random track from `pool`, never `exclude` unless it is the only one. */
+  function pickFrom(pool: string[], exclude: string | null): string {
+    if (pool.length <= 1) return pool[0];
+    let next = pool[Math.floor(Math.random() * pool.length)];
+    while (next === exclude) next = pool[Math.floor(Math.random() * pool.length)];
+    return next;
+  }
+
+  const wantedPool = $derived(poolFor(page.url.pathname));
 
   /** Is the music switched on. Persisted, and the switch reflects it. */
   let on = $state(false);
@@ -46,7 +66,7 @@
   let b: HTMLAudioElement | undefined = $state();
 
   // The voice currently carrying `playingSrc`, and the track it is playing. Null when
-  // silent — either the section has no track or the music is off.
+  // silent — either the section has no pool or the music is off.
   let live: HTMLAudioElement | undefined;
   let playingSrc: string | null = null;
 
@@ -69,39 +89,31 @@
     fades.set(el, requestAnimationFrame(step));
   }
 
-  /**
-   * Make what is playing match the section — and the on/off preference.
-   *
-   * Idempotent: if the right track is already the live one, it does nothing, which is
-   * why it is safe to call on every navigation, on the on/off toggle, and from the
-   * gesture listeners below. The browser only grants audio to a real user gesture (or
-   * an origin it has learned you play audio on), so `play()` may be refused early;
-   * when it is, `live` stays null and the next gesture tries again.
-   */
-  function applyMusic() {
+  /** Fade a fresh random track from `pool` up on the free voice. */
+  function playTrack(pool: string[]) {
     const voices = [a, b].filter((v): v is HTMLAudioElement => !!v);
     if (voices.length < 2) return;
 
-    const want = on ? wanted : null;
-    if (want === playingSrc) return;
-
-    if (live) {
-      const old = live;
-      fadeTo(old, 0, () => old.pause());
-    }
-    if (!want) {
-      live = undefined;
-      playingSrc = null;
-      return;
-    }
-    const next = voices.find((v) => v !== live) ?? voices[0];
-    if (next.getAttribute("src") !== want) next.src = want;
+    const src = pickFrom(pool, playingSrc);
+    // Prefer a genuinely idle voice. `live` alone is not enough: after a fade to silence
+    // `live` is cleared while the old voice is still fading out, and picking that voice
+    // would cut its fade mid-decay and leave the truly idle one unused. So skip any voice
+    // with a fade in flight first, and only fall back if both are busy.
+    const next =
+      voices.find((v) => v !== live && !fades.has(v)) ??
+      voices.find((v) => v !== live) ??
+      voices[0];
+    if (next.getAttribute("src") !== src) next.src = src;
+    next.currentTime = 0;
+    // One track loops itself seamlessly; a pool of several advances on `ended` (see
+    // onEnded), so a real loop point only has to exist when a section has a single track.
+    next.loop = pool.length === 1;
     next.volume = 0;
     next.play().then(
       () => {
         fadeTo(next, LEVEL);
         live = next;
-        playingSrc = want;
+        playingSrc = src;
       },
       () => {
         // Refused: no gesture credited yet. A gesture listener will retry.
@@ -109,9 +121,49 @@
     );
   }
 
-  // React to the section changing and to the on/off toggle.
+  /**
+   * Make what is playing match the section — and the on/off preference.
+   *
+   * Idempotent within a section: if the live track already belongs to the wanted pool
+   * it is left alone, so navigating around a section does not restart the music. A
+   * different pool — or the music going off — crosses to it. Safe to call on every
+   * navigation, on the toggle, and from the gesture listeners below: the browser may
+   * refuse `play()` until a real gesture, and then the next gesture simply retries.
+   */
+  function applyMusic() {
+    const voices = [a, b].filter((v): v is HTMLAudioElement => !!v);
+    if (voices.length < 2) return;
+
+    const pool = on ? wantedPool : NONE;
+    if (live && playingSrc !== null && pool.includes(playingSrc)) return;
+
+    if (live) {
+      const old = live;
+      fadeTo(old, 0, () => old.pause());
+    }
+    if (pool.length === 0) {
+      live = undefined;
+      playingSrc = null;
+      return;
+    }
+    playTrack(pool);
+  }
+
+  /**
+   * A track finished: follow it with another from the same pool. The one that ended is
+   * already silent, so this is a faded-in hand-off rather than a crossfade. Only the
+   * audible voice advances, and only while the music is on and still in a pooled section
+   * with more than one track (a lone track loops itself and never ends).
+   */
+  function onEnded(event: Event) {
+    if (event.currentTarget !== live || !on) return;
+    const pool = wantedPool;
+    if (pool.length > 1) playTrack(pool);
+  }
+
+  // React to the section (pool) changing and to the on/off toggle.
   $effect(() => {
-    void wanted;
+    void wantedPool;
     void on;
     applyMusic();
   });
@@ -181,7 +233,7 @@
 
   /**
    * Which room you are in — the top path segment. It chooses the backdrop, the way it
-   * chooses the music (`trackFor`): the photograph behind the kitchens and pick routes
+   * chooses the music (`poolFor`): the photograph behind the kitchens and pick routes
    * lives here, rendered once and held still while the page slides over it, rather than
    * being repeated in each section's layout where it would ride along with the motion.
    */
@@ -197,9 +249,10 @@
 
 <!-- Two voices so a section change can cross-fade rather than cut. Fetched only on
      demand (preload="none"), so a visitor who never turns the music on downloads
-     neither track. -->
-<audio bind:this={a} loop preload="none"></audio>
-<audio bind:this={b} loop preload="none"></audio>
+     nothing. `loop` is set per track (playTrack): a lone track loops itself, a pool
+     advances on `ended`. -->
+<audio bind:this={a} preload="none" onended={onEnded}></audio>
+<audio bind:this={b} preload="none" onended={onEnded}></audio>
 
 {#if !authed}
   <Login
