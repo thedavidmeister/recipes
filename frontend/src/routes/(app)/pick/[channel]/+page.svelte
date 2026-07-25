@@ -12,13 +12,14 @@
     joinLobby,
     startPlan,
     seatMember,
+    setMealType,
     type ConnStatus,
     type Lobby,
   } from "$lib/pick";
   import PlanLobby from "$lib/components/PlanLobby.svelte";
   import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
-  import type { Match, PickStatus, RecipeCard } from "$lib/types";
+  import type { MealType, Match, PickStatus, RecipeCard } from "$lib/types";
   import Pick from "$lib/components/Pick.svelte";
 
   /**
@@ -102,7 +103,8 @@
   function recordSwipe() {
     const now = Date.now();
     swipeTimes.push(now);
-    while (swipeTimes.length && now - swipeTimes[0] >= 90_000) swipeTimes.shift();
+    while (swipeTimes.length && now - swipeTimes[0] >= 90_000)
+      swipeTimes.shift();
     if (swipeTimes.length >= 3) {
       const spanMin =
         (swipeTimes[swipeTimes.length - 1] - swipeTimes[0]) / 60_000;
@@ -112,7 +114,9 @@
 
   // How many cards to keep ahead of the swiper: 2x their rate, bounded. A walk
   // yields at most MAX_LEN (30) per call, so a deeper buffer just costs one more.
-  const bufferTarget = $derived(Math.min(40, Math.max(10, Math.round(2 * spm))));
+  const bufferTarget = $derived(
+    Math.min(40, Math.max(10, Math.round(2 * spm))),
+  );
 
   function backoff() {
     dry = true;
@@ -126,7 +130,11 @@
       let added = false;
       // Top up toward the buffer target. A walk is a different journey each call,
       // so a couple of fetches surface fresh cards even as `queued` grows.
-      for (let fetches = 0; deck.length < bufferTarget && fetches < 3; fetches++) {
+      for (
+        let fetches = 0;
+        deck.length < bufferTarget && fetches < 3;
+        fetches++
+      ) {
         const stops = await getWalk(30);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
@@ -161,7 +169,8 @@
   // Prefetch before the deck runs low, sized to the swiper — the buffer stays ahead
   // of the swiping so the next card is always ready. Stops once the pick is decided.
   $effect(() => {
-    if (deck.length < bufferTarget && !refilling && !dry && !decided) void refill();
+    if (deck.length < bufferTarget && !refilling && !dry && !decided)
+      void refill();
   });
 
   /**
@@ -174,9 +183,10 @@
    */
   async function refreshLobby() {
     try {
-      lobby = started === false || started === undefined
-        ? await joinLobby(channel)
-        : await getLobby(channel);
+      lobby =
+        started === false || started === undefined
+          ? await joinLobby(channel)
+          : await getLobby(channel);
       deciders = lobby.voters.length;
       started = lobby.started;
       lobbyError = undefined;
@@ -187,7 +197,8 @@
         deciders = lobby.voters.length;
         started = lobby.started;
       } catch {
-        lobbyError = e instanceof Error ? e.message : "Couldn't open this meal plan.";
+        lobbyError =
+          e instanceof Error ? e.message : "Couldn't open this meal plan.";
       }
     }
   }
@@ -198,7 +209,8 @@
       started = lobby.started;
       deciders = lobby.voters.length;
     } catch (e) {
-      lobbyError = e instanceof Error ? e.message : "Couldn't start this meal plan.";
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't start this meal plan.";
     }
   }
 
@@ -208,6 +220,16 @@
       deciders = lobby.voters.length;
     } catch (e) {
       lobbyError = e instanceof Error ? e.message : "Couldn't add that person.";
+    }
+  }
+
+  /** The host names which meal this plans (#114); the room announcement re-reads
+   * the lobby on every other open client, so the whole roster sees it. */
+  async function chooseMeal(mealType: MealType) {
+    try {
+      lobby = await setMealType(channel, mealType);
+    } catch (e) {
+      lobbyError = e instanceof Error ? e.message : "Couldn't change the meal.";
     }
   }
 
@@ -327,7 +349,6 @@
       copied = false;
     }
   }
-
 </script>
 
 {#if started === true}
@@ -347,10 +368,12 @@
     status={lobbyError ? "error" : lobby ? "ready" : "pending"}
     voters={lobby?.voters}
     candidates={lobby?.candidates}
+    mealType={lobby?.meal_type}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     inviteLink={page.url.href}
     error={lobbyError}
     onStart={begin}
     onSeat={seat}
+    onMealType={chooseMeal}
   />
 {/if}

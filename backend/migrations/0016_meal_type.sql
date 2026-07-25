@@ -1,0 +1,13 @@
+-- A meal plan is FOR a meal (#114): breakfast, lunch, dinner, snack, dessert,
+-- side, drink. The type is one column on the session — not free text and not a
+-- table of its own — because unlike ingredients it is a small closed set, chosen
+-- once, up front, in the lobby (#93), and a picker over it should be exhaustive
+-- and stable. The backend validates every write against that fixed vocabulary
+-- (session::MealType), always lowercase; the browser sentence-cases for display.
+--
+-- NOT NULL DEFAULT 'dinner': a plan is always for *some* meal, and dinner is the
+-- meal a group most plausibly plans together — the same default the create
+-- handler applies when a caller names none, so a pre-migration row and an
+-- unstated choice read identically. The host can change it in the lobby until
+-- the swiping starts; after that the roster voted under it, so it is fixed.
+ALTER TABLE pick_sessions ADD COLUMN meal_type TEXT NOT NULL DEFAULT 'dinner';

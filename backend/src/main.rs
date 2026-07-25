@@ -162,6 +162,7 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/join", post(session::join_lobby))
         .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/seat", post(session::seat))
+        .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -1001,6 +1002,164 @@ mod tests {
                 &format!("/api/session/{channel}/seat"),
                 Some(&cookie),
                 r#"{"user_id":"a-stranger"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A plan is born for dinner (#114): name no meal at creation and the lobby says
+    /// so. The host then repoints it, and the answer — a full lobby view — carries the
+    /// new meal for every screen to agree on.
+    #[tokio::test]
+    async fn the_host_names_the_meal_and_the_lobby_carries_it() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/session/{channel}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["meal_type"], "dinner");
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"breakfast"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["meal_type"], "breakfast");
+    }
+
+    /// A plan can be created *for* a meal — the API takes the type up front, so a
+    /// future create flow that asks first needs no second request.
+    #[tokio::test]
+    async fn a_plan_can_be_created_for_a_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"snack"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/session/{channel}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["meal_type"], "snack");
+    }
+
+    /// The vocabulary is closed server-side: a meal outside it is refused at the
+    /// wire, on create and on change alike — nothing stores "brunch".
+    #[tokio::test]
+    async fn a_meal_outside_the_vocabulary_is_refused() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"brunch"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"brunch"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Only the host names the meal — a guest cannot repoint someone else's plan.
+    #[tokio::test]
+    async fn only_the_host_can_name_the_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let other = auth::issue_test_session(&conn, "other").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&format!("recipes_session={other}")),
+                r#"{"meal_type":"lunch"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Once the swiping starts the meal is fixed: people voted on *that* meal, so
+    /// even the host cannot move it under them.
+    #[tokio::test]
+    async fn a_started_plan_keeps_its_meal() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&cookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/meal-type"),
+                Some(&cookie),
+                r#"{"meal_type":"lunch"}"#,
             ))
             .await
             .unwrap();
