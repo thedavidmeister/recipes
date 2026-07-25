@@ -10,7 +10,7 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** Who's in it, how to invite, and the way through to equipment and pantry. */
+/** The owners under the title, the start-a-meal action, and the quiet settings link. */
 export const Ready: Story = {
   args: {
     status: "ready",
