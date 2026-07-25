@@ -12,104 +12,125 @@
   const queryClient = useQueryClient();
 
   const MUSIC_PREFERENCE = "recipes:music";
-  /** Where the fade settles. A constant, not a setting — see MusicSwitch. */
+  /** Where a fade settles. A constant, not a setting — see MusicSwitch. */
   const LEVEL = 0.5;
-  /** How long the track takes to come up to volume, in milliseconds. */
+  /** How long a track takes to cross to another, in milliseconds. */
   const FADE = 2500;
 
-  let audio: HTMLAudioElement | undefined = $state();
-  let playing = $state(false);
-
-  let fading: number | undefined;
-
-  function stopFading() {
-    if (fading !== undefined) cancelAnimationFrame(fading);
-    fading = undefined;
+  /**
+   * The music (#88, #121), now **per section**: kitchens has its bed, pick has its
+   * own, and the rest of the app is quiet. Moving between them does not cut — one
+   * track fades down as the next fades up, so a navigation feels like walking from
+   * one room into another rather than a hard edit.
+   *
+   * A crossfade needs two things playing at once, so there are two voices. Whichever
+   * is audible fades out and pauses; the other loads the new section's track and fades
+   * in. A section with no track is silence, reached the same way — the audible voice
+   * just fades to nothing.
+   */
+  function trackFor(pathname: string): string | null {
+    const section = pathname.split("/")[1];
+    if (section === "kitchens") return "/kitchen.mp3";
+    if (section === "pick") return "/pick.mp3";
+    return null; // the rest of the app is quiet, for now
   }
 
-  /**
-   * Come up from silence rather than landing at full volume.
-   *
-   * A loop that starts at its own level is a jolt — the first thing the app does is
-   * shout — and the point of it is atmosphere.
-   */
-  function fadeIn(el: HTMLAudioElement) {
-    stopFading();
+  const wanted = $derived(trackFor(page.url.pathname));
+
+  /** Is the music switched on. Persisted, and the switch reflects it. */
+  let on = $state(false);
+  let a: HTMLAudioElement | undefined = $state();
+  let b: HTMLAudioElement | undefined = $state();
+
+  // The voice currently carrying `playingSrc`, and the track it is playing. Null when
+  // silent — either the section has no track or the music is off.
+  let live: HTMLAudioElement | undefined;
+  let playingSrc: string | null = null;
+
+  const fades = new Map<HTMLAudioElement, number>();
+  function fadeTo(el: HTMLAudioElement, target: number, done?: () => void) {
+    const prev = fades.get(el);
+    if (prev !== undefined) cancelAnimationFrame(prev);
+    const from = el.volume;
     const startedAt = performance.now();
-    el.volume = 0;
     const step = () => {
       const through = Math.min(1, (performance.now() - startedAt) / FADE);
-      el.volume = LEVEL * through;
-      fading = through < 1 ? requestAnimationFrame(step) : undefined;
+      el.volume = from + (target - from) * through;
+      if (through < 1) {
+        fades.set(el, requestAnimationFrame(step));
+      } else {
+        fades.delete(el);
+        done?.();
+      }
     };
-    fading = requestAnimationFrame(step);
+    fades.set(el, requestAnimationFrame(step));
   }
 
   /**
-   * The music (#88), owned here so it survives every navigation inside the app — the
-   * track keeps going as you move from pick to buy to a kitchen, and only a reload or
-   * a sign-out stops it.
+   * Make what is playing match the section — and the on/off preference.
    *
-   * Nothing plays unasked. A browser grants audio only to a real user gesture, so the
-   * switch is the only thing that reliably starts it — and it is called straight from
-   * the click rather than from an effect scheduled after it, which may already have
-   * fallen outside the window where the gesture counts.
-   *
-   * What the policy actually requires is a gesture *somewhere* — any click or key,
-   * not a particular button — or an origin the browser has learned you play audio on
-   * (Chrome's media engagement score, which is why YouTube appears to autoplay and a
-   * site you have never used does not). So the music asks immediately, in case this
-   * browser already trusts us, and otherwise starts on the first thing you do here.
-   * Whichever lands, it is the same track a moment later.
-   *
-   * Switching it off is remembered and checked again at the moment of the gesture, so
-   * a click after you turned it off does not turn it back on.
+   * Idempotent: if the right track is already the live one, it does nothing, which is
+   * why it is safe to call on every navigation, on the on/off toggle, and from the
+   * gesture listeners below. The browser only grants audio to a real user gesture (or
+   * an origin it has learned you play audio on), so `play()` may be refused early;
+   * when it is, `live` stays null and the next gesture tries again.
    */
+  function applyMusic() {
+    const voices = [a, b].filter((v): v is HTMLAudioElement => !!v);
+    if (voices.length < 2) return;
+
+    const want = on ? wanted : null;
+    if (want === playingSrc) return;
+
+    if (live) {
+      const old = live;
+      fadeTo(old, 0, () => old.pause());
+    }
+    if (!want) {
+      live = undefined;
+      playingSrc = null;
+      return;
+    }
+    const next = voices.find((v) => v !== live) ?? voices[0];
+    if (next.getAttribute("src") !== want) next.src = want;
+    next.volume = 0;
+    next.play().then(
+      () => {
+        fadeTo(next, LEVEL);
+        live = next;
+        playingSrc = want;
+      },
+      () => {
+        // Refused: no gesture credited yet. A gesture listener will retry.
+      },
+    );
+  }
+
+  // React to the section changing and to the on/off toggle.
   $effect(() => {
-    const el = audio;
-    if (!el) return;
+    void wanted;
+    void on;
+    applyMusic();
+  });
 
-    const wanted = () => localStorage.getItem(MUSIC_PREFERENCE) !== "off";
-    const attempt = () => {
-      if (!wanted()) return;
-      el.play().then(
-        () => {
-          playing = true;
-          fadeIn(el);
-        },
-        () => {
-          // Refused: no gesture credited yet. The listeners below are the next chance.
-        },
-      );
-    };
-
-    attempt();
-    window.addEventListener("pointerdown", attempt, { once: true });
-    window.addEventListener("keydown", attempt, { once: true });
+  // Start `on` from the remembered preference, and retry on any interaction until the
+  // browser lets the audio through — the same gesture rule as before, now driving the
+  // crossfade rather than a single element.
+  $effect(() => {
+    on = localStorage.getItem(MUSIC_PREFERENCE) !== "off";
+    const retry = () => applyMusic();
+    window.addEventListener("pointerdown", retry);
+    window.addEventListener("keydown", retry);
     return () => {
-      window.removeEventListener("pointerdown", attempt);
-      window.removeEventListener("keydown", attempt);
+      window.removeEventListener("pointerdown", retry);
+      window.removeEventListener("keydown", retry);
     };
   });
 
   function toggleMusic() {
-    if (!audio) return;
-    if (playing) {
-      stopFading();
-      audio.pause();
-      playing = false;
-      localStorage.setItem(MUSIC_PREFERENCE, "off");
-      return;
-    }
-    localStorage.setItem(MUSIC_PREFERENCE, "on");
-    const el = audio;
-    el.play().then(
-      () => {
-        playing = true;
-        fadeIn(el);
-      },
-      () => (playing = false),
-    );
+    on = !on;
+    localStorage.setItem(MUSIC_PREFERENCE, on ? "on" : "off");
+    applyMusic();
   }
 
   /**
@@ -158,15 +179,16 @@
   async function signOut() {
     await logout();
     queryClient.clear();
-    stopFading();
-    audio?.pause();
-    playing = false;
+    on = false;
+    applyMusic();
   }
 </script>
 
-<!-- Mounted from the start but fetched only on demand, so the track costs a visitor
-     who never presses Start exactly nothing. -->
-<audio bind:this={audio} src="/kitchen.mp3" loop preload="none"></audio>
+<!-- Two voices so a section change can cross-fade rather than cut. Fetched only on
+     demand (preload="none"), so a visitor who never turns the music on downloads
+     neither track. -->
+<audio bind:this={a} loop preload="none"></audio>
+<audio bind:this={b} loop preload="none"></audio>
 
 {#if !authed}
   <Login
@@ -208,5 +230,5 @@
     {@render children()}
   </div>
 
-  <MusicSwitch {playing} onToggle={toggleMusic} />
+  <MusicSwitch playing={on} onToggle={toggleMusic} />
 {/if}
