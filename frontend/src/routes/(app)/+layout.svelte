@@ -287,7 +287,9 @@
     <Nav {current} />
   {/if}
 
-  <div class="mx-auto max-w-2xl px-4 pb-16">
+  <!-- Account links: chrome, kept in a persistent centred column above the page
+       rather than riding along with the slide. -->
+  <div class="mx-auto max-w-2xl px-4">
     <div class="flex justify-end gap-3 py-2 text-sm">
       {#if session.data?.username}
         <span class="text-stone-500">@{session.data.username}</span>
@@ -307,23 +309,26 @@
         Sign out
       </button>
     </div>
+  </div>
 
-    <!-- The page slides; the chrome around it stays. Keying on the path swaps the
-         page on navigation, and the leaving and arriving pages share one grid cell so
-         neither shoves the other down mid-cross. `overflow-x-clip` is the slide's
-         window: the page travels its own width (see `pageSlide`), so it clears exactly
-         this box and the off-screen half never reaches out to grow a scrollbar. -->
-    <div class="grid overflow-x-clip">
-      {#key page.url.pathname}
-        <div
-          class="col-start-1 row-start-1"
-          in:pageSlide={{ kind: "in" }}
-          out:pageSlide={{ kind: "out" }}
-        >
+  <!-- The page slides; the chrome around it stays. The sliding element spans the full
+       viewport (the content column sits centred inside it), so `translateX(100%)`
+       carries the page right off the screen rather than only across its own narrow
+       column — and `overflow-x-clip` clips that travel at the viewport edge, so it
+       grows no scrollbar. The leaving and arriving pages share one grid cell so neither
+       shoves the other down mid-cross. -->
+  <div class="grid overflow-x-clip">
+    {#key page.url.pathname}
+      <div
+        class="col-start-1 row-start-1"
+        in:pageSlide={{ kind: "in" }}
+        out:pageSlide={{ kind: "out" }}
+      >
+        <div class="mx-auto max-w-2xl px-4 pb-16">
           {@render children()}
         </div>
-      {/key}
-    </div>
+      </div>
+    {/key}
   </div>
 
   <MusicSwitch playing={on} onToggle={toggleMusic} />

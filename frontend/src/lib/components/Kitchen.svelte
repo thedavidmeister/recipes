@@ -10,9 +10,6 @@
    * on its settings page (#117), reached by a single quiet link, so this page is about
    * being in the kitchen rather than administering it.
    *
-   * A primary kitchen says so. It is the one made for you and the one the app assumes,
-   * so the difference between it and a kitchen you opened on purpose is worth naming.
-   *
    * Nobody here has a role. Everyone in a kitchen is an owner of it — being a guest is
    * something you are at a meal, not in a room — so the list of people is a list of
    * people.
@@ -42,12 +39,6 @@
       <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">
         {kitchen.name}
       </h1>
-      {#if kitchen.is_primary}
-        <p class="mt-1 text-xs text-stone-500">
-          Yours by default — the kitchen the app works in until you open
-          another.
-        </p>
-      {/if}
 
       <div class="mt-5">
         <Button onclick={onPlan} dot="pesto">Plan a meal here</Button>
