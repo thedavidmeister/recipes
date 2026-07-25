@@ -22,6 +22,7 @@
 mod admin;
 mod auth;
 mod db;
+mod db_retry;
 mod derive;
 mod enrich;
 mod enrich_api;
@@ -53,32 +54,63 @@ use tower_http::{
 /// Shared handler state: the SSRF-guarded HTTP client, the Turso/libSQL database,
 /// the Telegram config auth runs on, and the infra key that guards the ingest sync.
 impl AppState {
-    /// A connection for this request.
+    /// Run one logical database operation, retrying transient Turso failures.
     ///
-    /// Deliberately per-request rather than one held for the process lifetime. A
-    /// libsql connection owns a Hrana stream, and a stream does not survive the
-    /// database changing generation — a restart or a failover on Turso's side. The
-    /// long-lived connection we used to hold went stale exactly once and then failed
-    /// *every* request after it with `stream not found: generation mismatch`, because
-    /// nothing in the process ever asked for a new stream. Only a restart cleared it,
-    /// which is not a recovery plan.
+    /// Every request-path DB touch goes through here, so the retry (#130) is
+    /// inherited rather than sprinkled: `op` gets a connection, does its reads
+    /// or writes, and returns; if the transport to Turso blips
+    /// ([`db_retry::is_transient`]) the whole operation re-runs — bounded by
+    /// [`db_retry::POLICY`] — and real errors (constraint violations, bad SQL)
+    /// fail exactly as fast as they always did.
     ///
-    /// Connecting is cheap — it allocates a handle; the stream is established lazily
-    /// on first use — so the fix is simply to stop keeping one around.
-    pub fn db(&self) -> Result<libsql::Connection, error::AppError> {
+    /// **Each attempt gets a fresh connection**, and connections are deliberately
+    /// per-operation rather than held for the process lifetime. A libsql
+    /// connection owns a Hrana stream, and a stream does not survive the
+    /// database changing generation — a restart or a failover on Turso's side.
+    /// The long-lived connection we used to hold went stale exactly once and then
+    /// failed *every* request after it with `stream not found: generation
+    /// mismatch`, because nothing in the process ever asked for a new stream
+    /// (#99). Connecting is cheap — it allocates a handle; the stream is
+    /// established lazily on first use — so a fresh one per operation (and per
+    /// retry: the stream that just broke is exactly what must not be reused)
+    /// costs nothing.
+    ///
+    /// The closure must be safe to re-run. Reads trivially are; this app's
+    /// writes are upserts, guarded (`run_id`) writes, deletes, or inserts keyed
+    /// on values minted *outside* the closure — see #130 for the per-write
+    /// audit. Mint ids/tokens before calling, not inside `op`, so every attempt
+    /// writes the same row.
+    pub async fn with_db<T, F, Fut>(&self, mut op: F) -> anyhow::Result<T>
+    where
+        F: FnMut(libsql::Connection) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        use futures_util::future::Either;
+        db_retry::retry(db_retry::POLICY, |_attempt| match self.fresh_conn() {
+            // `op` is called here, synchronously, so the future it returns is
+            // its own value — independent of the borrow of `op` — which is what
+            // keeps every handler's future provably `Send` (see
+            // [`db_retry::retry`] for why this is not an `AsyncFnMut`).
+            Ok(conn) => Either::Left(op(conn)),
+            Err(e) => Either::Right(std::future::ready(Err(e))),
+        })
+        .await
+    }
+
+    /// One fresh connection, configured the way every caller assumes.
+    fn fresh_conn(&self) -> anyhow::Result<libsql::Connection> {
+        use anyhow::Context as _;
         let conn = self
             .database
             .connect()
-            .map_err(|e| error::AppError::Internal(format!("could not reach the database: {e}")))?;
-        // Wait for a busy database rather than failing at once. Turso serves the
-        // deployed app and has no file lock to contend for, but a local file does —
-        // and SQLite's default is to give up immediately, so two connections to a dev
-        // or test database would collide the moment one of them wrote. Waiting is the
-        // behaviour every other caller already assumes.
+            .context("could not reach the database")?;
+        // Wait for a busy database rather than failing at once. Turso serves
+        // the deployed app and has no file lock to contend for, but a local
+        // file does — and SQLite's default is to give up immediately, so two
+        // connections to a dev or test database would collide the moment one
+        // of them wrote. Waiting is the behaviour every caller assumes.
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| {
-                error::AppError::Internal(format!("could not configure the database: {e}"))
-            })?;
+            .context("could not configure the database")?;
         Ok(conn)
     }
 }
@@ -457,6 +489,13 @@ mod tests {
     /// one still serves everything else), so the tests reach that state the same
     /// way the process does.
     async fn test_app_with_ingest_key(ingest_key: Option<String>) -> (Router, libsql::Connection) {
+        let (state, conn) = test_state(ingest_key).await;
+        (app(state), conn)
+    }
+
+    /// The state itself, for tests that exercise [`AppState`] directly (the
+    /// `with_db` retry) rather than through the router.
+    async fn test_state(ingest_key: Option<String>) -> (AppState, libsql::Connection) {
         // A file rather than `:memory:`, because SQLite gives every connection to
         // `:memory:` its own private database — and the app now takes a fresh
         // connection per request, so an in-memory one would hand each request an empty
@@ -491,7 +530,71 @@ mod tests {
             admin_id: Some("4242".into()),
             rooms: session::rooms(),
         };
-        (app(state), conn)
+        (state, conn)
+    }
+
+    /// The retry composition end to end: a transient failure re-runs the closure,
+    /// and the re-run holds a *working* connection to the same database — the
+    /// fresh-connection-per-attempt half of #130 that the `db_retry` unit tests
+    /// cannot see.
+    #[tokio::test]
+    async fn with_db_rides_out_a_transient_failure_on_a_fresh_connection() {
+        let (state, _conn) = test_state(None).await;
+        let failures_left = std::cell::Cell::new(2u32);
+        let failures_left = &failures_left;
+        let answer = state
+            .with_db(move |conn| async move {
+                // Prove every attempt's connection actually works before the
+                // injected failure decides this attempt's fate.
+                let mut rows = conn.query("SELECT 41 + 1", ()).await?;
+                let value = rows
+                    .next()
+                    .await?
+                    .expect("one row")
+                    .get::<i64>(0)
+                    .expect("one column");
+                if failures_left.get() > 0 {
+                    failures_left.set(failures_left.get() - 1);
+                    // The incident error, verbatim (#130) — transient.
+                    return Err(libsql::Error::Hrana(
+                        r#"api error: `status=502 Bad Gateway, body={"error":"upstream forward failed"}`"#
+                            .to_string()
+                            .into(),
+                    )
+                    .into());
+                }
+                Ok(value)
+            })
+            .await
+            .expect("two blips then success must succeed");
+        assert_eq!(answer, 42);
+        assert_eq!(
+            failures_left.get(),
+            0,
+            "both injected failures were consumed"
+        );
+    }
+
+    /// The other half of the bound: a fatal error is never retried, so a real
+    /// database ruling costs exactly one attempt.
+    #[tokio::test]
+    async fn with_db_does_not_retry_a_database_ruling() {
+        let (state, _conn) = test_state(None).await;
+        let calls = std::cell::Cell::new(0u32);
+        let calls = &calls;
+        let result = state
+            .with_db(move |conn| async move {
+                calls.set(calls.get() + 1);
+                conn.execute("NOT EVEN SQL", ()).await?;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.get(),
+            1,
+            "malformed SQL must fail on the first attempt"
+        );
     }
 
     /// A `GET /api/me` — the session-gated route the gate tests probe. `/me` is

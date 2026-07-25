@@ -45,9 +45,10 @@ pub async fn pending(
     Query(params): Query<PendingParams>,
 ) -> Result<Json<Vec<enrich::PendingRecipe>>, AppError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let recipes = enrich::pending(&state.db()?, limit)
+    let recipes = state
+        .with_db(move |conn| async move { enrich::pending(&conn, limit).await })
         .await
-        .map_err(|e| AppError::Internal(format!("pending failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("pending failed: {e:#}")))?;
     Ok(Json(recipes))
 }
 
@@ -76,9 +77,15 @@ pub async fn results(
             "model is required — it is the readings' provenance".into(),
         ));
     }
-    let report = enrich::submit(&state.db()?, req.readings, req.model.trim())
+    // Safe to re-run on a transient failure: every write in `submit` is a
+    // `run_id`-guarded upsert, so a second attempt can only repeat or no-op,
+    // never clobber a newer run (#11, #130).
+    let readings = &req.readings;
+    let model = req.model.trim();
+    let report = state
+        .with_db(move |conn| async move { enrich::submit(&conn, readings.clone(), model).await })
         .await
-        .map_err(|e| AppError::Internal(format!("results failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("results failed: {e:#}")))?;
     Ok(Json(report))
 }
 
