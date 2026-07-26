@@ -33,3 +33,6 @@ node_modules/
 
 # storybook-shot output — screenshots are uploaded to R2, never committed
 screenshots/
+
+# Agent worktrees — local scratch, never part of the tree.
+.claude/worktrees/
