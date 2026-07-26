@@ -52,6 +52,47 @@ export const SixShoppers: Story = {
   },
 };
 
+/**
+ * The shop is over (#132): every line of the recipe is ticked, so the list says so
+ * and offers the next leg of the arc.
+ *
+ * A shared meal, so it is the *group's* finish — the six of them between them have
+ * everything, and whoever is ready walks on to `cook`. The invitation sits after the
+ * list, where the shop ends, and wears `cook`'s paprika dot.
+ */
+export const Complete: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo, 6: ada, 7: dave },
+  },
+};
+
+/**
+ * The same finish with no meal session behind it: the list is this device's, so the
+ * completion is this device's too and says exactly that. Nothing here claims a group
+ * — the solo path cannot know about one, and pretending otherwise is how somebody
+ * walks off to cook while a flatmate is still in the shop.
+ */
+export const CompleteOnThisDevice: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: false,
+    ticks: {
+      0: null,
+      1: null,
+      2: null,
+      3: null,
+      4: null,
+      5: null,
+      6: null,
+      7: null,
+    },
+  },
+};
+
 /** A tick that did not take: the row goes back to what the server last said, and
  * the reason is on screen. A line that looks got but is not is how somebody comes
  * home without the flour. */

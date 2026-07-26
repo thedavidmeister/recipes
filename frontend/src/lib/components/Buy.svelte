@@ -1,5 +1,6 @@
 <script lang="ts">
   import Alert from "./Alert.svelte";
+  import Button from "./Button.svelte";
   import Notice from "./Notice.svelte";
   import UserName from "./UserName.svelte";
   import type { Voter } from "$lib/pick";
@@ -25,6 +26,16 @@
    * accent say whose on top of that. That is what lets every one of the six slots
    * be used unconditionally, including the two too pale to be a boundary on their
    * own (see `$lib/colour`).
+   *
+   * A finished list says so and offers the next leg of the arc (#132). The way
+   * onward sits *after* the list, where the shop ends — the same place the kitchen
+   * and the lobby put theirs, and the direction the page is read in. The arc in the
+   * `Nav` is left exactly as it was: it draws where you have *been*, and a full
+   * basket is not a cook you have done. It never blocked `cook` either, so lighting
+   * that stop would remove no obstacle — it would only restate this invitation
+   * further from the tick that earned it. The button carries `cook`'s paprika dot
+   * instead, so the tie to the arc is said in the palette rather than by moving a
+   * stop.
    */
   interface Props {
     status: BuyStatus;
@@ -60,6 +71,30 @@
 
   const ticked = $derived(
     recipe ? recipe.ingredients.filter((_, i) => isTicked(i)).length : 0,
+  );
+
+  /**
+   * Everything is bought (#132) — **every line of the recipe on screen is ticked,
+   * and there is at least one line**.
+   *
+   * Both halves are load-bearing. `ticked` counts across the *current* ingredient
+   * list, so a tick stranded at an index the recipe no longer has cannot finish the
+   * shop, and a line the recipe has gained is simply unticked: a re-read recipe
+   * reopens the list rather than inheriting a finish. And an empty list is not a
+   * finished shop — a recipe with nothing to buy has its own state above and never
+   * reaches here, but the `> 0` is stated anyway so nothing can ever arrive at
+   * "0 of 0, done".
+   *
+   * It is read off exactly the same `ticks` the rows are, so it is whatever the
+   * list is: the group's, live, when there is a session behind it (a peer's last
+   * tick lands here through the room and finishes the shop for everyone), and this
+   * device's when there is not. An in-flight tap counts, like the row it drew — if
+   * the write is refused the row goes back and this goes with it, beside the reason.
+   */
+  const complete = $derived(
+    !!recipe &&
+      recipe.ingredients.length > 0 &&
+      ticked === recipe.ingredients.length,
   );
 
   /** How much to get: the measured amount, or the note when there's no quantity. */
@@ -186,5 +221,32 @@
         </li>
       {/each}
     </ul>
+
+    {#if complete}
+      <!-- The shop is over, so the page says so and points at the next leg.
+           `role="status"` because the last tick is not always yours: in a shared
+           meal it can arrive over the room, and a screen reader should hear the
+           list finish rather than only find it on the next sweep. -->
+      <div class="mt-6" role="status">
+        <Notice>
+          <p class="font-display text-stone-900">Everything's in the basket.</p>
+          <p class="mt-1 text-sm text-stone-600">
+            {#if shared}
+              <!-- A property of the meal, not of whoever tapped last: anyone
+                   looking at this list sees it, and anyone can walk on. -->
+              That's the whole list — whoever's ready can start cooking.
+            {:else}
+              <!-- Said as small as it is. There is no group behind this list, so
+                   it claims none: it is done as far as this device knows. -->
+              That's the whole list, as this device has it — nobody else has ticked
+              along.
+            {/if}
+          </p>
+          <div class="mt-6">
+            <Button href="/cook" dot="paprika">Let's cook!</Button>
+          </div>
+        </Notice>
+      </div>
+    {/if}
   {/if}
 </div>
