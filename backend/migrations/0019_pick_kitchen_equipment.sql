@@ -1,0 +1,26 @@
+-- A pick session bounded to what its kitchen can actually make (#82): no swiping
+-- onto a recipe that needs a blender nobody owns. `0` = unbounded (the whole
+-- corpus, the behaviour every existing session keeps and the default a new plan
+-- starts on); `1` = only recipes whose equipment reading (#81) is a subset of the
+-- kitchen's equipment (#72).
+--
+-- Off by default deliberately. A kitchen that has listed nothing can make nothing,
+-- so on-by-default would hand every plan an empty deck and no explanation — and a
+-- filter that silently empties the deck is worse than one nobody turned on. The
+-- host opts in from the lobby, and the endpoint refuses to turn it on for a kitchen
+-- with no equipment listed, so the empty-deck case cannot be reached by accident.
+--
+-- One flag per plan, set by the host while the lobby is open and frozen at start,
+-- exactly like the time cap (0017) and the meal type (0016): it defines the shared
+-- corpus everyone in the session swipes within, not a per-swiper preference.
+--
+-- A boolean rather than a kitchen id: `pick_sessions.kitchen_id` already says which
+-- kitchen the plan is for, so naming a second one here could only ever disagree
+-- with it. It follows that this may only be `1` on a plan that has a kitchen, and
+-- the writes carry `kitchen_id IS NOT NULL` in the predicate to keep it that way.
+--
+-- The *flag* is what freezes at start; the kitchen's inventory stays live, and that
+-- is deliberate — what a kitchen owns is a fact about the world, not a setting on
+-- this plan, so remembering the stand mixer mid-pick should widen the deck rather
+-- than require a new plan.
+ALTER TABLE pick_sessions ADD COLUMN require_kitchen_equipment INTEGER NOT NULL DEFAULT 0;

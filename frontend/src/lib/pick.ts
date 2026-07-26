@@ -240,6 +240,8 @@ export interface Lobby {
   started: boolean;
   /** The plan's total-time cap in seconds (#80); null = "Any". */
   max_total_seconds: number | null;
+  /** Whether the plan only surfaces recipes its kitchen has every tool for (#82). */
+  require_kitchen_equipment: boolean;
   voters: Voter[];
   /** Kitchen members not yet deciding — the host can add any without a link (#72). */
   candidates: Voter[];
@@ -325,6 +327,49 @@ export async function setPlanCap(
   });
   if (!res.ok) throw lobbyFailed(res.status, "set the time cap");
   return (await res.json()) as Lobby;
+}
+
+/** Bound the plan to recipes its kitchen has every tool for, or lift that bound
+ * (#82). Host only, and only while the lobby is open — it freezes at start.
+ *
+ * Unlike the others this one surfaces the server's own words on a 400. The two ways
+ * it can be refused — the plan has no kitchen, or the kitchen has listed no
+ * equipment — are both *fixable by the person reading the message*, and "could not
+ * change what the kitchen can make (400)" would tell them nothing about which. */
+export async function setPlanCanMake(
+  channel: string,
+  require: boolean,
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/can-make`,
+    {
+      method: "POST",
+      body: JSON.stringify({ require_kitchen_equipment: require }),
+    },
+  );
+  if (!res.ok) {
+    const said = await serverSaid(res);
+    throw said
+      ? new ApiError(res.status, said)
+      : lobbyFailed(res.status, "change what the kitchen can make");
+  }
+  return (await res.json()) as Lobby;
+}
+
+/** The backend's own `{ "error": … }` message, or null if the body is not one.
+ * A failed read is a null, never a throw: the caller is already handling an error
+ * and a second one would replace the real status with a JSON parse complaint. */
+async function serverSaid(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    const said =
+      typeof body === "object" && body !== null
+        ? (body as { error?: unknown }).error
+        : null;
+    return typeof said === "string" && said.trim() !== "" ? said : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Close the lobby and start swiping. Host only. */

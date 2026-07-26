@@ -11,6 +11,7 @@ const meta = {
     onMealType: () => {},
     onAdditions: () => {},
     onCap: () => {},
+    onCanMake: () => {},
   },
 } satisfies Meta<typeof PlanLobby>;
 export default meta;
@@ -103,6 +104,71 @@ export const TimeCapped: Story = {
     inviteLink: invite,
     cap: 1800,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** A plan for a kitchen (#82): the can-make row is offered, and sits unbounded —
+ * "Anything" — which is where every plan starts. A kitchen that has listed nothing
+ * can make nothing, so a bound that was on by default would deal an empty deck. */
+export const KitchenUnbounded: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "4242",
+    mealType: "dinner",
+    hasKitchen: true,
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** The host has bounded the plan to what the kitchen can make (#82). The note is
+ * part of the control, not a footnote: this leaves out recipes nobody has read for
+ * equipment yet, so the deck is narrower than what the kitchen could really cook. */
+export const KitchenCanMake: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "4242",
+    mealType: "dinner",
+    hasKitchen: true,
+    requireKitchenEquipment: true,
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** Both bounds at once, which is how a weeknight plan actually reads: half an hour,
+ * and only what this kitchen has the tools for (#80 + #82). Each says what it costs
+ * on its own line rather than merging into one hedge. */
+export const CappedAndCanMake: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "4242",
+    mealType: "dinner",
+    hasKitchen: true,
+    cap: 1800,
+    requireKitchenEquipment: true,
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** A guest reads the kitchen bound they will be swiping within — shown, not
+ * settable, like the time cap (#82). Someone wondering where half the recipes went
+ * gets the answer on the page instead of a theory. */
+export const GuestSeesTheKitchenBound: Story = {
+  args: {
+    status: "ready",
+    host: false,
+    hostId: "4242",
+    mealType: "dinner",
+    requireKitchenEquipment: true,
+    voters: [
+      { telegram_user_id: "4242", username: "dave" },
+      { telegram_user_id: "9317", username: "mel" },
+    ],
   },
 };
 

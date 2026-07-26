@@ -27,7 +27,7 @@
 //! today; #11 (structured ingredients) sharpens this for free-text sources and
 //! near-duplicate names, but the walk does not wait on it for the corpus we hold.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use axum::{
     extract::{Query, State},
@@ -35,6 +35,7 @@ use axum::{
 };
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
+use recipe_core::equipment::{capability, Capability, RequiredEquipment};
 use recipe_core::Ingredient;
 use recipe_walk::{FixtureGraph, IngredientId, RecipeGraph, RecipeId, TabuWeighted, Walk};
 use serde::{Deserialize, Serialize};
@@ -52,11 +53,12 @@ const MAX_LEN: usize = 30;
 pub struct WalkParams {
     /// Requested number of stops, clamped to `1..=MAX_LEN`. Absent → [`DEFAULT_LEN`].
     len: Option<usize>,
-    /// The pick session this walk feeds (#80). Present, the session's time cap
-    /// bounds the corpus walked; an unknown channel is refused rather than read as
-    /// "uncapped". Absent, the walk is over the whole corpus, as ever. It scopes
-    /// the walk to the plan's bound — it is not an access check (the session gate
-    /// already authenticated the caller, and a cap is a filter, not a secret).
+    /// The pick session this walk feeds (#80, #82). Present, the session's bounds —
+    /// its time cap, and whether it is limited to what its kitchen can make — bound
+    /// the corpus walked; an unknown channel is refused rather than read as
+    /// "unbounded". Absent, the walk is over the whole corpus, as ever. It scopes the
+    /// walk to the plan's bounds — it is not an access check (the session gate already
+    /// authenticated the caller, and a bound is a filter, not a secret).
     channel: Option<String>,
 }
 
@@ -246,33 +248,83 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
     stops
 }
 
+/// What a walk is bounded to, already resolved against the database. [`Default`] is
+/// unbounded — the whole corpus, which is what a walk with no channel gets.
+#[derive(Debug, Clone, Default)]
+struct Bounds {
+    /// The pick session's time cap in seconds (#80); `None` = "Any".
+    max_total_seconds: Option<i64>,
+    /// The equipment the plan's kitchen holds (#82), when the plan is limited to what
+    /// it can make; `None` = unlimited. Already normalised (#81), so matching it is
+    /// containment, never a fuzzy compare.
+    owned_equipment: Option<BTreeSet<String>>,
+}
+
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
 /// column is JSON, parsed here into names (measures are irrelevant to the graph).
-/// `max_total_seconds` is a pick session's time cap (#80): recipes whose
-/// `total_seconds` estimate exceeds it never enter the graph, so a capped walk
-/// cannot surface them. The comparison is inclusive — a 30-minute recipe fits a
-/// 30-minute cap.
 ///
-/// **A `NULL` estimate stays in.** That is a deliberate call, not an accident of
-/// SQL three-valued logic:
+/// # The time cap (#80)
 ///
-/// - The estimate is a **lower bound** even when present (untimed steps add
-///   nothing, #79) — so `total_seconds <= cap` never *proves* a recipe fits.
-///   Excluding "unknown" while admitting "at least this long" would hold the two
-///   to different standards for the same uncertainty.
-/// - Most of the corpus has no step reading yet; excluding `NULL` would empty a
-///   capped pick outright. Enrichment is an addition, never a gate — a recipe must
-///   not vanish from the product because a worker has not read it yet.
-async fn load_corpus(
-    conn: &libsql::Connection,
-    max_total_seconds: Option<i64>,
-) -> anyhow::Result<Corpus> {
+/// Recipes whose `total_seconds` estimate exceeds the cap never enter the graph, so a
+/// capped walk cannot surface them. The comparison is inclusive — a 30-minute recipe
+/// fits a 30-minute cap.
+///
+/// **A `NULL` estimate stays in.** That is a deliberate call, not an accident of SQL
+/// three-valued logic:
+///
+/// - The estimate is a **lower bound** even when present (untimed steps add nothing,
+///   #79) — so `total_seconds <= cap` never *proves* a recipe fits. Excluding
+///   "unknown" while admitting "at least this long" would hold the two to different
+///   standards for the same uncertainty.
+/// - Most of the corpus has no step reading yet; excluding `NULL` would empty a capped
+///   pick outright. Enrichment is an addition, never a gate — a recipe must not vanish
+///   from the product because a worker has not read it yet.
+///
+/// # The kitchen bound (#82)
+///
+/// A recipe enters the graph only if its equipment reading (#81) is a subset of what
+/// the kitchen owns — [`Capability::CanMake`].
+///
+/// **A recipe with no reading is left out**, which is the opposite call to the cap
+/// above, and the difference is what the two filters can *prove*:
+///
+/// - A time estimate is a lower bound even when we have it, so the cap is choosing
+///   between two flavours of uncertainty and has no reason to be stricter with one.
+///   An equipment reading is **complete** — it names everything, prep tools included
+///   (#81) — so containment is a proof, and admitting unread recipes beside it would
+///   mix a proof with a guess.
+/// - #81 already ruled on the empty list: it is *refused* on the way in, precisely so
+///   that a kitchen owning no knife cannot appear able to cook everything. Reading `[]`
+///   as makeable here would reinstate the exact failure that ruling prevents.
+/// - The premise that made #80 include unknowns does not hold here: measured against
+///   production, **790/790 recipes carry an equipment reading** in
+///   `equipment_structures`, so excluding unread ones costs nothing today.
+///
+/// That last point is why this is an accommodation and not a semantics: a missing
+/// reading is a gap in our extraction, not a property of the recipe (#158) — every
+/// recipe needs *something*. Newly ingested recipes sit unread until the worker reaches
+/// them, and while they do, a can-make plan will not deal them. If that window ever
+/// grows big enough to matter, the fix is reading them, not loosening this.
+///
+/// The column read here is the *derived* one, which trails the readings by a derive:
+/// `recipes.equipment` holds a reading only once one has run since it landed. It held
+/// nothing at all until this branch fixed [`crate::recipes::upsert`], so a deployment
+/// that has not re-derived since reads the whole corpus as unread, and a can-make plan
+/// deals nothing. Ingest runs derive on its schedule, so that heals itself — but it is
+/// worth knowing while it does.
+///
+/// The cap filters in SQL and this filters in Rust, which is not an inconsistency to
+/// tidy away: a cap is a scalar comparison SQL does natively, while subset containment
+/// over a JSON array — plus the empty-means-unread ruling — is a judgement that belongs
+/// in one tested place ([`recipe_core::equipment::capability`]), shared with #83, rather
+/// than re-encoded in a `json_each` subquery that could drift from it.
+async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Result<Corpus> {
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, total_seconds, ingredients
+            "SELECT source, id, title, image, category, area, total_seconds, ingredients, equipment
              FROM recipes
              WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
-            libsql::params![max_total_seconds],
+            libsql::params![bounds.max_total_seconds],
         )
         .await?;
 
@@ -308,6 +360,26 @@ async fn load_corpus(
             );
             Vec::new()
         });
+        // The kitchen bound (#82). Same split as the ingredients above: a structural
+        // read error propagates, an unparseable value degrades this one recipe. It
+        // degrades to *unread* — an empty reading, which is exactly the reading we
+        // cannot act on — so a corrupt row is left out of a can-make walk rather than
+        // waved through as makeable.
+        if let Some(owned) = &bounds.owned_equipment {
+            let json = row.get::<String>(8)?;
+            let required: Vec<RequiredEquipment> =
+                serde_json::from_str(&json).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "recipe {}/{} has unparseable equipment JSON, treating as unread: {e}",
+                        card.source,
+                        card.id
+                    );
+                    Vec::new()
+                });
+            if capability(&required, owned) != Capability::CanMake {
+                continue;
+            }
+        }
         let names = ingredients.into_iter().map(|i| i.name).collect();
         out.push((card, names));
     }
@@ -315,8 +387,46 @@ async fn load_corpus(
     Ok(Corpus::build(out))
 }
 
+/// Resolve what a walk is bounded to. No channel is unbounded; a channel that names no
+/// session is refused rather than silently walked over the whole corpus, which would
+/// hand a mistyped channel the deck the plan asked not to have (#80).
+///
+/// The kitchen's inventory is read here, per walk, rather than frozen onto the plan:
+/// the *flag* is a plan setting and freezes at start, but what a kitchen owns is a fact
+/// about the world, so remembering the stand mixer should widen the deck immediately
+/// instead of needing a new plan (#82).
+async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bounds, AppError> {
+    let Some(channel) = channel else {
+        return Ok(Bounds::default());
+    };
+    let plan = state
+        .with_db(move |conn| async move { crate::session::plan_bounds(&conn, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    let owned_equipment = match plan.makeable_in_kitchen.as_deref() {
+        Some(kitchen_id) => Some(
+            state
+                .with_db(move |conn| async move {
+                    crate::kitchens::equipment_of(&conn, kitchen_id).await
+                })
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .collect::<BTreeSet<String>>(),
+        ),
+        None => None,
+    };
+    Ok(Bounds {
+        max_total_seconds: plan.max_total_seconds,
+        owned_equipment,
+    })
+}
+
 /// `GET /api/walk?len=<n>&channel=<pick>` — a fresh variety-first walk over the
-/// corpus, bounded to the pick session's time cap when a channel is named (#80).
+/// corpus, bounded to the pick session's time cap (#80) and, when it asks for it, to
+/// what its kitchen can make (#82), whenever a channel is named.
 ///
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
@@ -326,19 +436,13 @@ pub async fn walk(
     Query(params): Query<WalkParams>,
 ) -> Result<Json<WalkResponse>, AppError> {
     let len = params.len.unwrap_or(DEFAULT_LEN).clamp(1, MAX_LEN);
-    // The cap is read fresh from the session on every walk, so the walk always
+    // The bounds are read fresh from the session on every walk, so the walk always
     // enforces what the plan currently says — the client passes only the channel,
-    // never the cap itself, which keeps the bound server-authoritative (#80).
-    let cap = match params.channel.as_deref() {
-        Some(channel) => state
-            .with_db(move |conn| async move { crate::session::time_cap(&conn, channel).await })
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?,
-        None => None,
-    };
+    // never a bound itself, which keeps them server-authoritative (#80).
+    let bounds = resolve_bounds(&state, params.channel.as_deref()).await?;
+    let bounds = &bounds;
     let corpus = state
-        .with_db(move |conn| async move { load_corpus(&conn, cap).await })
+        .with_db(move |conn| async move { load_corpus(&conn, bounds).await })
         .await
         .map_err(|e| AppError::Internal(format!("could not load the corpus: {e:#}")))?;
     let mut rng = StdRng::from_entropy();
@@ -678,11 +782,27 @@ mod tests {
         v
     }
 
+    /// Bounded by time alone (#80).
+    fn capped(seconds: i64) -> Bounds {
+        Bounds {
+            max_total_seconds: Some(seconds),
+            owned_equipment: None,
+        }
+    }
+
+    /// Bounded to a kitchen holding exactly `items` (#82).
+    fn owning(items: &[&str]) -> Bounds {
+        Bounds {
+            max_total_seconds: None,
+            owned_equipment: Some(items.iter().map(|i| (*i).to_owned()).collect()),
+        }
+    }
+
     /// No cap — the whole corpus, exactly as before the cap existed.
     #[tokio::test]
     async fn an_uncapped_load_takes_the_whole_corpus() {
         let conn = seeded_conn().await;
-        let corpus = load_corpus(&conn, None).await.unwrap();
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
         assert_eq!(ids(&corpus), vec!["exact", "quick", "slow", "unknown"]);
     }
 
@@ -693,7 +813,7 @@ mod tests {
     #[tokio::test]
     async fn a_cap_excludes_recipes_estimated_over_it() {
         let conn = seeded_conn().await;
-        let corpus = load_corpus(&conn, Some(1800)).await.unwrap();
+        let corpus = load_corpus(&conn, &capped(1800)).await.unwrap();
         assert_eq!(ids(&corpus), vec!["exact", "quick", "unknown"]);
     }
 
@@ -704,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_estimate_stays_in_a_capped_walk() {
         let conn = seeded_conn().await;
-        let corpus = load_corpus(&conn, Some(600)).await.unwrap();
+        let corpus = load_corpus(&conn, &capped(600)).await.unwrap();
         assert_eq!(ids(&corpus), vec!["unknown"]);
     }
 
@@ -719,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn a_loaded_card_carries_its_time_estimate() {
         let conn = seeded_conn().await;
-        let corpus = load_corpus(&conn, None).await.unwrap();
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
         let estimate = |id: &str| {
             corpus
                 .cards
@@ -732,6 +852,149 @@ mod tests {
         assert_eq!(estimate("exact"), Some(1800));
         assert_eq!(estimate("slow"), Some(7200));
         assert_eq!(estimate("unknown"), None);
+    }
+
+    /// A corpus shaped for the kitchen bound (#82): one recipe per relationship a
+    /// kitchen can have with a reading — needs nothing you lack, needs one thing you
+    /// lack, needs several, and one with no reading at all.
+    async fn equipment_conn() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        for (id, equipment) in [
+            ("simple", r#"[{"item":"knife"},{"item":"bowl"}]"#),
+            (
+                "exact",
+                r#"[{"item":"knife"},{"item":"bowl"},{"item":"wok"}]"#,
+            ),
+            ("blender", r#"[{"item":"knife"},{"item":"blender"}]"#),
+            ("fancy", r#"[{"item":"sous vide"},{"item":"blowtorch"}]"#),
+            ("unread", "[]"),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, equipment)
+                 VALUES ('test', ?1, ?1, ?2)",
+                libsql::params![id, equipment],
+            )
+            .await
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Unbounded — the whole corpus, unread recipes and all, exactly as before the
+    /// bound existed. Nothing about #82 narrows a plan that did not ask for it.
+    #[tokio::test]
+    async fn an_unbounded_load_keeps_unread_recipes() {
+        let conn = equipment_conn().await;
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec!["blender", "exact", "fancy", "simple", "unread"]
+        );
+    }
+
+    /// The bound is subset containment: everything the reading names must be owned.
+    /// Owning exactly the reading is enough (`exact`), owning more than it asks for is
+    /// fine (`simple`), and one missing item is enough to drop it (`blender`).
+    #[tokio::test]
+    async fn a_kitchen_bound_keeps_only_what_it_can_make() {
+        let conn = equipment_conn().await;
+        let corpus = load_corpus(&conn, &owning(&["knife", "bowl", "wok"]))
+            .await
+            .unwrap();
+        assert_eq!(ids(&corpus), vec!["exact", "simple"]);
+    }
+
+    /// **The unknown-reading policy** (#82), and the one place it differs from the
+    /// time cap: a recipe with no equipment reading is *left out* of a can-make walk.
+    ///
+    /// A reading is complete when we have one — prep tools included (#81) — so
+    /// containment is a proof; `[]` is not a weaker reading but no reading, refused as
+    /// one on the way in precisely so "needs nothing" can never be mistaken for
+    /// "anyone can cook it". Admitting it here would put a guess in a deck whose one
+    /// promise is that you can make what is in it.
+    #[tokio::test]
+    async fn an_unread_recipe_is_left_out_of_a_kitchen_bound_walk() {
+        let conn = equipment_conn().await;
+        for owned in [
+            owning(&["knife", "bowl", "wok"]),
+            owning(&["knife"]),
+            owning(&[]),
+        ] {
+            let corpus = load_corpus(&conn, &owned).await.unwrap();
+            assert!(
+                !ids(&corpus).contains(&"unread"),
+                "an unread recipe is never proven makeable: {:?}",
+                ids(&corpus)
+            );
+        }
+    }
+
+    /// The bound under pressure: a kitchen holding nothing can make nothing, and the
+    /// walk says so honestly rather than falling back to the whole corpus. This is
+    /// why the option is off by default and why the endpoint refuses to turn it on
+    /// for an unstocked kitchen — reaching here means someone emptied their kitchen
+    /// mid-plan.
+    #[tokio::test]
+    async fn an_empty_kitchen_can_make_nothing() {
+        let conn = equipment_conn().await;
+        let corpus = load_corpus(&conn, &owning(&[])).await.unwrap();
+        assert!(ids(&corpus).is_empty());
+    }
+
+    /// The two bounds compose: over-cap recipes go by time, un-makeable ones by
+    /// equipment, and only what survives both is dealt.
+    #[tokio::test]
+    async fn the_time_cap_and_the_kitchen_bound_compose() {
+        let conn = equipment_conn().await;
+        conn.execute(
+            "UPDATE recipes SET total_seconds = 7200 WHERE id = 'simple'",
+            (),
+        )
+        .await
+        .unwrap();
+        let bounds = Bounds {
+            max_total_seconds: Some(1800),
+            owned_equipment: Some(
+                ["knife", "bowl", "wok"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+        };
+        let corpus = load_corpus(&conn, &bounds).await.unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec!["exact"],
+            "`simple` is makeable but too slow; the others are quick but not makeable"
+        );
+    }
+
+    /// A corrupt reading degrades to *unread*, so it is left out of a can-make walk
+    /// rather than waved through — the safe direction for a deck that promises
+    /// makeability. Unbounded, the recipe is untouched: the bound is what reads the
+    /// column, so nothing else can be broken by it.
+    #[tokio::test]
+    async fn an_unparseable_reading_is_treated_as_unread() {
+        let conn = equipment_conn().await;
+        conn.execute(
+            "UPDATE recipes SET equipment = '{oops' WHERE id = 'simple'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let bounded = load_corpus(&conn, &owning(&["knife", "bowl", "wok"]))
+            .await
+            .unwrap();
+        assert_eq!(ids(&bounded), vec!["exact"]);
+
+        let all = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert!(ids(&all).contains(&"simple"));
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?
