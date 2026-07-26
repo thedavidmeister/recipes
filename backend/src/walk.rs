@@ -70,6 +70,14 @@ pub struct RecipeCard {
     pub image: Option<String>,
     pub category: Option<String>,
     pub area: Option<String>,
+    /// The recipe's estimated total time (#79/#84): the critical path over its step
+    /// DAG, so the swiper can weigh "do I have time for this" while voting rather
+    /// than after picking. `None` is **unknown** — the step worker has not read this
+    /// recipe, or it read no timed step — never "instant"; the client shows nothing
+    /// for it. A `Some` is a **lower bound**: untimed steps ("until golden")
+    /// contribute nothing, so the real cook takes at least this long, and the client
+    /// renders it as an at-least, never an exact time.
+    pub total_seconds: Option<i64>,
 }
 
 /// One stop on the walk: the recipe landed on, and the ingredient crossed to reach
@@ -261,7 +269,7 @@ async fn load_corpus(
 ) -> anyhow::Result<Corpus> {
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, ingredients
+            "SELECT source, id, title, image, category, area, total_seconds, ingredients
              FROM recipes
              WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
             libsql::params![max_total_seconds],
@@ -277,6 +285,10 @@ async fn load_corpus(
             image: row.get::<Option<String>>(3)?,
             category: row.get::<Option<String>>(4)?,
             area: row.get::<Option<String>>(5)?,
+            // The same column the cap filters on (#80) now also rides out to the
+            // card (#84): the walk already holds it, so showing the estimate costs
+            // one more column, not a second read.
+            total_seconds: row.get::<Option<i64>>(6)?,
         };
         // The ingredients column is our own serialization — NOT NULL DEFAULT '[]',
         // written only by ingest — so the two ways to fail here are not the same.
@@ -287,7 +299,7 @@ async fn load_corpus(
         // that works over the other recipes, so that recipe degrades to an
         // edgeless node — but it is warned, not dropped silently, so corruption is
         // still visible.
-        let json = row.get::<String>(6)?;
+        let json = row.get::<String>(7)?;
         let ingredients: Vec<Ingredient> = serde_json::from_str(&json).unwrap_or_else(|e| {
             tracing::warn!(
                 "recipe {}/{} has unparseable ingredients JSON, treating as none: {e}",
@@ -347,6 +359,7 @@ mod tests {
             image: None,
             category: None,
             area: None,
+            total_seconds: None,
         }
     }
 
@@ -693,6 +706,32 @@ mod tests {
         let conn = seeded_conn().await;
         let corpus = load_corpus(&conn, Some(600)).await.unwrap();
         assert_eq!(ids(&corpus), vec!["unknown"]);
+    }
+
+    /// The estimate rides out **on the card** (#84), not only in the cap's `WHERE`
+    /// clause (#80): the swiper weighs "do I have time for this" while voting, not
+    /// after picking. `NULL` arrives as `None` — unknown, which the client renders
+    /// as nothing rather than as "0 min".
+    ///
+    /// This also pins the column order. The `SELECT` names its columns and the reads
+    /// are positional, so a column inserted in the middle without moving the indexes
+    /// silently reads the wrong value — the shape of the #109 outage.
+    #[tokio::test]
+    async fn a_loaded_card_carries_its_time_estimate() {
+        let conn = seeded_conn().await;
+        let corpus = load_corpus(&conn, None).await.unwrap();
+        let estimate = |id: &str| {
+            corpus
+                .cards
+                .iter()
+                .find(|c| c.id == id)
+                .expect("seeded recipe is in the corpus")
+                .total_seconds
+        };
+        assert_eq!(estimate("quick"), Some(900));
+        assert_eq!(estimate("exact"), Some(1800));
+        assert_eq!(estimate("slow"), Some(7200));
+        assert_eq!(estimate("unknown"), None);
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?

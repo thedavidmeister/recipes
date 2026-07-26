@@ -7,6 +7,44 @@ import type { StructuredStep } from "./types";
  * pure parts the component and the page share.
  */
 
+/**
+ * A recipe's total-time estimate as a person reads it — or `null` when there is
+ * nothing honest to say (#84).
+ *
+ * The number this formats is `recipes.total_seconds`: the critical path over the
+ * same step DAG the rest of this module walks (#79). It is **not** exact and it is
+ * **not** always known, and both are a display problem, so both are handled here
+ * rather than at every call site:
+ *
+ * - **Unknown** (`null`, or a non-positive/garbled value) returns `null`, so the
+ *   surface shows *nothing*. An un-read recipe is not an instant one, and "0 min"
+ *   would be a confident lie about the case we know least about.
+ * - **A lower bound.** Untimed steps ("until golden") contribute nothing to the
+ *   path, so the real cook takes *at least* this long. Hence the trailing `+`:
+ *   `23 min+` says at-least, where `23 min` would claim exact. Minutes are floored
+ *   for the same reason — rounding up would overstate a bound already optimistic.
+ *
+ * Under an hour reads as minutes (`23 min+`); over it, as hours carrying the
+ * remainder (`2 hours 5 min+`). Same "min"/"hour"/"hours" vocabulary the plan lobby
+ * uses for its cap (#80), so one estimate is described the same way on both
+ * surfaces. The remainder is not decoration: the corpus's long recipes almost never
+ * land on a whole hour, and a real 9000-second braise reading "150 min+" is
+ * arithmetic rather than an answer to "have I got time for this".
+ */
+export function formatEstimate(
+  seconds: number | null | undefined,
+): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  const total = Math.floor(seconds);
+  if (total < 60) return `${total} sec+`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes} min+`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  const label = hours === 1 ? "1 hour" : `${hours} hours`;
+  return rest === 0 ? `${label}+` : `${label} ${rest} min+`;
+}
+
 /** A duration as a clock: `30:00`, `1:00`, `1:05:00`. Seconds always two digits. */
 export function formatClock(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));

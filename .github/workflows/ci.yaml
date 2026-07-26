@@ -46,6 +46,11 @@ jobs:
       # arbitrary colours, a serif — or if a component ships without a story. A
       # system nobody enforces decays; this is the enforcement.
       - run: nix develop -c npm --prefix frontend run lint
+      # Unit tests for the SPA's pure modules. Storybook plus the visual fence
+      # cover what renders; they cannot cover the arithmetic underneath, where a
+      # wrong answer still renders perfectly (a time estimate formatted as exact
+      # when it is a lower bound, #84). This is where that gets pinned.
+      - run: nix develop -c npm --prefix frontend run test:unit
       # The SPA must actually build. Env vars are deliberately unset: with
       # `$env/dynamic/public` they are read at runtime from the generated
       # `_app/env.js`, so a build proves compilation without pretending to prove
