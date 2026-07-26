@@ -11,6 +11,7 @@
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
+  import { userColour, userTint } from "$lib/colour";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -27,6 +28,14 @@
    *
    * Everyone in the roster wears their colour (#145) — the same one they have in
    * the kitchen — so "who is here" is a glance rather than a read.
+   *
+   * So does every choice on the plan. What the meal is, what comes with it and how
+   * long there is are all the host's calls, so the chosen pill is washed in the
+   * host's tint and carries their dot (#131): a guest reads "someone decided this,
+   * and it was them" off the shape instead of a flat fill that could have come from
+   * anywhere. Selected-ness itself stays on the cocoa outline and `aria-pressed`,
+   * never on the colour — the tints are far too pale to be a control's boundary,
+   * and that is exactly why they are safe to use for all six people.
    */
   interface Props {
     status: "pending" | "error" | "ready";
@@ -44,6 +53,9 @@
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
     host?: boolean;
+    /** Who started it, by telegram id — whose colour the plan's choices wear
+     * (#131). Undefined only while the lobby is still loading. */
+    hostId?: string;
     error?: string;
     onStart?: () => void;
     /** Add a kitchen member by id. Host only. */
@@ -66,6 +78,7 @@
     cap = null,
     inviteLink,
     host = false,
+    hostId,
     error,
     onStart,
     onSeat,
@@ -111,6 +124,18 @@
         ? additions.filter((x) => x !== a)
         : [...additions, a],
     );
+
+  /**
+   * The classes for a pill the host has chosen — their tint, and the cocoa outline
+   * that says "chosen" at full contrast whatever their colour is. Without a host
+   * to attribute it to (the lobby is still loading) it falls back to the plain
+   * cocoa outline: an unattributed choice, not a wrong one.
+   */
+  const chosenPill = $derived(
+    hostId
+      ? `border-cocoa-500 border text-stone-900 ${userTint(hostId)}`
+      : "border-cocoa-500 border text-stone-900",
+  );
 
   let copied = $state(false);
 
@@ -166,10 +191,17 @@
               type="button"
               aria-pressed={t === mealType}
               onclick={() => onMealType?.(t)}
-              class="rounded-pill px-3 py-1 text-sm {t === mealType
-                ? 'bg-cocoa-500 text-cream-50'
+              class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {t ===
+              mealType
+                ? chosenPill
                 : 'border-cocoa-500 text-cocoa-500 border'}"
             >
+              {#if t === mealType && hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
               {mealLabel(t)}
             </button>
           {/each}
@@ -186,10 +218,18 @@
               type="button"
               aria-pressed={additions.includes(a)}
               onclick={() => toggleAddition(a)}
-              class="rounded-pill px-3 py-1 text-sm {additions.includes(a)
-                ? 'bg-cocoa-500 text-cream-50'
+              class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {additions.includes(
+                a,
+              )
+                ? chosenPill
                 : 'border-stone-300 text-stone-600 border'}"
             >
+              {#if additions.includes(a) && hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
               {mealLabel(a)}
             </button>
           {/each}
@@ -205,10 +245,17 @@
               type="button"
               aria-pressed={cap === b.seconds}
               onclick={() => onCap?.(b.seconds)}
-              class="rounded-pill px-3 py-1 text-sm {cap === b.seconds
-                ? 'bg-cocoa-500 text-cream-50'
+              class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {cap ===
+              b.seconds
+                ? chosenPill
                 : 'border-stone-300 text-stone-600 border'}"
             >
+              {#if cap === b.seconds && hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
               {b.label}
             </button>
           {/each}
@@ -224,8 +271,15 @@
              settable: the cap is the host's call (#80). -->
         <p class="mt-6 text-sm text-stone-600">
           <span
-            class="rounded-pill bg-cocoa-500 text-cream-50 mr-1 px-3 py-1 text-sm font-medium"
-            >{capLabel(cap)}</span
+            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill}"
+          >
+            {#if hostId}
+              <span
+                class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                aria-hidden="true"
+              ></span>
+            {/if}
+            {capLabel(cap)}</span
           >
           Recipes estimated over this are left out. Estimates are a lower bound,
           and recipes we can't time yet still show.

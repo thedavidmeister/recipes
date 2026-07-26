@@ -328,13 +328,22 @@
         nothing stored and nothing to choose. Six slots, so colours repeat; the
         name always rides along, because a dot was never the identity.
       </p>
+      <p class="mt-3 text-stone-600">
+        Two weights, and the split is the rule: the solid <em>-500</em> is a mark
+        beside a name, the <em>-100</em> is the wash on a thing that person has
+        claimed — a shopping line they got, a pill they chose. Ink never changes
+        colour, and never sits on the solid: no one text tone is legible on both
+        the palest slot and the darkest. And the colour is never what says
+        <em>chosen</em> — a checked box, a pressed pill, a struck-through line
+        say that. That is what makes all six usable on anyone.
+      </p>
       <div class="mt-6 flex flex-wrap items-center gap-3">
         {#each USER_COLOURS as c (c.token)}
           <div
-            class="bg-cream-100 rounded-pill flex items-center gap-2 border border-stone-200 px-4 py-2"
+            class="rounded-pill flex items-center gap-2 border border-stone-200 px-4 py-2 {c.tint}"
           >
             <span class="size-2.5 shrink-0 rounded-full {c.dot}"></span>
-            <span class="text-sm text-stone-600">{c.token}</span>
+            <span class="text-sm text-stone-900">{c.token}</span>
           </div>
         {/each}
       </div>

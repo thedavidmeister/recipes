@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use axum::{Extension, Json};
 use futures_util::{SinkExt, StreamExt};
@@ -102,6 +102,20 @@ enum ServerMsg {
         id: String,
         vote: bool,
     },
+    /// The buy checklist for one recipe changed (#131) — the **whole** current
+    /// list, not the one item that moved.
+    ///
+    /// Sending the list rather than a delta is what makes a shared checklist
+    /// self-healing: a client that missed a frame (the broadcast ring lagged, or
+    /// it was mid-reconnect) is corrected by the next one instead of drifting
+    /// further, and there is no ordering to get wrong when two people tick at
+    /// once. The list is one recipe's ingredients, so it is small enough that
+    /// re-sending it is cheaper than the reconciliation a delta would need.
+    Buy {
+        source: String,
+        id: String,
+        checks: Vec<BuyCheck>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +124,13 @@ struct TallyRow {
     id: String,
     yes: i64,
     no: i64,
+    /// Who said yes, by telegram id — the attribution behind the count.
+    ///
+    /// The live [`ServerMsg::Vote`] frame has always named its voter, but a
+    /// client that (re)connects rehydrates from the tally, so a count alone would
+    /// mean attribution survived only as long as the socket did. Turso is the
+    /// truth here as everywhere: the tally carries who, not just how many.
+    yes_voters: Vec<String>,
 }
 
 // ---- meal type -------------------------------------------------------------
@@ -319,6 +340,30 @@ pub struct SeatBody {
 pub struct Voter {
     pub telegram_user_id: String,
     pub username: Option<String>,
+}
+
+/// One ticked line of a meal's shopping list (#131): which ingredient, and whose
+/// tick it is.
+///
+/// `by` is the whole person rather than an id because every surface that shows a
+/// tick shows *who* — a bare id would make the browser join it back against the
+/// roster, and a shopper who never joined the lobby (there is no such thing today,
+/// but the roster is not this table's business) would render as a blank.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuyCheck {
+    /// The 0-based position in the recipe's ingredient list.
+    pub index: i64,
+    pub by: Voter,
+}
+
+/// A meal's shopping checklist for one recipe (#131) — every line already got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuyList {
+    pub channel_id: String,
+    pub source: String,
+    pub id: String,
+    /// The ticked lines, in ingredient order. An unticked line simply is not here.
+    pub checks: Vec<BuyCheck>,
 }
 
 /// A plan's lobby: who is deciding, and whether it has begun.
@@ -646,6 +691,157 @@ pub async fn set_cap(
     }
     let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
+}
+
+// ---- buy checklist (#131) --------------------------------------------------
+
+/// Which recipe's checklist is being read — the plan's consensus recipe.
+///
+/// The recipe travels in the query rather than being looked up from the session
+/// because the *decision* does not live on the session yet (the browser stashes
+/// it), and inventing a second home for it here would put two answers to "what
+/// did we pick" in the codebase. The checklist is keyed by recipe either way, so
+/// this stays correct when the decision does move server-side.
+#[derive(Debug, Deserialize)]
+pub struct BuyQuery {
+    pub source: String,
+    pub id: String,
+}
+
+/// A tick or an untick on one line of the shopping list.
+#[derive(Debug, Deserialize)]
+pub struct BuyCheckBody {
+    pub source: String,
+    pub id: String,
+    pub index: i64,
+    /// `true` ticks the line (claiming it for the caller), `false` clears it.
+    pub checked: bool,
+}
+
+/// `GET /api/session/{channel}/buy?source=…&id=…` — the meal's shopping checklist.
+///
+/// Readable by any signed-in caller holding the channel id, exactly like the lobby
+/// ([`lobby`]) whose roster it names: the two answer the same question about the
+/// same meal, so gating one and not the other would only mean a person who can see
+/// that Mel is deciding cannot see that Mel got the carrots.
+pub async fn buy_list(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Query(q): Query<BuyQuery>,
+) -> Result<Json<BuyList>, AppError> {
+    let channel = channel.as_str();
+    let q = &q;
+    if !state
+        .with_db(move |db| async move { session_exists(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::BadRequest(format!("unknown session: {channel}")));
+    }
+    let checks = state
+        .with_db(move |db| async move { load_buy_checks(&db, channel, &q.source, &q.id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(BuyList {
+        channel_id: channel.to_owned(),
+        source: q.source.clone(),
+        id: q.id.clone(),
+        checks,
+    }))
+}
+
+/// `POST /api/session/{channel}/buy` — tick a line off the shopping list, or clear it.
+///
+/// **Deciders only.** The roster is who is having this meal; a stranger holding the
+/// channel id must not be able to write into their basket, so a non-member is
+/// refused (403) rather than quietly ignored. Anyone on the roster may clear
+/// anyone's tick — a shopping list is a shared object, and "I put that back" is a
+/// normal thing to say out loud; the write records who has it *now*, which is the
+/// only claim it ever made.
+///
+/// The result is the whole list, and the same list is announced to the room, so the
+/// caller and every other open client land on one answer.
+pub async fn set_buy_check(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<BuyCheckBody>,
+) -> Result<Json<BuyList>, AppError> {
+    let channel = channel.as_str();
+    let body = &body;
+    if body.index < 0 {
+        return Err(AppError::BadRequest(format!(
+            "ingredient index must not be negative, got {}",
+            body.index
+        )));
+    }
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    if !view
+        .voters
+        .iter()
+        .any(|v| v.telegram_user_id == user.telegram_user_id)
+    {
+        return Err(AppError::Forbidden(
+            "only the people having this meal can tick things off its list".into(),
+        ));
+    }
+
+    let user = &user;
+    state
+        .with_db(move |db| async move {
+            if body.checked {
+                tick_item(
+                    &db,
+                    channel,
+                    &body.source,
+                    &body.id,
+                    body.index,
+                    &user.telegram_user_id,
+                )
+                .await
+            } else {
+                untick_item(&db, channel, &body.source, &body.id, body.index).await
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let list = reload_and_announce_buy(&state, channel, &body.source, &body.id).await?;
+    Ok(Json(list))
+}
+
+/// Re-read one recipe's checklist and tell the room, so a tick lands on every open
+/// client at once — the same shape [`reload_and_announce`] gives the lobby.
+async fn reload_and_announce_buy(
+    state: &AppState,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> Result<BuyList, AppError> {
+    let checks = state
+        .with_db(move |db| async move { load_buy_checks(&db, channel, source, id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let tx = room(&state.rooms, channel);
+    if let Ok(txt) = serde_json::to_string(&ServerMsg::Buy {
+        source: source.to_owned(),
+        id: id.to_owned(),
+        checks: checks.clone(),
+    }) {
+        // No receivers is an error and also a non-event: nobody is listening yet.
+        let _ = tx.send(txt);
+    }
+    Ok(BuyList {
+        channel_id: channel.to_owned(),
+        source: source.to_owned(),
+        id: id.to_owned(),
+        checks,
+    })
 }
 
 /// Re-read the lobby and tell the room, so every open client moves together — a guest
@@ -1041,6 +1237,83 @@ async fn record_vote(
     Ok(())
 }
 
+/// Claim one line of a meal's shopping list for `user` (#131).
+///
+/// Idempotent, and a take-over rather than a duplicate: the primary key does not
+/// include the person, so a second tapper replaces the first (last writer wins) and
+/// the timestamp moves with them. Tapping your own tick again rewrites the same row
+/// to the same values.
+async fn tick_item(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+    index: i64,
+    user: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
+            user_id = excluded.user_id,
+            created_at = unixepoch()",
+        libsql::params![channel, source, id, index, user],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Put one line back on the shopping list — the tick is the row, so clearing it is a
+/// delete. Deleting nothing is success: unticking something already unticked is the
+/// state the caller asked for.
+async fn untick_item(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+    index: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM buy_checks
+         WHERE channel_id = ?1 AND source = ?2 AND id = ?3 AND ingredient_index = ?4",
+        libsql::params![channel, source, id, index],
+    )
+    .await?;
+    Ok(())
+}
+
+/// One recipe's checklist in a meal: the ticked lines, in ingredient order, each with
+/// the person who has it. The `users` join is a LEFT one for the same reason the
+/// lobby's is — a handle is a display convenience and may be absent.
+async fn load_buy_checks(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<Vec<BuyCheck>> {
+    let mut rows = conn
+        .query(
+            "SELECT b.ingredient_index, b.user_id, u.username
+             FROM buy_checks b
+             LEFT JOIN users u ON u.telegram_user_id = b.user_id
+             WHERE b.channel_id = ?1 AND b.source = ?2 AND b.id = ?3
+             ORDER BY b.ingredient_index",
+            libsql::params![channel, source, id],
+        )
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await? {
+        out.push(BuyCheck {
+            index: r.get(0)?,
+            by: Voter {
+                telegram_user_id: r.get::<String>(1)?,
+                username: r.get::<Option<String>>(2)?,
+            },
+        });
+    }
+    Ok(out)
+}
+
 /// The tally for a channel: distinct-voter count plus per-recipe yes/no, ranked by
 /// yeses. The client derives both win conditions from this — plurality (rank by
 /// `yes`) and consensus (`yes == participants && no == 0`).
@@ -1056,6 +1329,26 @@ async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Ve
         None => 0,
     };
 
+    // Who said yes to what, in the order they said it — read as its own pass rather
+    // than folded into the aggregate below, so the grouped query stays the plain
+    // ranking it has always been and this stays a list of ids rather than a string
+    // the caller has to take apart.
+    let mut yrows = conn
+        .query(
+            "SELECT source, id, voter_id FROM votes
+             WHERE channel_id = ?1 AND vote = 1
+             ORDER BY created_at, voter_id",
+            libsql::params![channel],
+        )
+        .await?;
+    let mut yes_by_recipe: HashMap<(String, String), Vec<String>> = HashMap::new();
+    while let Some(r) = yrows.next().await? {
+        yes_by_recipe
+            .entry((r.get(0)?, r.get(1)?))
+            .or_default()
+            .push(r.get(2)?);
+    }
+
     let mut rows = conn
         .query(
             "SELECT source, id,
@@ -1069,11 +1362,17 @@ async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Ve
         .await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? {
+        let source: String = r.get(0)?;
+        let id: String = r.get(1)?;
+        let yes_voters = yes_by_recipe
+            .remove(&(source.clone(), id.clone()))
+            .unwrap_or_default();
         out.push(TallyRow {
-            source: r.get(0)?,
-            id: r.get(1)?,
+            source,
+            id,
             yes: r.get(2)?,
             no: r.get(3)?,
+            yes_voters,
         });
     }
     Ok((participants, out))
@@ -1712,5 +2011,204 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(time_cap(&conn, "capped").await.unwrap(), Some(Some(7200)));
+    }
+
+    // ---- buy checklist (#131) ----------------------------------------------
+
+    /// A tick and an untick round-trip, and the read is keyed by the *recipe*:
+    /// two recipes' checklists in one meal do not bleed into each other.
+    #[tokio::test]
+    async fn a_tick_round_trips_and_is_scoped_to_its_recipe() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+
+        tick_item(&conn, "c", "themealdb", "52772", 2, "alice")
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "99999", 0, "alice")
+            .await
+            .unwrap();
+
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(
+            checks.iter().map(|c| c.index).collect::<Vec<_>>(),
+            vec![0, 2],
+            "in ingredient order, and only this recipe's lines"
+        );
+
+        untick_item(&conn, "c", "themealdb", "52772", 0)
+            .await
+            .unwrap();
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(checks.iter().map(|c| c.index).collect::<Vec<_>>(), vec![2]);
+
+        // The other recipe's list was never touched.
+        assert_eq!(
+            load_buy_checks(&conn, "c", "themealdb", "99999")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// The same person tapping twice is one row, and a checklist is scoped to its
+    /// meal — the same recipe in another plan is another list.
+    #[tokio::test]
+    async fn ticking_is_idempotent_and_scoped_to_its_session() {
+        let conn = conn().await;
+        for channel in ["c1", "c2"] {
+            create_session(
+                &conn,
+                channel,
+                "alice",
+                None,
+                None,
+                MealType::Dinner,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice")
+            .await
+            .unwrap();
+        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice")
+            .await
+            .unwrap();
+
+        let checks = load_buy_checks(&conn, "c1", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(checks.len(), 1, "one line, one tick");
+        assert_eq!(checks[0].by.telegram_user_id, "alice");
+        assert!(
+            load_buy_checks(&conn, "c2", "themealdb", "52772")
+                .await
+                .unwrap()
+                .is_empty(),
+            "another plan's checklist is its own"
+        );
+    }
+
+    /// One item, one claimant: a second person tapping the same line takes it over
+    /// rather than appearing beside the first. Last writer wins.
+    #[tokio::test]
+    async fn a_second_ticker_takes_the_item_over() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 3, "alice")
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 3, "bob")
+            .await
+            .unwrap();
+
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(checks.len(), 1, "never two people on one ingredient");
+        assert_eq!(checks[0].by.telegram_user_id, "bob");
+    }
+
+    /// Unticking a line nobody had is the state the caller asked for, not an error.
+    #[tokio::test]
+    async fn unticking_an_untouched_line_is_fine() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        untick_item(&conn, "c", "themealdb", "52772", 7)
+            .await
+            .unwrap();
+        assert!(load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A tick carries the whole person, handle and all — the checklist says "@dave
+    /// got the flour", so the read has to reach the far column of the users join.
+    /// A ticker with no handle still reads back, by id.
+    #[tokio::test]
+    async fn a_tick_carries_who_ticked_it() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO users (telegram_user_id, username) VALUES (?1, ?2)",
+            libsql::params!["4242", "dave"],
+        )
+        .await
+        .unwrap();
+        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 0, "4242")
+            .await
+            .unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 1, "5150")
+            .await
+            .unwrap();
+
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(checks[0].by.telegram_user_id, "4242");
+        assert_eq!(checks[0].by.username.as_deref(), Some("dave"));
+        assert_eq!(checks[1].by.telegram_user_id, "5150");
+        assert_eq!(
+            checks[1].by.username, None,
+            "a Telegram account need not have a handle"
+        );
+    }
+
+    /// The tally names who said yes, not just how many — so a client rehydrating
+    /// after a reconnect can still colour a card by the people who liked it.
+    #[tokio::test]
+    async fn the_tally_names_the_yes_voters() {
+        let conn = conn().await;
+        record_vote(&conn, "c", "t", "a", "alice", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "a", "bob", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "a", "carol", false)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "b", "alice", false)
+            .await
+            .unwrap();
+
+        let (_, rows) = load_tally(&conn, "c").await.unwrap();
+        let a = row(&rows, "a");
+        assert_eq!(a.yes, 2);
+        assert_eq!(a.no, 1);
+        let mut voters = a.yes_voters.clone();
+        voters.sort();
+        assert_eq!(voters, vec!["alice".to_owned(), "bob".to_owned()]);
+        assert!(
+            row(&rows, "b").yes_voters.is_empty(),
+            "a no is not an attribution"
+        );
+
+        // Changing your mind moves you out of the list, because a vote is a current
+        // call rather than an append (`record_vote`).
+        record_vote(&conn, "c", "t", "a", "bob", false)
+            .await
+            .unwrap();
+        let (_, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(row(&rows, "a").yes_voters, vec!["alice".to_owned()]);
     }
 }
