@@ -188,6 +188,10 @@ export interface BuyRecipe {
   id: string;
   title: string;
   ingredients: StructuredMeasure[];
+  /** The meal session it was decided in (#131) — where the shared, attributed
+   * checklist lives. Absent when there is no session to attribute a tick to, which
+   * is what puts `buy` on its device-local path (see `$lib/buy`). */
+  channel?: string;
 }
 
 // ---- cook (#36) ------------------------------------------------------------

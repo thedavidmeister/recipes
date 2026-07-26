@@ -1,8 +1,14 @@
 <script lang="ts">
   import { resource } from "$lib/resource";
-  import { createQuery } from "@tanstack/svelte-query";
-  import { getBuyList, loadChecks, saveChecks } from "$lib/buy";
-  import type { BuyStatus } from "$lib/types";
+  import {
+    getBuyList,
+    getChecks,
+    loadChecks,
+    saveChecks,
+    setCheck,
+    type BuyCheck,
+  } from "$lib/buy";
+  import { PickClient, type Voter } from "$lib/pick";
   import Buy from "$lib/components/Buy.svelte";
 
   /**
@@ -10,9 +16,20 @@
    *
    * The step after `pick`: a pick decides on one recipe (consensus) and stashes it,
    * so this reads that decision and lists its ingredients to tick off. The page
-   * owns the query and the checklist state; `Buy` renders. Read client-direct from
-   * Turso (the corpus is public), so a lapsed session doesn't 401 it — the layout
-   * already gates the shell.
+   * owns the queries and the checklist state; `Buy` renders. The recipe itself is
+   * read client-direct from Turso (the corpus is public), so a lapsed session
+   * doesn't 401 it — the layout already gates the shell.
+   *
+   * The ticks belong to the meal, not to this browser (#131). They live in the meal
+   * session beside the pick that chose the recipe, so two people shopping the same
+   * dinner see one list — and each ticked line says who got it. A tick is a write to
+   * the session and an announcement to its room, so a peer's tick lands here without
+   * a refresh.
+   *
+   * The exception is a decision with no session behind it: nothing to write to and
+   * nobody to attribute to, so the list falls back to this device's own
+   * (`loadChecks`/`saveChecks`) and says so on screen. Ticking is never refused over
+   * the lack of a group — a shopping list you cannot tick is not a shopping list.
    */
   const list = resource(() => ({
     queryKey: ["buy"],
@@ -20,34 +37,116 @@
     staleTime: Infinity,
   }));
 
+  const shared = $derived(!!list.data?.channel);
 
-  // The shopping checklist — which ingredients are already in the basket. Owned
-  // here and persisted per recipe, so it survives a reload mid-shop.
-  let checked = $state<Record<number, boolean>>({});
+  // The shared list as the server last stated it — replaced whole on every answer
+  // and every room announcement, never merged: a tick can take an item off somebody
+  // else (last writer wins), so a delta would be a lie.
+  let checks = $state<BuyCheck[]>([]);
+  // Taps that have not been confirmed yet: index → the state this client asked for.
+  // Kept beside the server's answer rather than folded into it, so a failure has
+  // something true to fall back to and never has to guess who ticked what.
+  let inFlight = $state<Record<number, boolean>>({});
+  // The device-local list, for a decision with no session to attribute to.
+  let localChecked = $state<Record<number, true>>({});
+  let tickError = $state<string | undefined>();
 
-  // Load this recipe's ticks when it arrives (or changes).
-  $effect(() => {
-    const r = list.data;
-    if (!r) {
-      checked = {};
-      return;
+  /**
+   * What the screen shows: who has each ticked line.
+   *
+   * `null` is a tick with nobody behind it — either a tap still in flight (the
+   * server has not said whose it is yet) or the device-local list, which has no
+   * whose at all. Both read the same way on purpose: got, unattributed.
+   */
+  const ticks = $derived.by<Record<number, Voter | null>>(() => {
+    if (!shared) {
+      return Object.fromEntries(Object.keys(localChecked).map((i) => [i, null]));
     }
-    const map: Record<number, boolean> = {};
-    for (const i of loadChecks(r.source, r.id)) map[i] = true;
-    checked = map;
+    const out: Record<number, Voter | null> = {};
+    for (const c of checks) out[c.index] = c.by;
+    for (const [i, want] of Object.entries(inFlight)) {
+      if (want) out[Number(i)] ??= null;
+      else delete out[Number(i)];
+    }
+    return out;
   });
 
-  function toggle(index: number) {
+  // Load this recipe's ticks when it arrives (or changes). The two paths are read
+  // the same way and differ only in where from.
+  $effect(() => {
+    const r = list.data;
+    checks = [];
+    inFlight = {};
+    localChecked = {};
+    tickError = undefined;
+    if (!r) return;
+    if (r.channel) {
+      const ch = r.channel;
+      void getChecks(ch, r.source, r.id)
+        .then((l) => {
+          checks = l.checks;
+        })
+        .catch((e: unknown) => {
+          tickError =
+            e instanceof Error ? e.message : "Couldn't open the shopping list.";
+        });
+    } else {
+      const map: Record<number, true> = {};
+      for (const i of loadChecks(r.source, r.id)) map[i] = true;
+      localChecked = map;
+    }
+  });
+
+  // The meal's room, so a peer's tick lands here live — the same socket the pick
+  // uses, listening only for the frame this page is about.
+  $effect(() => {
+    const r = list.data;
+    if (!r?.channel) return;
+    const client = new PickClient(r.channel, {
+      onBuy: (source, id, incoming) => {
+        // Another recipe's list in the same meal is not this screen's business.
+        if (source !== r.source || id !== r.id) return;
+        checks = incoming;
+      },
+    });
+    client.start();
+    return () => client.stop();
+  });
+
+  /**
+   * Tick or untick a line.
+   *
+   * Optimistic, then confirmed: a tap has to feel like a tap in a supermarket
+   * aisle, so the row moves at once and the round trip catches up. If the write
+   * fails the row goes back to what the server last said and the reason is shown —
+   * a line that looks got but is not is how somebody comes home without the flour.
+   */
+  async function toggle(index: number) {
     const r = list.data;
     if (!r) return;
-    checked = { ...checked, [index]: !checked[index] };
-    saveChecks(
-      r.source,
-      r.id,
-      Object.keys(checked)
-        .map(Number)
-        .filter((i) => checked[i]),
-    );
+    tickError = undefined;
+
+    if (!r.channel) {
+      const next = { ...localChecked };
+      if (next[index]) delete next[index];
+      else next[index] = true;
+      localChecked = next;
+      saveChecks(r.source, r.id, Object.keys(next).map(Number));
+      return;
+    }
+
+    const want = !(index in ticks);
+    inFlight = { ...inFlight, [index]: want };
+    try {
+      const l = await setCheck(r.channel, r.source, r.id, index, want);
+      checks = l.checks;
+    } catch (e) {
+      tickError =
+        e instanceof Error ? e.message : "Couldn't update the shopping list.";
+    } finally {
+      const { [index]: _done, ...rest } = inFlight;
+      inFlight = rest;
+    }
   }
 </script>
 
@@ -55,6 +154,8 @@
   status={list.status}
   recipe={list.data}
   error={list.error}
-  {checked}
+  {ticks}
+  {shared}
+  {tickError}
   onToggle={toggle}
 />

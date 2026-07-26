@@ -78,27 +78,51 @@ export interface TallyRow {
   id: string;
   yes: number;
   no: number;
+  /** Who said yes, by telegram id — so a card can wear the colours of the people
+   * who liked it even on the first frame after a reconnect (#131/#145). */
+  yes_voters: string[];
 }
 
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
   | { type: "lobby"; deciders: number; started: boolean }
-  | { type: "vote"; voter: string; source: string; id: string; vote: boolean };
+  | { type: "vote"; voter: string; source: string; id: string; vote: boolean }
+  | {
+      type: "buy";
+      source: string;
+      id: string;
+      checks: { index: number; by: Voter }[];
+    };
 
 /** The connection's live state, surfaced so the UI can show "reconnecting…". */
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
 
-/** How the page reacts to the socket — wired to Svelte `$state` at the call site. */
+/**
+ * How a page reacts to the socket — wired to Svelte `$state` at the call site.
+ *
+ * Every handler is optional because the room now serves two rooms' worth of
+ * screens: the pick listens to votes and the lobby, `buy` listens to the shopping
+ * list, and neither should have to write empty functions for the other's traffic.
+ * The frames themselves are unchanged — a client simply ignores what it did not
+ * ask about.
+ */
 export interface PickHandlers {
   /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
-  onTally: (participants: number, votes: TallyRow[]) => void;
+  onTally?: (participants: number, votes: TallyRow[]) => void;
   /** The roster size and whether the swiping has begun — on join, and on every
    * change to either. */
-  onLobby: (deciders: number, started: boolean) => void;
+  onLobby?: (deciders: number, started: boolean) => void;
   /** One live vote from any peer (including this client's own echo). */
-  onVote: (voter: string, source: string, id: string, vote: boolean) => void;
-  onStatus: (status: ConnStatus) => void;
+  onVote?: (voter: string, source: string, id: string, vote: boolean) => void;
+  /** One recipe's shopping checklist, **whole** — someone ticked or unticked a
+   * line, so this replaces the list rather than merging into it (#131). */
+  onBuy?: (
+    source: string,
+    id: string,
+    checks: { index: number; by: Voter }[],
+  ) => void;
+  onStatus?: (status: ConnStatus) => void;
 }
 
 /**
@@ -149,13 +173,13 @@ export class PickClient {
   }
 
   private connect(first: boolean): void {
-    this.handlers.onStatus(first ? "connecting" : "reconnecting");
+    this.handlers.onStatus?.(first ? "connecting" : "reconnecting");
     const ws = new WebSocket(this.url());
     this.ws = ws;
 
     ws.onopen = () => {
       this.backoffMs = 500;
-      this.handlers.onStatus("open");
+      this.handlers.onStatus?.("open");
     };
     ws.onmessage = (e) => {
       let msg: ServerMsg;
@@ -165,20 +189,22 @@ export class PickClient {
         return;
       }
       if (msg.type === "tally") {
-        this.handlers.onTally(msg.participants, msg.votes);
+        this.handlers.onTally?.(msg.participants, msg.votes);
       } else if (msg.type === "lobby") {
-        this.handlers.onLobby(msg.deciders, msg.started);
+        this.handlers.onLobby?.(msg.deciders, msg.started);
       } else if (msg.type === "vote") {
-        this.handlers.onVote(msg.voter, msg.source, msg.id, msg.vote);
+        this.handlers.onVote?.(msg.voter, msg.source, msg.id, msg.vote);
+      } else if (msg.type === "buy") {
+        this.handlers.onBuy?.(msg.source, msg.id, msg.checks);
       }
     };
     ws.onclose = () => {
       this.ws = null;
       if (this.stopped) {
-        this.handlers.onStatus("closed");
+        this.handlers.onStatus?.("closed");
         return;
       }
-      this.handlers.onStatus("reconnecting");
+      this.handlers.onStatus?.("reconnecting");
       const wait = this.backoffMs;
       this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
       setTimeout(() => {

@@ -262,6 +262,12 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
+        // The meal's shopping checklist (#131) — read by anyone holding the channel
+        // id (like the lobby it belongs to), written only by the people deciding it.
+        .route(
+            "/session/{channel}/buy",
+            get(session::buy_list).post(session::set_buy_check),
+        )
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -2190,5 +2196,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "wrong secret");
+    }
+
+    // ---- buy checklist (#131) ----------------------------------------------
+
+    /// The meal's shopping list is a person-facing surface, so both halves of it are
+    /// session-gated like the rest (#25).
+    #[tokio::test]
+    async fn the_buy_checklist_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/session/{channel}/buy?source=t&id=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                None,
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// End to end through the router (#131): a decider ticks a line, it comes back
+    /// attributed to them, a second decider takes it over, and an untick clears it.
+    #[tokio::test]
+    async fn a_tick_round_trips_through_the_router_carrying_who_ticked_it() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let host_cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &host_cookie, "Home").await;
+        let channel = make_plan(&app, &host_cookie, &kid).await;
+
+        // A second decider, seated by the host the way the lobby does it (#72).
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                Some(&host_cookie),
+                r#"{"user_id":"mel"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let mel = auth::issue_test_session(&conn, "mel").await;
+        let mel_cookie = format!("recipes_session={mel}");
+        // Logging in registers the person; the handle comes from Telegram after, so
+        // it is set here rather than before (`upsert_user` writes what it was told,
+        // which for a test login is no handle at all).
+        conn.execute(
+            "UPDATE users SET username = 'mel' WHERE telegram_user_id = 'mel'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Nothing is in the basket yet.
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["channel_id"], channel);
+        assert_eq!(body["source"], "themealdb");
+        assert_eq!(body["checks"].as_array().unwrap().len(), 0);
+
+        // The host grabs the flour.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let checks = body_json(res).await["checks"].clone();
+        assert_eq!(checks[0]["index"], 1);
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
+
+        // Mel had already picked it up — last writer wins, and there is still one row.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&mel_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let checks = body_json(res).await["checks"].clone();
+        assert_eq!(checks.as_array().unwrap().len(), 1);
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "mel");
+        assert_eq!(checks[0]["by"]["username"], "mel");
+
+        // Put it back.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":false}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
+    }
+
+    /// A signed-in stranger holding the channel id must not be able to write into
+    /// someone else's basket — the roster is who is having this meal (#131). 403,
+    /// not 401: the session is fine, the identity just is not on the list.
+    #[tokio::test]
+    async fn a_non_member_cannot_tick_someone_elses_list() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let host_cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &host_cookie, "Home").await;
+        let channel = make_plan(&app, &host_cookie, &kid).await;
+
+        let stranger = auth::issue_test_session(&conn, "stranger").await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&format!("recipes_session={stranger}")),
+                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // And the refusal is real: nothing was written.
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
+    }
+
+    /// A checklist for a channel that does not exist is refused on both verbs — a
+    /// mistyped channel must never conjure a room, the same rule the WS upgrade and
+    /// the walk already hold to.
+    #[tokio::test]
+    async fn a_checklist_for_an_unknown_session_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(get_req("/api/session/nope/buy?source=t&id=1", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .oneshot(json_post(
+                "/api/session/nope/buy",
+                Some(&cookie),
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A negative ingredient index names no line of any recipe, so it is an author
+    /// error rather than a row to write.
+    #[tokio::test]
+    async fn a_negative_ingredient_index_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&cookie),
+                r#"{"source":"t","id":"1","index":-1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }
