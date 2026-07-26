@@ -15,6 +15,7 @@
     "lint:design": "node scripts/lint-design.mjs",
     "lint:stories": "node scripts/lint-stories.mjs",
     "lint": "npm run lint:design && npm run lint:stories",
+    "test:unit": "vitest run",
     "visual:diff": "node scripts/visual-diff.mjs",
     "visual:update": "node scripts/visual-diff.mjs --update"
   },
@@ -33,7 +34,8 @@
     "svelte-check": "^4.6.0",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@fontsource-variable/nunito": "^5.2.7",

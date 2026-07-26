@@ -114,6 +114,13 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
  * A walk, as `/api/walk` returns it: real TheMealDB meals (ids/images verified
  * against the live corpus), threaded by an ingredient each pair shares. The first
  * stop has no `via` — it is where the wander began. Override for a specific story.
+ *
+ * `total_seconds` is the estimate the card shows (#84): the critical path over the
+ * recipe's step DAG, in the range a real reading produces (half an hour to a couple
+ * of hours). The first stop's 2160 is not invented — it is exactly what
+ * [`recipeSteps`] (the same meal's DAG, read out below) sums to: fry 5:00 → bloom
+ * 1:00 → simmer 30:00. A recipe the step worker has not read yet carries `null`;
+ * a story that wants that case overrides one.
  */
 export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
   const base: WalkStop[] = [
@@ -127,6 +134,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/wyxwsp1486979827.jpg",
         category: "Chicken",
         area: "India",
+        total_seconds: 2160,
       },
     },
     {
@@ -139,6 +147,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/vwrpps1503068729.jpg",
         category: "Chicken",
         area: "Japanese",
+        total_seconds: 2700,
       },
     },
     {
@@ -151,6 +160,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/wvpsxx1468256321.jpg",
         category: "Chicken",
         area: "Japanese",
+        total_seconds: 3600,
       },
     },
     {
@@ -163,6 +173,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/tvttqv1504640475.jpg",
         category: "Beef",
         area: "Thai",
+        total_seconds: 5400,
       },
     },
     {
@@ -175,6 +186,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/sytuqu1511553755.jpg",
         category: "Beef",
         area: "British",
+        total_seconds: 7200,
       },
     },
   ];

@@ -13,9 +13,29 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, no consensus yet. */
+/** A card up to vote on, no consensus yet. The badge beside the category is the
+ * recipe's estimated total time (#84): "36 min+", an at-least — untimed steps
+ * count as nothing in the estimate, so the real cook takes longer. */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
+};
+
+/** A recipe the step worker has not read yet (`total_seconds` null): no badge at
+ * all. Unknown is not instant — "0 min" would be a lie about the case we know
+ * least about, so the card says nothing about time rather than guessing. */
+export const UntimedRecipe: Story = {
+  args: {
+    status: "swiping",
+    card: { ...cards[3], total_seconds: null },
+    participants: 2,
+    shareUrl: share,
+  },
+};
+
+/** A long one, in whole hours: "2 hours+", not "120 min+" — the same time
+ * vocabulary the plan lobby uses for its cap (#80). */
+export const LongRecipe: Story = {
+  args: { status: "swiping", card: cards[4], participants: 2, shareUrl: share },
 };
 
 /** Starting: the socket is opening and the first deck is loading. */

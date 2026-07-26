@@ -110,6 +110,17 @@ export interface RecipeCard {
   image: string | null;
   category: string | null;
   area: string | null;
+  /**
+   * The estimated total time in seconds (#79/#84) — the critical path over the
+   * recipe's step DAG, stored as `recipes.total_seconds`.
+   *
+   * Two things it is *not*. `null` is **unknown** (the step worker has not read
+   * this recipe, or read no timed step), never "instant" — so nothing is shown for
+   * it, never "0 min". And a number is a **lower bound**, not an exact time: an
+   * untimed step ("until golden") contributes nothing to the path, so the real cook
+   * takes at least this long. `formatEstimate` in `steps.ts` marks both.
+   */
+  total_seconds: number | null;
 }
 
 /**
