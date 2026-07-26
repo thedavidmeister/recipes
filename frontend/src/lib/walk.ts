@@ -16,9 +16,20 @@ import type { WalkStop } from "./types";
  * A 401 means the session lapsed since the page loaded; it throws an `ApiError`
  * carrying the status so the caller can re-gate to login rather than looping on a
  * walk that will keep 401ing. The gate is the server's — this is just a reader.
+ *
+ * `channel` names the pick session this walk feeds (#80): the server bounds the
+ * walk to that plan's time cap. Only the channel travels, never the cap itself,
+ * so the bound stays server-authoritative — a client cannot deal itself a wider
+ * deck than the plan allows.
  */
-export async function getWalk(len?: number): Promise<WalkStop[]> {
-  const query = len ? `?len=${len}` : "";
+export async function getWalk(
+  len?: number,
+  channel?: string,
+): Promise<WalkStop[]> {
+  const params = new URLSearchParams();
+  if (len) params.set("len", String(len));
+  if (channel) params.set("channel", channel);
+  const query = params.size ? `?${params}` : "";
   const res = await apiFetch(`/api/walk${query}`);
   if (!res.ok) {
     throw new ApiError(

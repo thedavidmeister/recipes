@@ -52,6 +52,12 @@ const MAX_LEN: usize = 30;
 pub struct WalkParams {
     /// Requested number of stops, clamped to `1..=MAX_LEN`. Absent → [`DEFAULT_LEN`].
     len: Option<usize>,
+    /// The pick session this walk feeds (#80). Present, the session's time cap
+    /// bounds the corpus walked; an unknown channel is refused rather than read as
+    /// "uncapped". Absent, the walk is over the whole corpus, as ever. It scopes
+    /// the walk to the plan's bound — it is not an access check (the session gate
+    /// already authenticated the caller, and a cap is a filter, not a secret).
+    channel: Option<String>,
 }
 
 /// What the client needs to render one stop — the read fields of a recipe, no
@@ -234,12 +240,31 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
 
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
 /// column is JSON, parsed here into names (measures are irrelevant to the graph).
-async fn load_corpus(conn: &libsql::Connection) -> anyhow::Result<Corpus> {
+/// `max_total_seconds` is a pick session's time cap (#80): recipes whose
+/// `total_seconds` estimate exceeds it never enter the graph, so a capped walk
+/// cannot surface them. The comparison is inclusive — a 30-minute recipe fits a
+/// 30-minute cap.
+///
+/// **A `NULL` estimate stays in.** That is a deliberate call, not an accident of
+/// SQL three-valued logic:
+///
+/// - The estimate is a **lower bound** even when present (untimed steps add
+///   nothing, #79) — so `total_seconds <= cap` never *proves* a recipe fits.
+///   Excluding "unknown" while admitting "at least this long" would hold the two
+///   to different standards for the same uncertainty.
+/// - Most of the corpus has no step reading yet; excluding `NULL` would empty a
+///   capped pick outright. Enrichment is an addition, never a gate — a recipe must
+///   not vanish from the product because a worker has not read it yet.
+async fn load_corpus(
+    conn: &libsql::Connection,
+    max_total_seconds: Option<i64>,
+) -> anyhow::Result<Corpus> {
     let mut rows = conn
         .query(
             "SELECT source, id, title, image, category, area, ingredients
-             FROM recipes",
-            (),
+             FROM recipes
+             WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
+            libsql::params![max_total_seconds],
         )
         .await?;
 
@@ -278,7 +303,8 @@ async fn load_corpus(conn: &libsql::Connection) -> anyhow::Result<Corpus> {
     Ok(Corpus::build(out))
 }
 
-/// `GET /api/walk?len=<n>` — a fresh variety-first walk over the corpus.
+/// `GET /api/walk?len=<n>&channel=<pick>` — a fresh variety-first walk over the
+/// corpus, bounded to the pick session's time cap when a channel is named (#80).
 ///
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
@@ -288,8 +314,19 @@ pub async fn walk(
     Query(params): Query<WalkParams>,
 ) -> Result<Json<WalkResponse>, AppError> {
     let len = params.len.unwrap_or(DEFAULT_LEN).clamp(1, MAX_LEN);
+    // The cap is read fresh from the session on every walk, so the walk always
+    // enforces what the plan currently says — the client passes only the channel,
+    // never the cap itself, which keeps the bound server-authoritative (#80).
+    let cap = match params.channel.as_deref() {
+        Some(channel) => state
+            .with_db(move |conn| async move { crate::session::time_cap(&conn, channel).await })
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?,
+        None => None,
+    };
     let corpus = state
-        .with_db(move |conn| async move { load_corpus(&conn).await })
+        .with_db(move |conn| async move { load_corpus(&conn, cap).await })
         .await
         .map_err(|e| AppError::Internal(format!("could not load the corpus: {e:#}")))?;
     let mut rng = StdRng::from_entropy();
@@ -593,6 +630,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A migrated in-memory corpus with one recipe per estimate shape (#80):
+    /// well under, exactly on, and well over a 30-minute cap, plus one with no
+    /// estimate at all (`NULL` — not step-read yet).
+    async fn seeded_conn() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        for (id, secs) in [
+            ("quick", Some(900i64)),
+            ("exact", Some(1800i64)),
+            ("slow", Some(7200i64)),
+            ("unknown", None),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, total_seconds)
+                 VALUES ('test', ?1, ?1, ?2)",
+                libsql::params![id, secs],
+            )
+            .await
+            .unwrap();
+        }
+        conn
+    }
+
+    fn ids(corpus: &Corpus) -> Vec<&str> {
+        let mut v: Vec<&str> = corpus.cards.iter().map(|c| c.id.as_str()).collect();
+        v.sort();
+        v
+    }
+
+    /// No cap — the whole corpus, exactly as before the cap existed.
+    #[tokio::test]
+    async fn an_uncapped_load_takes_the_whole_corpus() {
+        let conn = seeded_conn().await;
+        let corpus = load_corpus(&conn, None).await.unwrap();
+        assert_eq!(ids(&corpus), vec!["exact", "quick", "slow", "unknown"]);
+    }
+
+    /// A capped load drops what is estimated over the cap and keeps the rest:
+    /// under-cap fits, exactly-on-cap fits (the bound is inclusive — a 30-minute
+    /// recipe fits a 30-minute cap), and an unknown estimate stays in (see
+    /// [`load_corpus`] for the policy).
+    #[tokio::test]
+    async fn a_cap_excludes_recipes_estimated_over_it() {
+        let conn = seeded_conn().await;
+        let corpus = load_corpus(&conn, Some(1800)).await.unwrap();
+        assert_eq!(ids(&corpus), vec!["exact", "quick", "unknown"]);
+    }
+
+    /// The `NULL` policy under pressure: a cap below every timed estimate leaves
+    /// only the un-estimated recipe — included, not excluded, because the estimate
+    /// is a lower bound even when present and enrichment is never a gate. The
+    /// corpus narrows; it does not vanish.
+    #[tokio::test]
+    async fn an_unknown_estimate_stays_in_a_capped_walk() {
+        let conn = seeded_conn().await;
+        let corpus = load_corpus(&conn, Some(600)).await.unwrap();
+        assert_eq!(ids(&corpus), vec!["unknown"]);
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?

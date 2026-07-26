@@ -235,6 +235,32 @@ pub struct CreateBody {
     /// plain meal, and the host can add them in the lobby.
     #[serde(default)]
     additions: Vec<MealAddition>,
+    /// The plan's total-time cap in seconds (#80); `None` = no cap ("Any"). Not
+    /// opaque like `filter`: the walk enforces it server-side against
+    /// `recipes.total_seconds`, so the backend must understand it.
+    #[serde(default)]
+    max_total_seconds: Option<i64>,
+}
+
+/// The bounds a time cap must sit in: at least a minute, at most a day.
+///
+/// The UI presents fixed buckets (30 min / 1 hour / 2 hours / Any); the API
+/// deliberately accepts any sane number of seconds instead of that enum, so the
+/// buckets stay a presentation choice rather than a schema — changing them is a
+/// frontend edit, not a migration (#80).
+const MIN_CAP_SECONDS: i64 = 60;
+const MAX_CAP_SECONDS: i64 = 86_400;
+
+/// Refuse a nonsense cap. `None` is "any" and always fine; zero, negative, and
+/// longer-than-a-day are author errors, not bounds anyone cooks to.
+fn validate_cap(cap: Option<i64>) -> Result<(), AppError> {
+    match cap {
+        None => Ok(()),
+        Some(s) if (MIN_CAP_SECONDS..=MAX_CAP_SECONDS).contains(&s) => Ok(()),
+        Some(s) => Err(AppError::BadRequest(format!(
+            "max_total_seconds must be between {MIN_CAP_SECONDS} and {MAX_CAP_SECONDS}, got {s}"
+        ))),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +274,7 @@ pub async fn create(
     Extension(user): Extension<CurrentUser>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
+    validate_cap(body.max_total_seconds)?;
     // Minted once, *outside* the retryable closure, so every attempt writes the
     // same plan: a re-run after a lost response then hits the primary key and
     // fails honestly instead of minting a second plan (#130).
@@ -268,6 +295,7 @@ pub async fn create(
                 body.kitchen_id.as_deref(),
                 body.meal_type.unwrap_or_default(),
                 &body.additions,
+                body.max_total_seconds,
             )
             .await?;
             // The host is in their own plan from the moment it exists, so a lobby is
@@ -308,6 +336,9 @@ pub struct LobbyView {
     /// The telegram id that started it — only they can start the swiping.
     pub host: String,
     pub started: bool,
+    /// The plan's total-time cap in seconds (#80); `None` = no cap. Everyone in the
+    /// lobby sees the bound they will be swiping within.
+    pub max_total_seconds: Option<i64>,
     pub voters: Vec<Voter>,
     /// Members of the plan's kitchen who are not yet deciding — the host can seat any
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
@@ -493,10 +524,16 @@ pub async fn set_meal_type(
         ));
     }
 
-    state
+    // The write carries the not-started condition too (see `set_time_cap`).
+    let written = state
         .with_db(move |db| async move { update_meal_type(&db, channel, body.meal_type).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !written {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
     let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
 }
@@ -541,10 +578,72 @@ pub async fn set_additions(
         ));
     }
 
-    state
+    // The write carries the not-started condition too (see `set_time_cap`).
+    let written = state
         .with_db(move |db| async move { update_additions(&db, channel, &body.additions).await })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !written {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+    let view = reload_and_announce(&state, channel).await?;
+    Ok(Json(view))
+}
+
+/// What the host is bounding the plan to — seconds, or `null` to lift the cap.
+#[derive(Debug, Deserialize)]
+pub struct CapBody {
+    #[serde(default)]
+    max_total_seconds: Option<i64>,
+}
+
+/// `POST /api/session/{channel}/cap` — the host sets (or lifts) the plan's time cap.
+///
+/// Same guards as [`set_meal_type`], for the same reason — host only, and only
+/// while the lobby is open: the cap defines the shared corpus everyone in the
+/// session swipes within (#80), so it must not move once people are voting. Until
+/// then the host is still deciding what tonight is (the session itself is minted
+/// the moment the pick page opens, before any choice could be made), so the lobby
+/// is where the choice lands. Announced to the room so every open client sees the
+/// new bound at once.
+pub async fn set_cap(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<CapBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    validate_cap(body.max_total_seconds)?;
+    let channel = channel.as_str();
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can set its time cap".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+
+    // The write carries the not-started condition too, so a start() that landed since
+    // the read above wins and this changes nothing (see `set_time_cap`).
+    let written = state
+        .with_db(move |db| async move { set_time_cap(&db, channel, body.max_total_seconds).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !written {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
     let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
 }
@@ -723,7 +822,7 @@ async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
 async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
     let mut rows = conn
         .query(
-            "SELECT created_by, kitchen_id, started_at, meal_type, additions
+            "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -746,6 +845,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     let additions: Vec<MealAddition> = serde_json::from_str(&additions_raw).map_err(|e| {
         anyhow::anyhow!("pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}")
     })?;
+    let max_total_seconds: Option<i64> = row.get(5)?;
 
     let mut vrows = conn
         .query(
@@ -791,6 +891,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         additions,
         host,
         started: started_at.is_some(),
+        max_total_seconds,
         voters,
         candidates,
     }))
@@ -807,6 +908,11 @@ async fn session_exists(conn: &Connection, channel: &str) -> anyhow::Result<bool
 }
 
 /// Insert a new session. `channel_id` is unique (the primary key).
+///
+/// The parameter list mirrors the INSERT's column list one-for-one — a struct
+/// here would relabel the same seven values without making any call site
+/// clearer (the same trade `derive.rs` makes).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     conn: &Connection,
     channel_id: &str,
@@ -815,54 +921,103 @@ pub async fn create_session(
     kitchen_id: Option<&str>,
     meal_type: MealType,
     additions: &[MealAddition],
+    max_total_seconds: Option<i64>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO pick_sessions (channel_id, created_by, filter, kitchen_id, meal_type, additions)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO pick_sessions
+            (channel_id, created_by, filter, kitchen_id, meal_type, additions, max_total_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         libsql::params![
             channel_id,
             created_by,
             filter,
             kitchen_id,
             meal_type.as_str(),
-            serde_json::to_string(&normalize_additions(additions))?
+            serde_json::to_string(&normalize_additions(additions))?,
+            max_total_seconds
         ],
     )
     .await?;
     Ok(())
 }
 
-/// Point a plan at a different meal (#114). The handler guards host + not-started;
-/// this just writes the (already-validated, typed) word.
+/// Set (or lift, with `None`) a plan's time cap (#80), reporting whether it was
+/// written.
+///
+/// `started_at IS NULL` is in the predicate rather than only in the handler's earlier
+/// read: those are two round trips, and a `start()` landing between them would
+/// otherwise move the corpus bound out from under a plan already being swiped. Here
+/// the loser of that race writes nothing and says so.
+async fn set_time_cap(
+    conn: &Connection,
+    channel: &str,
+    max_total_seconds: Option<i64>,
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            "UPDATE pick_sessions SET max_total_seconds = ?2
+             WHERE channel_id = ?1 AND started_at IS NULL",
+            libsql::params![channel, max_total_seconds],
+        )
+        .await?;
+    Ok(written > 0)
+}
+
+/// A session's time cap, for the walk (#80): `Ok(None)` is an unknown session,
+/// `Ok(Some(None))` a session with no cap ("Any"), `Ok(Some(Some(secs)))` a capped
+/// one. The two layers are deliberate — an unknown channel must surface as an
+/// error to the caller, never read as "uncapped".
+pub async fn time_cap(conn: &Connection, channel: &str) -> anyhow::Result<Option<Option<i64>>> {
+    let mut rows = conn
+        .query(
+            "SELECT max_total_seconds FROM pick_sessions WHERE channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(row.get::<Option<i64>>(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// Point a plan at a different meal (#114), reporting whether it was written. The word
+/// is already validated and typed; the `started_at IS NULL` predicate is the same
+/// race guard as [`set_time_cap`] — what a plan is for cannot change once it is under
+/// way.
 async fn update_meal_type(
     conn: &Connection,
     channel: &str,
     meal_type: MealType,
-) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE pick_sessions SET meal_type = ?2 WHERE channel_id = ?1",
-        libsql::params![channel, meal_type.as_str()],
-    )
-    .await?;
-    Ok(())
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            "UPDATE pick_sessions SET meal_type = ?2
+             WHERE channel_id = ?1 AND started_at IS NULL",
+            libsql::params![channel, meal_type.as_str()],
+        )
+        .await?;
+    Ok(written > 0)
 }
 
-/// Replace what comes with the meal (#114). The handler guards host + not-started;
-/// this writes the (already-validated, typed) set in its canonical form.
+/// Replace what comes with the meal (#114), reporting whether it was written. The set
+/// is already validated and typed and lands in its canonical form; the
+/// `started_at IS NULL` predicate is the same race guard as [`set_time_cap`].
 async fn update_additions(
     conn: &Connection,
     channel: &str,
     additions: &[MealAddition],
-) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE pick_sessions SET additions = ?2 WHERE channel_id = ?1",
-        libsql::params![
-            channel,
-            serde_json::to_string(&normalize_additions(additions))?
-        ],
-    )
-    .await?;
-    Ok(())
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            "UPDATE pick_sessions SET additions = ?2
+             WHERE channel_id = ?1 AND started_at IS NULL",
+            libsql::params![
+                channel,
+                serde_json::to_string(&normalize_additions(additions))?
+            ],
+        )
+        .await?;
+    Ok(written > 0)
 }
 
 /// Record (or update) a voter's call on a recipe. Re-voting overwrites — a swipe is
@@ -950,9 +1105,18 @@ mod tests {
     #[tokio::test]
     async fn seating_is_idempotent_and_the_lobby_reads_back() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, Some("k1"), MealType::Dinner, &[])
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            Some("k1"),
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
         seat_voter(&conn, "c", "bob").await.unwrap();
@@ -977,7 +1141,7 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "4242").await.unwrap();
@@ -999,9 +1163,18 @@ mod tests {
         crate::kitchens::seat_member_for_test(&conn, &kid, "mel").await;
         crate::kitchens::seat_member_for_test(&conn, &kid, "sam").await;
 
-        create_session(&conn, "c", "host", None, Some(&kid), MealType::Dinner, &[])
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "host",
+            None,
+            Some(&kid),
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
 
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
@@ -1022,7 +1195,7 @@ mod tests {
     #[tokio::test]
     async fn a_kitchenless_plan_has_no_candidates() {
         let conn = conn().await;
-        create_session(&conn, "c", "host", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "host", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
@@ -1039,7 +1212,7 @@ mod tests {
     #[tokio::test]
     async fn starting_is_idempotent() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         begin_session(&conn, "c").await.unwrap();
@@ -1079,9 +1252,18 @@ mod tests {
     #[tokio::test]
     async fn create_vote_and_tally() {
         let conn = conn().await;
-        create_session(&conn, "chan1", "alice", None, None, MealType::Dinner, &[])
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "chan1",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
 
         record_vote(&conn, "chan1", "themealdb", "r1", "alice", true)
             .await
@@ -1106,7 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         record_vote(&conn, "c", "s", "1", "alice", true)
@@ -1127,7 +1309,7 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
@@ -1147,6 +1329,7 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1158,9 +1341,18 @@ mod tests {
     #[tokio::test]
     async fn a_plan_carries_its_meal_type() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Breakfast, &[])
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Breakfast,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(view.meal_type, MealType::Breakfast);
     }
@@ -1197,7 +1389,7 @@ mod tests {
     #[tokio::test]
     async fn the_meal_type_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         update_meal_type(&conn, "c", MealType::Lunch).await.unwrap();
@@ -1302,6 +1494,7 @@ mod tests {
                 MealAddition::Dessert,
                 MealAddition::Drink,
             ],
+            None,
         )
         .await
         .unwrap();
@@ -1318,7 +1511,7 @@ mod tests {
     #[tokio::test]
     async fn additions_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[])
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
             .await
             .unwrap();
         update_additions(&conn, "c", &[MealAddition::Side])
@@ -1365,5 +1558,159 @@ mod tests {
         .await
         .unwrap();
         assert!(load_lobby(&conn, "bad").await.is_err());
+    }
+
+    /// The cap bounds (#80): `None` is "any", the presented buckets all pass, and
+    /// nonsense — zero, negative, longer than a day — is refused.
+    #[test]
+    fn a_cap_is_validated_within_sane_bounds() {
+        for ok in [
+            None,
+            Some(60),
+            Some(1800),
+            Some(3600),
+            Some(7200),
+            Some(86_400),
+        ] {
+            assert!(validate_cap(ok).is_ok(), "{ok:?} must be accepted");
+        }
+        for bad in [Some(0), Some(-1), Some(59), Some(86_401), Some(i64::MIN)] {
+            assert!(validate_cap(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// A plan created with a time cap reads it back in the lobby; one created
+    /// without is uncapped — "Any" is the default, and every session from before
+    /// the column existed stays that way.
+    #[tokio::test]
+    async fn a_plan_carries_its_time_cap_and_defaults_to_any() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "capped",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            Some(1800),
+        )
+        .await
+        .unwrap();
+        create_session(
+            &conn,
+            "open",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let capped = load_lobby(&conn, "capped").await.unwrap().unwrap();
+        assert_eq!(capped.max_total_seconds, Some(1800));
+        let open = load_lobby(&conn, "open").await.unwrap().unwrap();
+        assert_eq!(open.max_total_seconds, None);
+    }
+
+    /// The host can move the cap while the lobby is open, and lift it back to
+    /// "any"; the lobby reads whatever the plan currently says.
+    #[tokio::test]
+    async fn the_cap_can_be_set_and_lifted() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        set_time_cap(&conn, "c", Some(3600)).await.unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .max_total_seconds,
+            Some(3600)
+        );
+        set_time_cap(&conn, "c", None).await.unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .max_total_seconds,
+            None
+        );
+    }
+
+    /// Start freezes the lobby's settings *in the write*, not merely in the handler's
+    /// earlier read. Those are two round trips, so a start landing between them would
+    /// otherwise move the corpus bound — or what the plan is even for — out from under
+    /// a plan already being swiped. Each write refuses instead, and says it wrote
+    /// nothing.
+    #[tokio::test]
+    async fn a_started_plan_refuses_every_lobby_write() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        // Everything is still movable while the lobby is open.
+        assert!(set_time_cap(&conn, "c", Some(1800)).await.unwrap());
+        assert!(update_meal_type(&conn, "c", MealType::Lunch).await.unwrap());
+        assert!(update_additions(&conn, "c", &[MealAddition::Dessert])
+            .await
+            .unwrap());
+
+        begin_session(&conn, "c").await.unwrap();
+
+        // …and nothing is, once the swiping is under way.
+        assert!(!set_time_cap(&conn, "c", Some(3600)).await.unwrap());
+        assert!(!update_meal_type(&conn, "c", MealType::Breakfast)
+            .await
+            .unwrap());
+        assert!(!update_additions(&conn, "c", &[MealAddition::Drink])
+            .await
+            .unwrap());
+
+        // The frozen values are the ones the deck was dealt against.
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.max_total_seconds, Some(1800));
+        assert_eq!(view.meal_type, MealType::Lunch);
+        assert_eq!(view.additions, vec![MealAddition::Dessert]);
+    }
+
+    /// The walk's read of the cap distinguishes "no such session" from "no cap":
+    /// an unknown channel must surface as an error, never silently walk uncapped.
+    #[tokio::test]
+    async fn time_cap_distinguishes_unknown_from_uncapped() {
+        let conn = conn().await;
+        assert_eq!(time_cap(&conn, "nope").await.unwrap(), None);
+        create_session(
+            &conn,
+            "open",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(time_cap(&conn, "open").await.unwrap(), Some(None));
+        create_session(
+            &conn,
+            "capped",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            Some(7200),
+        )
+        .await
+        .unwrap();
+        assert_eq!(time_cap(&conn, "capped").await.unwrap(), Some(Some(7200)));
     }
 }

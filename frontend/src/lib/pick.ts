@@ -13,16 +13,21 @@ import type { MealAddition, MealType, RecipeCard } from "./types";
  * votes.
  */
 
-/** `POST /api/session` — start a pick, returning its shareable channel id. */
+/** `POST /api/session` — start a pick, returning its shareable channel id.
+ * `maxTotalSeconds` caps the plan to recipes estimated at that long or less
+ * (#80); omitted = "Any". The host can still move it in the lobby, until start.
+ */
 export async function createPick(
   filter?: string,
   kitchenId?: string,
+  maxTotalSeconds?: number | null,
 ): Promise<string> {
   const res = await apiFetch("/api/session", {
     method: "POST",
     body: JSON.stringify({
       filter: filter ?? null,
       kitchen_id: kitchenId ?? null,
+      max_total_seconds: maxTotalSeconds ?? null,
     }),
   });
   if (!res.ok) {
@@ -201,6 +206,8 @@ export interface Lobby {
   additions: MealAddition[];
   host: string;
   started: boolean;
+  /** The plan's total-time cap in seconds (#80); null = "Any". */
+  max_total_seconds: number | null;
   voters: Voter[];
   /** Kitchen members not yet deciding — the host can add any without a link (#72). */
   candidates: Voter[];
@@ -271,6 +278,20 @@ export async function setAdditions(
     { method: "POST", body: JSON.stringify({ additions }) },
   );
   if (!res.ok) throw lobbyFailed(res.status, "change the additions");
+  return (await res.json()) as Lobby;
+}
+
+/** Set (or lift, with `null`) the plan's time cap in seconds (#80). Host only,
+ * and only while the lobby is open — the cap freezes when the swiping starts. */
+export async function setPlanCap(
+  channel: string,
+  cap: number | null,
+): Promise<Lobby> {
+  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/cap`, {
+    method: "POST",
+    body: JSON.stringify({ max_total_seconds: cap }),
+  });
+  if (!res.ok) throw lobbyFailed(res.status, "set the time cap");
   return (await res.json()) as Lobby;
 }
 

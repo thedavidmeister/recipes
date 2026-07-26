@@ -14,6 +14,7 @@
     seatMember,
     setAdditions,
     setMealType,
+    setPlanCap,
     type ConnStatus,
     type Lobby,
   } from "$lib/pick";
@@ -142,7 +143,9 @@
         deck.length < bufferTarget && fetches < 3;
         fetches++
       ) {
-        const stops = await getWalk(30);
+        // The channel travels with the walk so the server bounds it to the plan's
+        // time cap (#80) — the cap itself never comes from the client.
+        const stops = await getWalk(30, channel);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
           const k = key(s.recipe.source, s.recipe.id);
@@ -175,8 +178,19 @@
 
   // Prefetch before the deck runs low, sized to the swiper — the buffer stays ahead
   // of the swiping so the next card is always ready. Stops once the pick is decided.
+  //
+  // The deck only builds once the plan has *started*: while the lobby is open the
+  // host can still be moving the time cap (#80), so a deck fetched earlier could
+  // hold cards outside the bound everyone agreed to swipe within. Start freezes
+  // the cap; only then is a card worth dealing.
   $effect(() => {
-    if (deck.length < bufferTarget && !refilling && !dry && !decided)
+    if (
+      started === true &&
+      deck.length < bufferTarget &&
+      !refilling &&
+      !dry &&
+      !decided
+    )
       void refill();
   });
 
@@ -247,6 +261,17 @@
     } catch (e) {
       lobbyError =
         e instanceof Error ? e.message : "Couldn't change the additions.";
+    }
+  }
+
+  /** The host bounds the plan to the time the group has (#80); frozen at start. */
+  async function capPlan(cap: number | null) {
+    try {
+      lobby = await setPlanCap(channel, cap);
+      deciders = lobby.voters.length;
+      started = lobby.started;
+    } catch (e) {
+      lobbyError = e instanceof Error ? e.message : "Couldn't set the time cap.";
     }
   }
 
@@ -387,6 +412,7 @@
     candidates={lobby?.candidates}
     mealType={lobby?.meal_type}
     additions={lobby?.additions}
+    cap={lobby?.max_total_seconds ?? null}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     inviteLink={page.url.href}
     error={lobbyError}
@@ -394,5 +420,6 @@
     onSeat={seat}
     onMealType={chooseMeal}
     onAdditions={chooseAdditions}
+    onCap={capPlan}
   />
 {/if}

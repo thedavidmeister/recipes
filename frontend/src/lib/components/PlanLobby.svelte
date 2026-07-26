@@ -34,6 +34,8 @@
     mealType?: MealType;
     /** What comes with the meal (#114) — shown to everyone under the heading. */
     additions?: MealAddition[];
+    /** The plan's total-time cap in seconds (#80); null = "Any". */
+    cap?: number | null;
     /** The shareable URL that seats whoever opens it. */
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
@@ -47,6 +49,8 @@
     /** Name what comes with it — the whole chosen set each time. Host only,
      * while the lobby is open. */
     onAdditions?: (additions: MealAddition[]) => void;
+    /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
+    onCap?: (cap: number | null) => void;
   }
 
   let {
@@ -55,6 +59,7 @@
     candidates = [],
     mealType,
     additions = [],
+    cap = null,
     inviteLink,
     host = false,
     error,
@@ -62,7 +67,28 @@
     onSeat,
     onMealType,
     onAdditions,
+    onCap,
   }: Props = $props();
+
+  /**
+   * The presented time buckets (#80). A UI vocabulary, deliberately not a schema:
+   * the backend stores plain seconds, so changing these is an edit here, not a
+   * migration there.
+   */
+  const BUCKETS: { label: string; seconds: number | null }[] = [
+    { label: "Any", seconds: null },
+    { label: "30 min", seconds: 1800 },
+    { label: "1 hour", seconds: 3600 },
+    { label: "2 hours", seconds: 7200 },
+  ];
+
+  /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */
+  const capLabel = (s: number) =>
+    s % 3600 === 0
+      ? s === 3600
+        ? "1 hour"
+        : `${s / 3600} hours`
+      : `${Math.round(s / 60)} min`;
 
   const name = (v: Voter) =>
     v.username ? `@${v.username}` : v.telegram_user_id;
@@ -167,6 +193,42 @@
             </button>
           {/each}
         </div>
+
+        <!-- The time cap (#80): one bound per plan, single-select like the meal
+             row, frozen at start. The estimate it filters on is a lower bound, so
+             the honesty note is part of the control, not a footnote. -->
+        <p class="mt-6 mb-3 text-xs text-stone-500">How much time do you have?</p>
+        <div class="flex flex-wrap gap-2">
+          {#each BUCKETS as b (b.label)}
+            <button
+              type="button"
+              aria-pressed={cap === b.seconds}
+              onclick={() => onCap?.(b.seconds)}
+              class="rounded-pill px-3 py-1 text-sm {cap === b.seconds
+                ? 'bg-cocoa-500 text-cream-50'
+                : 'border-stone-300 text-stone-600 border'}"
+            >
+              {b.label}
+            </button>
+          {/each}
+        </div>
+        {#if cap !== null}
+          <p class="mt-2 text-xs text-stone-500">
+            Only recipes estimated at {capLabel(cap)} or less. Estimates are a
+            lower bound, and recipes we can't time yet still show.
+          </p>
+        {/if}
+      {:else if cap !== null}
+        <!-- Guests see the bound they will be swiping within — shown, not
+             settable: the cap is the host's call (#80). -->
+        <p class="mt-6 text-sm text-stone-600">
+          <span
+            class="rounded-pill bg-cocoa-500 text-cream-50 mr-1 px-3 py-1 text-sm font-medium"
+            >{capLabel(cap)}</span
+          >
+          Recipes estimated over this are left out. Estimates are a lower bound,
+          and recipes we can't time yet still show.
+        </p>
       {/if}
 
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>

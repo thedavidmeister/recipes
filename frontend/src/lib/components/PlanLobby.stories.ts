@@ -6,7 +6,12 @@ const invite = "https://recipes.lehlehleh.com/pick/8f2a1c4e9b7d";
 const meta = {
   title: "recipes/PlanLobby",
   component: PlanLobby,
-  args: { onStart: () => {}, onMealType: () => {}, onAdditions: () => {} },
+  args: {
+    onStart: () => {},
+    onMealType: () => {},
+    onAdditions: () => {},
+    onCap: () => {},
+  },
 } satisfies Meta<typeof PlanLobby>;
 export default meta;
 
@@ -77,6 +82,35 @@ export const KitchenMembers: Story = {
     candidates: [
       { telegram_user_id: "5150", username: "mel" },
       { telegram_user_id: "6161", username: "sam" },
+    ],
+  },
+};
+
+/** The host has capped the plan to 30 minutes (#80): the bucket reads selected and
+ * the honest fine print is attached — the estimate is a lower bound, and recipes
+ * without timings still show. */
+export const TimeCapped: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    mealType: "dinner",
+    inviteLink: invite,
+    cap: 1800,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** A guest in a capped plan sees the bound they will be swiping within — shown,
+ * not settable: the cap is the host's call (#80). */
+export const GuestSeesTheCap: Story = {
+  args: {
+    status: "ready",
+    host: false,
+    mealType: "dinner",
+    cap: 3600,
+    voters: [
+      { telegram_user_id: "4242", username: "dave" },
+      { telegram_user_id: "9317", username: "mel" },
     ],
   },
 };
