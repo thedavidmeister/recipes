@@ -72,12 +72,51 @@ if (shots.length === 0) {
   process.exit(1);
 }
 
+/**
+ * Does this story's current shot differ from its baseline by more than the
+ * budget — i.e. is it one the diff would flag?
+ *
+ * The same question both halves of this script ask, asked in one place on
+ * purpose: a bless that used its own notion of "changed" could write a baseline
+ * the diff then rejects, or leave one it wants.
+ */
+function differs(f) {
+  const a = PNG.sync.read(readFileSync(join(BASELINES, f)));
+  const b = PNG.sync.read(readFileSync(join(CURRENT, f)));
+  if (a.width !== b.width || a.height !== b.height) return true;
+  const scratch = new PNG({ width: a.width, height: a.height });
+  const changed = pixelmatch(a.data, b.data, scratch.data, a.width, a.height, {
+    threshold: PER_PIXEL,
+    diffColor: [255, 0, 255],
+  });
+  return changed > MAX_CHANGED;
+}
+
 if (update) {
   mkdirSync(BASELINES, { recursive: true });
-  // Replace wholesale so a removed story doesn't leave a stale baseline behind.
-  for (const f of readdirSync(BASELINES)) rmSync(join(BASELINES, f));
-  for (const f of shots) copyFileSync(join(CURRENT, f), join(BASELINES, f));
-  console.log(`visual: wrote ${shots.length} baseline(s).`);
+  const had = new Set(
+    readdirSync(BASELINES).filter((f) => f.endsWith(".png")),
+  );
+  const shot = new Set(shots);
+
+  // Write only what actually moved. Rewriting every baseline wholesale looked
+  // equivalent — the bytes it writes are the bytes it just read — but a render
+  // that wobbles *under* the budget is not a change the fence reports, and
+  // reblessing it anyway put that wobble in the diff of every PR that ever
+  // blessed anything. The reviewer then reads a baseline they did not change and
+  // cannot explain, which is the one thing this fence must never produce.
+  const written = shots.filter((f) => !had.has(f) || differs(f));
+  for (const f of written) copyFileSync(join(CURRENT, f), join(BASELINES, f));
+
+  // A baseline whose story no longer renders is dead and must still go, or the
+  // next diff fails on it forever.
+  const removed = [...had].filter((f) => !shot.has(f));
+  for (const f of removed) rmSync(join(BASELINES, f));
+
+  const parts = [`${written.length} written`];
+  if (removed.length) parts.push(`${removed.length} removed`);
+  parts.push(`${shots.length - written.length} already current`);
+  console.log(`visual: ${parts.join(", ")}.`);
   process.exit(0);
 }
 
