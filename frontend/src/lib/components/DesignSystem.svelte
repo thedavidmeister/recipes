@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from "./Button.svelte";
+  import { USER_COLOURS } from "$lib/colour";
   /**
    * The design system, as a page you can look at. Not shipped in the app — it is
    * the reference we screenshot and argue about.
@@ -316,6 +317,27 @@
         Roasted, nutty and earthy flavours <em>are</em> the browns; dairy is the
         creams — so the room doubles as two more flavour families.
       </p>
+    </section>
+
+    <!-- People -->
+    <section class="mt-14">
+      <h2 class="font-display text-3xl font-medium">the people</h2>
+      <p class="mt-1 text-stone-600">
+        Everyone gets one, decided by their Telegram id and nothing else — the
+        same colour beside their name in every list, in every session, with
+        nothing stored and nothing to choose. Six slots, so colours repeat; the
+        name always rides along, because a dot was never the identity.
+      </p>
+      <div class="mt-6 flex flex-wrap items-center gap-3">
+        {#each USER_COLOURS as c (c.token)}
+          <div
+            class="bg-cream-100 rounded-pill flex items-center gap-2 border border-stone-200 px-4 py-2"
+          >
+            <span class="size-2.5 shrink-0 rounded-full {c.dot}"></span>
+            <span class="text-sm text-stone-600">{c.token}</span>
+          </div>
+        {/each}
+      </div>
     </section>
 
     <!-- Type -->
