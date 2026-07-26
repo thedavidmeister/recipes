@@ -2,6 +2,7 @@
   import Skeleton from "./Skeleton.svelte";
   import Panel from "./Panel.svelte";
   import Button from "./Button.svelte";
+  import UserName from "./UserName.svelte";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
 
   /**
@@ -14,7 +15,8 @@
    *
    * Nobody here has a role beyond owner. Everyone in a kitchen owns it — being a
    * guest is something you are at a meal, not in a room — so the members render
-   * under the one label "Owners".
+   * under the one label "Owners". Each carries their colour (#145), the same one
+   * they wear in the lobby, so the room reads as people rather than a list.
    */
   interface Props {
     status: KitchensStatus;
@@ -45,9 +47,7 @@
       <p class="mt-5 mb-3 text-xs text-stone-500">Owners</p>
       <ul class="flex flex-col gap-1.5">
         {#each kitchen.members as m (m.telegram_user_id)}
-          <li class="font-display text-stone-900">
-            {m.username ? `@${m.username}` : m.telegram_user_id}
-          </li>
+          <li><UserName user={m} /></li>
         {/each}
       </ul>
 

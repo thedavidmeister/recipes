@@ -10,6 +10,7 @@
     type MealType,
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
+  import UserName from "./UserName.svelte";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -23,6 +24,9 @@
    *
    * Only whoever started it can begin — otherwise a guest arriving late could close
    * the door on the person still inviting people.
+   *
+   * Everyone in the roster wears their colour (#145) — the same one they have in
+   * the kitchen — so "who is here" is a glance rather than a read.
    */
   interface Props {
     status: "pending" | "error" | "ready";
@@ -89,9 +93,6 @@
         ? "1 hour"
         : `${s / 3600} hours`
       : `${Math.round(s / 60)} min`;
-
-  const name = (v: Voter) =>
-    v.username ? `@${v.username}` : v.telegram_user_id;
 
   // Display-only sentence-casing over an ASCII vocabulary; the wire stays lowercase.
   const mealLabel = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
@@ -234,7 +235,7 @@
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>
       <ul class="flex flex-col gap-1.5">
         {#each voters as v (v.telegram_user_id)}
-          <li class="font-display text-stone-900">{name(v)}</li>
+          <li><UserName user={v} /></li>
         {/each}
       </ul>
 
@@ -243,7 +244,7 @@
         <ul class="flex flex-col gap-2">
           {#each candidates as c (c.telegram_user_id)}
             <li class="flex items-center justify-between">
-              <span class="font-display text-stone-900">{name(c)}</span>
+              <UserName user={c} />
               <button
                 type="button"
                 onclick={() => onSeat?.(c.telegram_user_id)}
