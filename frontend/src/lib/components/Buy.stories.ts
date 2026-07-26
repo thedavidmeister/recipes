@@ -10,9 +10,71 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The shopping checklist for the picked recipe — a couple already ticked off. */
+/**
+ * The six people whose colours the ring can hand out, one per slot. The id is what
+ * picks the colour (`userColour` folds its digits), so these are chosen to land one
+ * on each: the six-shopper story below only makes its point if every slot — pale
+ * ones included — is actually on screen.
+ */
+const dave = { telegram_user_id: "4242", username: "dave" }; // pesto
+const ada = { telegram_user_id: "13579", username: "ada" }; // plum
+const mel = { telegram_user_id: "5150", username: "mel" }; // paprika
+const kit = { telegram_user_id: "3141", username: "kit" }; // honey
+const sam = { telegram_user_id: "8080", username: "sam" }; // sea
+const jo = { telegram_user_id: "9317", username: null }; // berry
+
+/** The shopping checklist for the picked recipe — two lines already in a basket,
+ * each wearing the colour of whoever got it (#131). */
 export const Ready: Story = {
-  args: { status: "ready", recipe: buyRecipe(), checked: { 0: true, 2: true } },
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: dave, 2: mel },
+  },
+};
+
+/**
+ * A whole household shopping at once: every one of the six colours on one list.
+ *
+ * This is the story the treatment has to survive. `honey` and `sea` are far too
+ * pale to be a control's boundary on cream, so nothing here asks them to be one —
+ * the tick is a checked box and a struck-through line, and the colour only says
+ * whose. The two pale rows should still read as unmistakably *got*, and still
+ * unmistakably somebody's.
+ */
+export const SixShoppers: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo },
+  },
+};
+
+/** A tick that did not take: the row goes back to what the server last said, and
+ * the reason is on screen. A line that looks got but is not is how somebody comes
+ * home without the flour. */
+export const TickRefused: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: dave },
+    tickError: "Only the people having this meal can tick things off its list.",
+  },
+};
+
+/** No meal session behind the decision, so there is nobody to attribute a tick to:
+ * the list is this device's, unattributed, and says so rather than implying a group
+ * that is not there (#131). */
+export const OnThisDeviceOnly: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: false,
+    ticks: { 0: null, 3: null },
+  },
 };
 
 /** Loading the list. */

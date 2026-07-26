@@ -21,6 +21,7 @@
 
 mod admin;
 mod auth;
+mod boot;
 mod db;
 mod db_retry;
 mod derive;
@@ -42,7 +43,10 @@ mod sync;
 mod walk;
 
 use axum::{
+    extract::{Request, State},
     http::Method,
+    middleware::Next,
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -50,6 +54,8 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
+
+use crate::error::AppError;
 
 /// Shared handler state: the SSRF-guarded HTTP client, the Turso/libSQL database,
 /// the Telegram config auth runs on, and the infra key that guards the ingest sync.
@@ -139,10 +145,69 @@ pub struct AppState {
     /// **not authoritative**: Turso holds every vote, so a lost process rehydrates
     /// on reconnect. See [`session`].
     pub rooms: session::Rooms,
+    /// Whether the schema is up yet (#146). Written by the boot task
+    /// ([`boot::migrate_until_ready`]), read by [`require_schema`] and
+    /// [`health`]. Boot no longer waits for the database, so this is how a
+    /// request finds out whether there is anything to query.
+    pub schema: boot::Readiness,
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+/// `GET /api/health` — the unauthenticated liveness probe, and the one route
+/// that answers whatever the database is doing.
+///
+/// ```json
+/// { "status": "ok",       "database": "ready"   }
+/// { "status": "degraded", "database": "pending" }
+/// { "status": "degraded", "database": "failed"  }
+/// ```
+///
+/// **Always 200 while the process is alive**, deliberately. `render.yaml` points
+/// `healthCheckPath` here, and Render will not promote a deploy whose health
+/// check never passes — so answering 503 during a database outage would fail the
+/// deploy and hand back the deploy freeze #146 exists to end. Liveness is the
+/// status code; readiness is the body, where a prober and a human reading
+/// Render's dashboard can both see it.
+///
+/// It carries no connection string, host, token, or error text: it is
+/// unauthenticated by design, so it says *which* of three states we are in and
+/// nothing about why. The why goes to the logs, where it is already gated.
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let schema = state.schema.get();
+    Json(serde_json::json!({
+        "status": if schema.is_ready() { "ok" } else { "degraded" },
+        "database": schema.as_str(),
+    }))
+}
+
+/// Refuse a schema-dependent request while there is no schema to serve it (#146).
+///
+/// **503, not 500 and not a hang** — the same call `INGEST_API_KEY` makes: the
+/// fault is the deployment's, not the caller's, so an operator reading it is
+/// pointed at the deployment rather than sent hunting a credential. It answers
+/// immediately; a request that waited for the database would just move the
+/// outage into the client's timeout.
+///
+/// It sits **outside** the auth gates rather than behind them, because
+/// [`auth::require_session`] reads the `sessions` table — with no schema it
+/// cannot judge a cookie at all, so asking it first would turn every request
+/// into a 500. The cost is that during the window an anonymous caller gets 503
+/// where it would normally get 401. That leaks nothing (503 is not data, and no
+/// route is reached), and it is the honest answer: we genuinely cannot say
+/// whether that cookie is a session.
+async fn require_schema(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    match state.schema.get() {
+        boot::Schema::Ready => Ok(next.run(req).await),
+        boot::Schema::Pending => Err(AppError::Unavailable(
+            "the database schema is not ready yet; this service is still starting".into(),
+        )),
+        boot::Schema::Failed => Err(AppError::Unavailable(
+            "the database schema could not be applied on this deployment".into(),
+        )),
+    }
 }
 
 /// Build the HTTP surface.
@@ -197,6 +262,12 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
+        // The meal's shopping checklist (#131) — read by anyone holding the channel
+        // id (like the lobby it belongs to), written only by the people deciding it.
+        .route(
+            "/session/{channel}/buy",
+            get(session::buy_list).post(session::set_buy_check),
+        )
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -225,23 +296,37 @@ pub fn app(state: AppState) -> Router {
             auth::require_session,
         ));
 
-    // The only endpoints reachable without a session, each because requiring one
-    // would be circular or wrong:
-    //   /health           — a liveness probe the host calls, holding no session.
+    // Reachable without a session, each because requiring one would be circular
+    // or wrong:
     //   /auth/complete    — redeems the bot's link; the secret in it IS the
     //                       authentication, and requiring a session to get one
     //                       would be circular.
     //   /telegram/webhook — called by Telegram, not a browser; it carries no
     //                       session and authenticates by its own secret instead.
+    // Both still write the corpus's auth tables, so they need a schema like
+    // everything else — public is not the same as schema-free.
     let public = Router::new()
-        .route("/health", get(health))
         .route("/auth/complete", post(auth::complete))
         .route("/telegram/webhook", post(auth::webhook));
 
-    let api = Router::new()
+    // Everything that needs tables to answer, behind the readiness gate (#146).
+    // The gate is applied here, outermost, so it runs before the auth
+    // middlewares — see [`require_schema`] for why that order is forced.
+    let schema_dependent = Router::new()
         .merge(machine)
         .merge(guarded)
         .merge(public)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_schema,
+        ));
+
+    let api = Router::new()
+        // The one route outside the gate: a liveness probe the host calls,
+        // holding no session — and the thing that *reports* the gate, so it has
+        // to answer when the database does not.
+        .route("/health", get(health))
+        .merge(schema_dependent)
         .with_state(state);
 
     Router::new()
@@ -428,17 +513,20 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Open the DB, ensure the schema is current, and build the shared state.
-    let database = db::open().await?;
-    let conn = database.connect()?;
-    db::migrate(&conn).await?;
-    // Auth is mandatory, so missing Telegram config is a startup error: a
-    // backend that cannot mint a login can serve nothing, and failing here beats
-    // discovering it on the first request.
+    // Everything from here to `bind` is decided from configuration alone — no
+    // packet is sent, so none of it can be a provider having a bad hour, and all
+    // of it still refuses to boot (#146):
+    //
+    //   * `db::open` resolves `DATABASE_URL`/`TURSO_AUTH_TOKEN` into a handle. It
+    //     does not connect. A placeholder or a bare path must die here rather
+    //     than run beautifully against a container-local file (see `db.rs`).
+    //   * Auth is mandatory, so missing Telegram config is a startup error: a
+    //     backend that cannot mint a login can serve nothing.
     //
     // The ingest key is the exception — it gates one scheduled endpoint, so
     // missing it costs a sync, not the service. Warn and serve; ingest itself
     // refuses while it is unset.
+    let database = db::open().await?;
     let ingest_key = auth::ingest_key_from_env();
     if ingest_key.is_none() {
         tracing::warn!("INGEST_API_KEY is not set — /api/ingest is disabled; the corpus will go stale until it is configured");
@@ -451,18 +539,52 @@ async fn main() -> anyhow::Result<()> {
         ingest_key,
         admin_id: auth::admin_id_from_env(),
         rooms: session::rooms(),
+        // Nothing has talked to the database yet. The boot task below decides.
+        schema: boot::Readiness::pending(),
     };
 
-    // Expired rows are already refused on read, so this only reclaims space.
-    if let Err(e) = auth::sweep_expired(&conn).await {
-        tracing::warn!("could not sweep expired auth rows: {e}");
-    }
+    let app = app(state.clone());
 
-    let app = app(state);
-
+    // Bind before touching the database, always. This is the line that unfroze
+    // deploys: the process reaches "listening" whatever Turso is doing, so a blip
+    // during a deploy — or during one of the free tier's constant cold starts —
+    // costs some 503s instead of `Exited with status 1` and a live image nobody
+    // can replace (#146).
     let addr: String = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("recipes backend listening on http://{addr}");
+
+    // The schema comes up beside the server rather than in front of it. The first
+    // attempt starts now, un-delayed, and on a healthy database it wins the race
+    // with the first inbound request by a round trip; until it lands,
+    // schema-dependent routes answer 503 and `/api/health` says `pending` — which
+    // is strictly more than the old inline migration offered in the same window,
+    // where the port was not bound and the connection was simply refused.
+    tokio::spawn({
+        let database = state.database.clone();
+        let readiness = state.schema.clone();
+        async move {
+            boot::migrate_until_ready(boot::SCHEDULE, readiness, move |_attempt| {
+                let database = database.clone();
+                async move {
+                    // A fresh connection per attempt: a libsql connection owns a
+                    // Hrana stream, and the stream that just broke is exactly
+                    // what must not be reused (#99).
+                    let conn = database.connect()?;
+                    db::migrate(&conn).await?;
+                    // Expired rows are already refused on read, so this only
+                    // reclaims space — a warning, never a reason to call the
+                    // schema unready.
+                    if let Err(e) = auth::sweep_expired(&conn).await {
+                        tracing::warn!("could not sweep expired auth rows: {e}");
+                    }
+                    Ok(())
+                }
+            })
+            .await;
+        }
+    });
+
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -530,6 +652,9 @@ mod tests {
             // The test sessions below log in as "4242", so make that the admin.
             admin_id: Some("4242".into()),
             rooms: session::rooms(),
+            // Migrated a line above, so this is the healthy-boot state every
+            // other test in this module assumes. The #146 tests flip it.
+            schema: boot::Readiness::ready(),
         };
         (state, conn)
     }
@@ -1708,6 +1833,276 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
+    // ---- Boot degrades, it does not die (#146) -----------------------------
+
+    /// `GET /api/health`, asserting the status code the deploy depends on and
+    /// returning the body that carries the truth.
+    ///
+    /// The 200 is the load-bearing part: `render.yaml` points `healthCheckPath`
+    /// here, and a deploy whose health check never passes is a deploy that never
+    /// promotes — which is the freeze this whole feature exists to end. Liveness
+    /// is the code; readiness is the body.
+    async fn health_body(router: &Router) -> serde_json::Value {
+        let res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "/api/health must answer 200 while the process is alive — Render gates the deploy on it"
+        );
+        body_json(res).await
+    }
+
+    /// One request per gate the router has, so "everything that needs tables"
+    /// is probed rather than asserted: a session route, a machine route, and the
+    /// two unauthenticated endpoints that still read and write the auth tables.
+    /// Public is not the same as schema-free.
+    fn schema_dependent_probes() -> Vec<Request<Body>> {
+        vec![
+            me_req(None),
+            walk_req(None),
+            get_req("/api/kitchens", "recipes_session=whatever"),
+            // With a *valid* key, so what answers is the gate rather than the
+            // machine auth — and so no real sync can run behind it.
+            ingest_req(Some("Bearer test-ingest-key"), None),
+            enrich_pending_req(Some("Bearer test-ingest-key")),
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"c":"a-secret"}"#))
+                .unwrap(),
+            // The right webhook secret, again so the gate is what answers.
+            Request::builder()
+                .method("POST")
+                .uri("/api/telegram/webhook")
+                .header("content-type", "application/json")
+                .header("x-telegram-bot-api-secret-token", "test-webhook-secret")
+                .body(Body::from(
+                    r#"{"message":{"text":"/start abc","from":{"id":1}}}"#,
+                ))
+                .unwrap(),
+        ]
+    }
+
+    /// Attempts land 1ms apart so a test does not sit through the real schedule.
+    const TEST_SCHEDULE: boot::Schedule = boot::Schedule {
+        base: std::time::Duration::from_millis(1),
+        cap: std::time::Duration::from_millis(1),
+    };
+
+    /// The boot error that killed four consecutive deploys on 2026-07-25,
+    /// verbatim.
+    fn boot_incident_error() -> anyhow::Error {
+        libsql::Error::Hrana(
+            "cursor error: `error reading a body from connection: unexpected EOF during chunk size line`"
+                .to_string()
+                .into(),
+        )
+        .into()
+    }
+
+    /// **The headline (#146)**, through the real router.
+    ///
+    /// A transient database failure at boot does not end the process: it binds,
+    /// it serves, schema-dependent routes answer an honest 503, and `/api/health`
+    /// distinguishes "up, database unreachable" from a dead process. Then the
+    /// migration lands on a later attempt and the whole surface flips to ready —
+    /// no redeploy, no human.
+    ///
+    /// The failure is injected at the boot task's own seam (the attempt closure,
+    /// which is where `main` puts `connect` + `migrate`), so the schedule, the
+    /// classification and the readiness flip are the *real* ones over the *real*
+    /// database — only the transport failure is faked, because faking Hrana would
+    /// be faking the thing under test.
+    #[tokio::test]
+    async fn a_transient_boot_failure_degrades_and_then_recovers() {
+        let (state, _conn) = test_state(Some("test-ingest-key".into())).await;
+        // The state the process is in the instant it binds its port: nothing has
+        // talked to the database yet.
+        state.schema.set(boot::Schema::Pending);
+        let router = app(state.clone());
+
+        // Up — and saying which kind of up.
+        assert_eq!(
+            health_body(&router).await,
+            serde_json::json!({"status": "degraded", "database": "pending"}),
+            "a prober must be able to tell a degraded process from a dead one"
+        );
+
+        // Every route that needs tables answers 503. Not 500, not a hang, not a
+        // wrong answer from an empty database.
+        for req in schema_dependent_probes() {
+            let (method, uri) = (req.method().clone(), req.uri().clone());
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri} must answer 503 while the schema is not up"
+            );
+        }
+
+        // Turso comes back on the third attempt. This is the same task `main`
+        // spawns, over the same database — the first two attempts fail in
+        // transport, the third really migrates.
+        let database = state.database.clone();
+        let calls = std::cell::Cell::new(0u32);
+        let calls = &calls;
+        boot::migrate_until_ready(TEST_SCHEDULE, state.schema.clone(), move |_attempt| {
+            let database = database.clone();
+            async move {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    return Err(boot_incident_error());
+                }
+                let conn = database.connect()?;
+                db::migrate(&conn).await?;
+                Ok(())
+            }
+        })
+        .await;
+        assert_eq!(calls.get(), 3, "two blips, then the migration lands");
+
+        assert_eq!(
+            health_body(&router).await,
+            serde_json::json!({"status": "ok", "database": "ready"}),
+            "recovery is reported, not merely achieved"
+        );
+
+        // And the gate is out of the way again: auth answers for itself, so the
+        // degraded window did not leave anything wedged — or open.
+        let res = router.clone().oneshot(me_req(None)).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "auth is mandatory again the moment the schema is up"
+        );
+        let token = auth::issue_test_session(&state.database.connect().unwrap(), "4242").await;
+        let res = router
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "a real session reaches the handler once the schema is up"
+        );
+    }
+
+    /// A ruling — a credential the database refused, SQL it rejected — is
+    /// **permanently unready**, not an exit.
+    ///
+    /// It is one attempt (retrying collects the same ruling), it is loud in the
+    /// logs, and it is visible: `/api/health` says `failed` rather than `pending`,
+    /// so an operator can tell "wait, it is coming back" from "this needs me".
+    /// The process stays up precisely so that answer can still be asked for; a
+    /// container that exited answers nothing, and exiting on a verdict the
+    /// *provider* worded would re-arm the deploy freeze.
+    #[tokio::test]
+    async fn a_fatal_boot_failure_stays_up_and_reports_failed() {
+        let (state, _conn) = test_state(None).await;
+        state.schema.set(boot::Schema::Pending);
+        let router = app(state.clone());
+
+        let calls = std::cell::Cell::new(0u32);
+        let calls = &calls;
+        boot::migrate_until_ready(
+            TEST_SCHEDULE,
+            state.schema.clone(),
+            move |_attempt| async move {
+                calls.set(calls.get() + 1);
+                // A remote statement error: the database judged this and said no.
+                Err(anyhow::Error::from(libsql::Error::Hrana(
+                    r#"api error: `status=401 Unauthorized, body=`"#.to_string().into(),
+                )))
+            },
+        )
+        .await;
+        assert_eq!(calls.get(), 1, "a ruling must not be retried");
+
+        assert_eq!(
+            health_body(&router).await,
+            serde_json::json!({"status": "degraded", "database": "failed"}),
+            "`failed` and `pending` must be tellable apart — one resolves itself, one does not"
+        );
+        for req in schema_dependent_probes() {
+            let uri = req.uri().clone();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{uri} must answer 503, not 500, on a deployment whose schema will not come up"
+            );
+        }
+    }
+
+    /// A healthy boot is unchanged, and now says so: the schema is ready, the
+    /// gate is transparent, and `/api/health` reports both.
+    #[tokio::test]
+    async fn a_healthy_boot_reports_ready_and_gates_nothing() {
+        let (state, conn) = test_state(Some("test-ingest-key".into())).await;
+        let router = app(state);
+
+        assert_eq!(
+            health_body(&router).await,
+            serde_json::json!({"status": "ok", "database": "ready"})
+        );
+
+        // The gate does not touch a ready service: the answers are the routes'
+        // own, exactly as before #146.
+        let res = router.clone().oneshot(me_req(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "auth, not the gate");
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = router
+            .oneshot(me_req(Some(&format!("recipes_session={token}"))))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// The degraded service must not become a *permissive* one: no route that
+    /// needs a credential when healthy answers without one when degraded. The
+    /// gate only ever subtracts — it refuses before any handler, so there is no
+    /// path on which "the database is down" turns into data.
+    #[tokio::test]
+    async fn a_degraded_service_never_serves_more_than_a_healthy_one() {
+        let (state, _conn) = test_state(Some("test-ingest-key".into())).await;
+        state.schema.set(boot::Schema::Pending);
+        let router = app(state);
+
+        for req in [
+            // No credential at all, on each kind of gate.
+            ingest_req(None, None),
+            enrich_pending_req(None),
+            me_req(None),
+            // A forged webhook, which a healthy service refuses on its secret.
+            Request::builder()
+                .method("POST")
+                .uri("/api/telegram/webhook")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"message":{"text":"/start abc","from":{"id":1,"username":"mallory"}}}"#,
+                ))
+                .unwrap(),
+        ] {
+            let uri = req.uri().clone();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{uri} must be refused while degraded, never served"
+            );
+        }
+    }
+
     /// Login cannot require a login: `complete` is reachable, and refuses an
     /// unknown secret rather than 401-ing for want of a session.
     #[tokio::test]
@@ -1801,5 +2196,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "wrong secret");
+    }
+
+    // ---- buy checklist (#131) ----------------------------------------------
+
+    /// The meal's shopping list is a person-facing surface, so both halves of it are
+    /// session-gated like the rest (#25).
+    #[tokio::test]
+    async fn the_buy_checklist_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/session/{channel}/buy?source=t&id=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                None,
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// End to end through the router (#131): a decider ticks a line, it comes back
+    /// attributed to them, a second decider takes it over, and an untick clears it.
+    #[tokio::test]
+    async fn a_tick_round_trips_through_the_router_carrying_who_ticked_it() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let host_cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &host_cookie, "Home").await;
+        let channel = make_plan(&app, &host_cookie, &kid).await;
+
+        // A second decider, seated by the host the way the lobby does it (#72).
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                Some(&host_cookie),
+                r#"{"user_id":"mel"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let mel = auth::issue_test_session(&conn, "mel").await;
+        let mel_cookie = format!("recipes_session={mel}");
+        // Logging in registers the person; the handle comes from Telegram after, so
+        // it is set here rather than before (`upsert_user` writes what it was told,
+        // which for a test login is no handle at all).
+        conn.execute(
+            "UPDATE users SET username = 'mel' WHERE telegram_user_id = 'mel'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Nothing is in the basket yet.
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["channel_id"], channel);
+        assert_eq!(body["source"], "themealdb");
+        assert_eq!(body["checks"].as_array().unwrap().len(), 0);
+
+        // The host grabs the flour.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let checks = body_json(res).await["checks"].clone();
+        assert_eq!(checks[0]["index"], 1);
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
+
+        // Mel had already picked it up — last writer wins, and there is still one row.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&mel_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let checks = body_json(res).await["checks"].clone();
+        assert_eq!(checks.as_array().unwrap().len(), 1);
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "mel");
+        assert_eq!(checks[0]["by"]["username"], "mel");
+
+        // Put it back.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":1,"checked":false}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
+    }
+
+    /// A signed-in stranger holding the channel id must not be able to write into
+    /// someone else's basket — the roster is who is having this meal (#131). 403,
+    /// not 401: the session is fine, the identity just is not on the list.
+    #[tokio::test]
+    async fn a_non_member_cannot_tick_someone_elses_list() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let host_cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &host_cookie, "Home").await;
+        let channel = make_plan(&app, &host_cookie, &kid).await;
+
+        let stranger = auth::issue_test_session(&conn, "stranger").await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&format!("recipes_session={stranger}")),
+                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // And the refusal is real: nothing was written.
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
+    }
+
+    /// A checklist for a channel that does not exist is refused on both verbs — a
+    /// mistyped channel must never conjure a room, the same rule the WS upgrade and
+    /// the walk already hold to.
+    #[tokio::test]
+    async fn a_checklist_for_an_unknown_session_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(get_req("/api/session/nope/buy?source=t&id=1", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .oneshot(json_post(
+                "/api/session/nope/buy",
+                Some(&cookie),
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A negative ingredient index names no line of any recipe, so it is an author
+    /// error rather than a row to write.
+    #[tokio::test]
+    async fn a_negative_ingredient_index_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&cookie),
+                r#"{"source":"t","id":"1","index":-1,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }

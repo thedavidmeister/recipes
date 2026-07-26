@@ -23,6 +23,7 @@ export const Solo: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "dinner",
     inviteLink: invite,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
@@ -34,6 +35,7 @@ export const Gathered: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "dinner",
     inviteLink: invite,
     voters: [
@@ -50,6 +52,7 @@ export const Breakfast: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "breakfast",
     inviteLink: invite,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
@@ -63,6 +66,7 @@ export const WithAdditions: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "dinner",
     additions: ["dessert", "drink"],
     inviteLink: invite,
@@ -76,6 +80,7 @@ export const KitchenMembers: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "dinner",
     inviteLink: invite,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
@@ -93,6 +98,7 @@ export const TimeCapped: Story = {
   args: {
     status: "ready",
     host: true,
+    hostId: "4242",
     mealType: "dinner",
     inviteLink: invite,
     cap: 1800,
@@ -106,6 +112,7 @@ export const GuestSeesTheCap: Story = {
   args: {
     status: "ready",
     host: false,
+    hostId: "4242",
     mealType: "dinner",
     cap: 3600,
     voters: [
@@ -122,6 +129,7 @@ export const Guest: Story = {
   args: {
     status: "ready",
     host: false,
+    hostId: "4242",
     mealType: "snack",
     additions: ["drink"],
     voters: [
@@ -135,4 +143,26 @@ export const Pending: Story = { args: { status: "pending" } };
 
 export const Error: Story = {
   args: { status: "error", error: "could not open this meal plan (404)" },
+};
+
+/**
+ * The same lobby with a host whose colour is `honey` — the palest slot there is.
+ *
+ * Worth its own story because it is the one that would break a design leaning on
+ * the colour to say "chosen": `honey-500` measures 2.0:1 on cream, well under the
+ * 3:1 a control's boundary needs. Here the cocoa outline and `aria-pressed` carry
+ * chosen-ness and the tint only carries *whose*, so the pale host reads exactly as
+ * well as a dark one.
+ */
+export const HostWearsThePalestColour: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "3141",
+    mealType: "lunch",
+    additions: ["side"],
+    cap: 1800,
+    inviteLink: invite,
+    voters: [{ telegram_user_id: "3141", username: "kit" }],
+  },
 };

@@ -2,7 +2,10 @@
   import Alert from "./Alert.svelte";
   import Notice from "./Notice.svelte";
   import Panel from "./Panel.svelte";
+  import UserName from "./UserName.svelte";
+  import { userTint } from "$lib/colour";
   import { formatEstimate } from "$lib/steps";
+  import type { Voter } from "$lib/pick";
   import type { PickStatus, RecipeCard } from "$lib/types";
 
   /**
@@ -13,6 +16,11 @@
    * this view is purely the swipe. Presentational only: the page owns the socket,
    * the deck (which refills endlessly), and the cross-pollination. Every state is a
    * Storybook story.
+   *
+   * A card mostly gets here *because* somebody voted it — that is what
+   * cross-pollination is — so the people who already said yes are named under it,
+   * each in their own colour (#131/#145). It turns a solitary sort into the
+   * conversation it actually is: you are not rating recipes, you are answering Mel.
    */
   interface Props {
     status: PickStatus;
@@ -20,6 +28,8 @@
     card?: RecipeCard;
     /** How many people are in this pick (distinct voters). */
     participants?: number;
+    /** Who has already said yes to this card. */
+    yesVoters?: Voter[];
     error?: string;
     /** The shareable link that invites others into this pick. */
     shareUrl?: string;
@@ -32,6 +42,7 @@
     status,
     card,
     participants = 1,
+    yesVoters = [],
     error,
     shareUrl,
     copied = false,
@@ -131,6 +142,24 @@
           {/if}
         </div>
       </article>
+
+      {#if yesVoters.length}
+        <!-- Whose yes this already is. The tint carries the person and the name
+             carries the meaning: the colour is never the only signal, which is what
+             lets all six slots be used, pale ones included. -->
+        <p class="mt-4 text-xs text-stone-500">Already a yes for</p>
+        <ul class="mt-2 flex flex-wrap gap-2">
+          {#each yesVoters as v (v.telegram_user_id)}
+            <li
+              class="rounded-pill px-3 py-1 text-sm {userTint(
+                v.telegram_user_id,
+              )}"
+            >
+              <UserName user={v} />
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
       <div class="mt-5 flex items-center justify-center gap-4">
         <button

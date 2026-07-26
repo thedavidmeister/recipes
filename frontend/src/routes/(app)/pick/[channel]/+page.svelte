@@ -17,6 +17,7 @@
     setPlanCap,
     type ConnStatus,
     type Lobby,
+    type Voter,
   } from "$lib/pick";
   import PlanLobby from "$lib/components/PlanLobby.svelte";
   import { me } from "$lib/auth";
@@ -54,6 +55,11 @@
   let cardMap = $state<Record<string, RecipeCard>>({}); // key -> card
   let yes = $state<Record<string, number>>({}); // key -> yes count
   let no = $state<Record<string, number>>({}); // key -> no count
+  // key -> the telegram ids that said yes, so a card can wear the colours of the
+  // people who already like it (#131/#145). The tally carries these too, not just
+  // the live frames, so a reconnect rehydrates the attribution rather than losing
+  // it with the socket.
+  let yesIds = $state<Record<string, string[]>>({});
   let voterIds = $state<string[]>([]); // distinct voters seen live
   let serverParticipants = $state(0); // authoritative count from the last tally
   let deciders = $state(0); // the lobby roster size — who a recipe has to win over
@@ -299,20 +305,35 @@
         serverParticipants = participants;
         const y: Record<string, number> = {};
         const n: Record<string, number> = {};
+        const who: Record<string, string[]> = {};
         for (const v of votes) {
           const k = key(v.source, v.id);
           y[k] = v.yes;
           n[k] = v.no;
+          who[k] = v.yes_voters;
           if (!cardMap[k]) void pull(v.source, v.id, false);
         }
         yes = y;
         no = n;
+        yesIds = who;
       },
       onVote: (voter, source, id, vote) => {
         if (!voterIds.includes(voter)) voterIds = [...voterIds, voter];
         const k = key(source, id);
         if (vote) yes = { ...yes, [k]: (yes[k] ?? 0) + 1 };
         else no = { ...no, [k]: (no[k] ?? 0) + 1 };
+        // A vote is a current call, not an append (`record_vote`), so a no takes
+        // its author back off the yes list rather than leaving a stale colour on
+        // the card.
+        const had = yesIds[k] ?? [];
+        yesIds = {
+          ...yesIds,
+          [k]: vote
+            ? had.includes(voter)
+              ? had
+              : [...had, voter]
+            : had.filter((v) => v !== voter),
+        };
         // Cross-pollinate: a recipe a peer voted, that I have not queued, joins my
         // deck silently.
         if (!queued.has(k)) {
@@ -326,6 +347,25 @@
   });
 
   const current = $derived(deck[0]);
+
+  /**
+   * Who has already said yes to the card on screen (#131/#145).
+   *
+   * A card mostly arrives here *because* a peer voted it — that is what
+   * cross-pollination is — so "Mel already likes this" is the context that makes
+   * the swipe a conversation rather than a solo sort. Names come from the roster,
+   * which is the only place a handle lives; someone the roster does not carry
+   * still shows, by id, because a vote is never withheld over a missing handle.
+   */
+  const yesVoters = $derived<Voter[]>(
+    (current ? (yesIds[key(current.source, current.id)] ?? []) : []).map(
+      (id) =>
+        lobby?.voters.find((v) => v.telegram_user_id === id) ?? {
+          telegram_user_id: id,
+          username: null,
+        },
+    ),
+  );
   /**
    * How many people a recipe has to win over: the lobby roster.
    *
@@ -359,6 +399,9 @@
         source: decided.card.source,
         id: decided.card.id,
         title: decided.card.title,
+        // The meal travels with the decision, so `buy`'s checklist lands in the
+        // session the recipe was agreed in rather than in this browser (#131).
+        channel,
       });
       void goto("/buy");
     }
@@ -398,6 +441,7 @@
     {status}
     card={current}
     {participants}
+    {yesVoters}
     shareUrl={page.url.href}
     {copied}
     onVote={vote}
@@ -414,6 +458,7 @@
     additions={lobby?.additions}
     cap={lobby?.max_total_seconds ?? null}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
+    hostId={lobby?.host}
     inviteLink={page.url.href}
     error={lobbyError}
     onStart={begin}

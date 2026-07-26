@@ -131,6 +131,39 @@ the model extracts, code converts/scales — never ask the model to do arithmeti
   `structured: None` and the site serves raw measures. Enrichment is an
   addition, never a gate.
 
+## Boot degrades, it does not die (#146)
+
+**The process binds its port and serves before it has ever talked to the
+database.** Migrations run beside the server, not in front of it
+(`backend/src/boot.rs`): a transient failure is retried forever on a capped
+backoff (1s doubling to 60s), schema-dependent routes answer **503** meanwhile
+(the `INGEST_API_KEY` precedent — the fault is the deployment's, so not 401 and
+not 500), and the service flips to ready on its own when the database comes
+back. Turso spent seven hours truncating every streamed response and the inline
+migration exited 1, so four consecutive deploys died and **nothing could ship
+until a human redeployed** — including the PR hardening the request path. The
+free tier spins down at 15 minutes, so every cold start is a boot.
+
+The fatal/transient line is **whether the network was consulted**:
+
+- **Decided from config alone → exit, before the port is bound.** Missing or
+  unrecognized `DATABASE_URL`, missing `TURSO_AUTH_TOKEN`, missing Telegram
+  secrets. `db::open` resolves these without sending a packet, so the verdict
+  cannot be a provider blip.
+- **Decided by talking to the database → never fatal to the process**, including
+  a ruling (bad credentials, SQL the database rejects). The schema stays
+  permanently `failed`, every schema route 503s, and it is loud in the logs. The
+  transient/fatal split is a heuristic over strings the _provider_ words, so
+  exiting on one would re-arm the deploy freeze; and a container that exited is
+  the quietest possible signal.
+
+`/api/health` is the readiness signal and answers **200 whenever the process is
+alive** — Render gates deploy promotion on it, so a 503 here would freeze
+deploys again. The truth is in the body — `status` is `ok` or `degraded`,
+`database` is `ready`, `pending` or `failed` — and nothing else is in it,
+because it is unauthenticated. **Do not put migrations back on the fatal inline
+path**, and do not make `/api/health` non-200 for a live process.
+
 ## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 
 Backend = Render web service (free, spins down at 15 min idle). Frontend +

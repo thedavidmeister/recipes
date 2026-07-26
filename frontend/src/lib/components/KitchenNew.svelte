@@ -7,6 +7,11 @@
    *
    * Naming it is the whole of it. Everything else about a kitchen — who is in it, what
    * is in it — is added once it exists, from the kitchen itself.
+   *
+   * It opens with its own title and no link above it (#119). The old "Kitchens ·" prefix
+   * drew a breadcrumb trail, and a trail through the list is the one shape this app must
+   * not have: kitchens are not a tree you descend, they are the room you are already in.
+   * The way out is the `kitchens` link in the account row, which every page carries.
    */
   interface Props {
     error?: string;
@@ -35,11 +40,7 @@
 
 <div class="pt-48 pb-16">
   <Panel>
-    <p class="font-display flex items-center gap-2 text-stone-600">
-      <a href="/kitchens" class="text-stone-500 underline">Kitchens</a>
-      <span aria-hidden="true">·</span>
-      New
-    </p>
+    <h1 class="font-display text-2xl font-medium text-stone-900">New kitchen</h1>
 
     <form class="mt-6 flex flex-col gap-3" onsubmit={create}>
       <label class="text-xs text-stone-500" for="kitchen-name">
