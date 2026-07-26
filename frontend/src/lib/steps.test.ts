@@ -35,28 +35,41 @@ describe("formatEstimate", () => {
   it("marks every estimate as an at-least, never an exact time", () => {
     // The stored number omits untimed steps, so every rendering of it must carry
     // the "+". A format that ever drops it would present a lower bound as fact.
-    for (const seconds of [30, 60, 900, 2160, 3600, 5400, 7200, 86_400]) {
+    for (const seconds of [30, 60, 900, 1380, 3600, 7500, 9000, 604_800]) {
       expect(formatEstimate(seconds)).toMatch(/\+$/);
     }
   });
 
-  it("reads whole hours as hours and everything else as minutes", () => {
-    // The plan lobby's cap labels use exactly this split (#80); the card and the
-    // lobby describe the same estimate, so they say it the same way.
+  it("reads under an hour as minutes", () => {
+    // 1380 and 3360 are real corpus values — Chicken Handi and a teriyaki bake.
+    expect(formatEstimate(60)).toBe("1 min+");
+    expect(formatEstimate(1380)).toBe("23 min+");
+    expect(formatEstimate(3360)).toBe("56 min+");
+    expect(formatEstimate(3599)).toBe("59 min+");
+  });
+
+  it("reads an hour and over as hours, carrying the remainder", () => {
+    // Also real corpus values: a Massaman curry stores 7500 and a beef pie 9000.
+    // Neither lands on a whole hour — almost nothing does — so the hours branch
+    // has to carry minutes rather than fire only on exact multiples. "125 min+"
+    // is arithmetic, not an answer to "have I got time for this".
     expect(formatEstimate(3600)).toBe("1 hour+");
     expect(formatEstimate(7200)).toBe("2 hours+");
-    expect(formatEstimate(5400)).toBe("90 min+");
-    expect(formatEstimate(3660)).toBe("61 min+");
-    expect(formatEstimate(2160)).toBe("36 min+");
-    expect(formatEstimate(60)).toBe("1 min+");
+    expect(formatEstimate(7500)).toBe("2 hours 5 min+");
+    expect(formatEstimate(9000)).toBe("2 hours 30 min+");
+    expect(formatEstimate(3660)).toBe("1 hour 1 min+");
+    // A week-long ferment is in the corpus too. It stays in hours rather than
+    // inventing a "days" unit nothing else in the app speaks.
+    expect(formatEstimate(604_800)).toBe("168 hours+");
   });
 
   it("floors rather than rounds, so it never overstates the bound", () => {
     // 119s is at least 1 minute, not "2 min" — rounding up would inflate a number
     // that is already the optimistic end of the range.
     expect(formatEstimate(119)).toBe("1 min+");
-    expect(formatEstimate(2159)).toBe("35 min+");
-    expect(formatEstimate(2160.9)).toBe("36 min+");
+    expect(formatEstimate(1379)).toBe("22 min+");
+    expect(formatEstimate(1380.9)).toBe("23 min+");
+    expect(formatEstimate(7199)).toBe("1 hour 59 min+");
   });
 
   it("keeps a sub-minute estimate in seconds instead of losing it", () => {
