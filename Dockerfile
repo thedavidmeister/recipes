@@ -69,8 +69,17 @@ COPY --from=build /app/target/release/recipe-backend /usr/local/bin/recipe-backe
 ENV BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
 
-# Migrations run at startup inside the binary, so there is no separate release
-# step to forget. Auth config is validated at startup too: with auth mandatory, a
-# backend that cannot mint a login is one that can serve nothing, so it refuses
-# to boot rather than 500 on the first request.
+# Migrations run inside the binary, so there is no separate release step to
+# forget — but they run *beside* the server, not in front of it (#146). The
+# process binds its port first and serves whatever the database is doing:
+# schema-dependent routes answer 503 and /api/health reports
+# `"database":"pending"` until the migrations land, then it flips to ready on its
+# own. A Turso blip during a deploy or a free-tier cold start then costs some
+# 503s instead of `Exited with status 1` and a live image nobody can replace.
+#
+# Configuration is still validated at startup and still refuses to boot: with
+# auth mandatory, a backend that cannot mint a login can serve nothing, and a
+# placeholder DATABASE_URL must die rather than run beautifully against a
+# container-local file. The line is whether the network was consulted — see
+# backend/src/boot.rs.
 CMD ["recipe-backend"]

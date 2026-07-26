@@ -344,11 +344,45 @@ Two traps worth knowing before they cost an afternoon:
 - `lehlehleh.com` is on Cloudflare and **proxied**. Render's certificate
   issuance wants **DNS-only** (grey cloud) at least until the domain verifies,
   or the challenge fails and Render looks broken.
-- Migrations run at startup inside the binary, so there is no release step to
-  forget — but auth config is validated at startup too. A missing
-  `TELEGRAM_BOT_TOKEN` or `COOKIE_SECURE` means the service **refuses to boot**
-  rather than 500ing on the first request. That is deliberate: with auth
-  mandatory, a backend that cannot mint a login can serve nothing.
+- Migrations run inside the binary, so there is no release step to forget — but
+  they run **beside** the server, not in front of it (below). Configuration is
+  what is validated at startup: a missing `TELEGRAM_BOT_TOKEN`, `COOKIE_SECURE`
+  or `DATABASE_URL` means the service **refuses to boot** rather than 500ing on
+  the first request, because with auth mandatory a backend that cannot mint a
+  login can serve nothing, and a placeholder `DATABASE_URL` that "works" against
+  a container-local file is worse than a crash.
+
+### Boot degrades, it does not die
+
+A **database** failure is not a configuration failure, so it is not fatal. The
+process binds its port first and serves whatever Turso is doing: migrations are
+attempted in the background and retried on a capped backoff (1s doubling to 60s,
+no attempt limit), schema-dependent routes answer `503` until they land, and the
+service flips to ready by itself when the database comes back.
+
+This is not theoretical. Turso spent about seven hours truncating every streamed
+response, the inline migration exited 1, and **four consecutive deploys died at
+boot** — so the last image that ever booted stayed live serving 500s and nothing
+could ship until a human redeployed. The backend is on the free tier and spins
+down at 15 minutes idle, so every cold start is a boot: a blip at the wrong
+moment used to be a hard outage.
+
+`/api/health` is the readiness signal, and it answers **200 whenever the process
+is alive** — Render gates deploy promotion on it, so a 503 there would freeze
+deploys all over again. The truth is in the body, and nothing more, because the
+endpoint is unauthenticated:
+
+```json
+{ "status": "ok", "database": "ready" }
+{ "status": "degraded", "database": "pending" }
+{ "status": "degraded", "database": "failed" }
+```
+
+`pending` resolves itself; `failed` means the database _ruled_ against a
+migration (a credential it refused, SQL it rejected) and needs a person. Even
+then the process stays up — a container that exited is the quietest possible
+signal, and the transient/fatal split reads strings the provider words, so
+exiting on one misfiled error is how the deploy freeze comes back.
 
 ## Status
 

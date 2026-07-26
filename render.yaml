@@ -18,7 +18,13 @@ services:
     dockerfilePath: ./Dockerfile
     # Render probes this to decide the service is up. It is deliberately outside
     # the auth gate — a prober holds no session, so gating it would make a
-    # healthy service look dead.
+    # healthy service look dead — and outside the schema gate too (#146): it
+    # answers **200 whenever the process is alive**, carrying
+    # `{"status":…,"database":…}` where `database` is `ready`, `pending` or
+    # `failed`. Liveness is the status code, readiness is the body, on purpose —
+    # a deploy whose health check never passes never promotes, so 503-ing here
+    # during a Turso outage would freeze deploys, which is the failure that made
+    # boot stop depending on the database in the first place.
     healthCheckPath: /api/health
     envVars:
       # --- Turso -------------------------------------------------------------
