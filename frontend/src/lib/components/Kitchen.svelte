@@ -7,11 +7,18 @@
 
   /**
    * One kitchen (#72): what it is, who owns it, and the thing you come here to do —
-   * start a meal. The owners sit directly under the title — who is in the kitchen is
+   * start a meal. The kitchen's name is the first thing on the page, because this is
+   * where you land: `/` resolves to your primary kitchen, so nothing was drilled into
+   * to get here. The owners sit directly under the title — who is in the kitchen is
    * the first thing you want to see; the actions come after. Changing the kitchen —
    * its name, who's in it, what it owns — lives on its settings page (#117), reached
    * by a single quiet link, so this page is about being in the kitchen rather than
    * administering it.
+   *
+   * The list of kitchens is **not** above this page (#119). It is a page you visit on
+   * the rare occasion you want a different kitchen, so "Switch kitchen" sits at the
+   * bottom in the same quiet register as "Settings", never as a back arrow at the top:
+   * a link there would read as a parent you came down from, and this *is* home.
    *
    * Nobody here has a role beyond owner. Everyone in a kitchen owns it — being a
    * guest is something you are at a meal, not in a room — so the members render
@@ -31,16 +38,14 @@
 
 <div class="pt-48 pb-16">
   <Panel>
-    <a href="/kitchens" class="text-sm text-stone-500 underline">← Kitchens</a>
-
     {#if status === "error" || (status === "ready" && !kitchen)}
-      <p class="mt-4 text-sm text-stone-600">
+      <p class="text-sm text-stone-600">
         {error ?? "Couldn't open this kitchen."}
       </p>
     {:else if status === "pending" || !kitchen}
-      <div class="mt-4"><Skeleton /></div>
+      <Skeleton />
     {:else}
-      <h1 class="font-display mt-3 text-2xl font-medium text-stone-900">
+      <h1 class="font-display text-2xl font-medium text-stone-900">
         {kitchen.name}
       </h1>
 
@@ -55,12 +60,18 @@
         <Button onclick={onPlan} dot="pesto">Let's cook!</Button>
       </div>
 
-      <div class="mt-8">
+      <div class="mt-8 flex gap-5">
         <a
           href="/kitchens/{kitchen.id}/settings"
           class="text-sm text-stone-500 underline hover:text-stone-700"
         >
           Settings
+        </a>
+        <a
+          href="/kitchens"
+          class="text-sm text-stone-500 underline hover:text-stone-700"
+        >
+          Switch kitchen
         </a>
       </div>
     {/if}

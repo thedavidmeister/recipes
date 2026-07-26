@@ -14,6 +14,12 @@
    * after them, so a list with nothing in it is not a thing that happens. The one at
    * the top is that kitchen — the one the app works in until you open another.
    *
+   * This page is **not** home, and nothing may present it as the parent of a kitchen
+   * (#119). Everyone lands in their primary kitchen; most people have one and never
+   * come here. It is where you go on the rare occasion you want a different kitchen —
+   * so it is reached from a quiet "Switch kitchen" at the *bottom* of a kitchen, and
+   * a kitchen page never carries a back-link up to it.
+   *
    * One list, because there is one kind of kitchen. A kitchen you were invited into is
    * as much yours as the one you made: everyone in it is an owner of it, and being a
    * guest is something you are at a *meal*, not in a room.

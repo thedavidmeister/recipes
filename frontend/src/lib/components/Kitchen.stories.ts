@@ -10,7 +10,11 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** The owners under the title, the start-a-meal action, and the quiet settings link. */
+/**
+ * The owners under the title, the start-a-meal action, and the two quiet links at the
+ * bottom — settings, and the switch to another kitchen. Nothing sits above the title:
+ * this page is where you land, so there is no list to go "back" to (#119).
+ */
 export const Ready: Story = {
   args: {
     status: "ready",
