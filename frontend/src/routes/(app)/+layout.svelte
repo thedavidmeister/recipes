@@ -287,7 +287,13 @@
   {/if}
 
   <div class="mx-auto max-w-2xl px-4 pb-16">
-    <!-- Account links: chrome, sitting above the page content. -->
+    <!--
+      Account links: chrome, sitting above the page content. The `kitchens` link
+      belongs here and nowhere else. It is a peer of `health` and `Sign out` — the
+      same row on every page of the app, including ones no kitchen is above — so it
+      reads as a utility rather than a parent. A kitchen page states the same
+      destination in its own words, quietly, at the bottom: "Switch kitchen".
+    -->
     <div class="flex justify-end gap-3 py-2 text-sm">
       {#if session.data?.username}
         <span class="text-stone-500">@{session.data.username}</span>
