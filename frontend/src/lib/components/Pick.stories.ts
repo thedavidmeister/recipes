@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Pick from "./Pick.svelte";
-import { recipeCards } from "$lib/fixtures";
+import { recipeCards, untimedCard } from "$lib/fixtures";
 
 const meta = {
   title: "recipes/Pick",
@@ -13,9 +13,31 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, no consensus yet. */
+/** A card up to vote on, no consensus yet. The badge beside the category is the
+ * recipe's estimated total time (#84): "23 min+", an at-least — untimed steps
+ * count as nothing in the estimate, so the real cook takes longer. */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
+};
+
+/** A recipe the step worker has genuinely not read (`total_seconds` is null in the
+ * corpus, not blanked for the story): no badge at all. Unknown is not instant —
+ * "0 min" would be a lie about the case we know least about — so the card says
+ * nothing about time rather than guessing. */
+export const UntimedRecipe: Story = {
+  args: {
+    status: "swiping",
+    card: untimedCard(),
+    participants: 2,
+    shareUrl: share,
+  },
+};
+
+/** A long one, past the hour: "2 hours 5 min+". Over an hour the badge carries the
+ * remainder rather than counting up in minutes, because almost no real recipe lands
+ * on a whole hour and "125 min+" is arithmetic, not an answer. */
+export const LongRecipe: Story = {
+  args: { status: "swiping", card: cards[3], participants: 2, shareUrl: share },
 };
 
 /** The card a peer surfaced: it is here *because* Mel voted it, so her yes is named

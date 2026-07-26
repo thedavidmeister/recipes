@@ -56,7 +56,9 @@ export async function fetchCard(
   id: string,
 ): Promise<RecipeCard | null> {
   const rs = await turso().execute({
-    sql: "SELECT source, id, title, image, category, area FROM recipes WHERE source = ? AND id = ? LIMIT 1",
+    // Named columns, never `SELECT *` — the row is read by name below, and a
+    // wildcard would hand back whatever order the table happens to have (#109).
+    sql: "SELECT source, id, title, image, category, area, total_seconds FROM recipes WHERE source = ? AND id = ? LIMIT 1",
     args: [source, id],
   });
   const row = rs.rows[0];
@@ -69,6 +71,10 @@ export async function fetchCard(
     image: str(row.image),
     category: str(row.category),
     area: str(row.area),
+    // A peer-injected card carries its time estimate too (#84): a card is a card
+    // however it reached the deck, and one that arrived this way must not silently
+    // lose a field the walk's cards have. `null` stays `null` — unknown, not zero.
+    total_seconds: row.total_seconds == null ? null : Number(row.total_seconds),
   };
 }
 

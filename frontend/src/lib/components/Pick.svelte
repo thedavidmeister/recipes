@@ -4,6 +4,7 @@
   import Panel from "./Panel.svelte";
   import UserName from "./UserName.svelte";
   import { userTint } from "$lib/colour";
+  import { formatEstimate } from "$lib/steps";
   import type { Voter } from "$lib/pick";
   import type { PickStatus, RecipeCard } from "$lib/types";
 
@@ -52,6 +53,14 @@
   const meta = $derived(
     card ? [card.category, card.area].filter(Boolean).join(" · ") : "",
   );
+
+  /**
+   * "How long does this take" as a badge, so it factors into the yes/no at a glance
+   * instead of surfacing after the pick (#84). Null for a recipe nobody has timed:
+   * that is unknown, not instant, so the badge simply is not there — the same
+   * lower-bound honesty the plan lobby states for its cap (#80).
+   */
+  const estimate = $derived(card ? formatEstimate(card.total_seconds) : null);
 </script>
 
 <div class="pt-32 pb-16">
@@ -116,8 +125,20 @@
           <h2 class="font-display text-xl font-medium text-stone-900">
             {card.title}
           </h2>
-          {#if meta}
-            <p class="mt-1 text-sm text-stone-500">{meta}</p>
+          <!-- Supporting information, not the headline: the meal is still the
+               title and the photo. The estimate sits beside the category/area on
+               the same quiet line, and is absent entirely when unknown. -->
+          {#if meta || estimate}
+            <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-stone-500">
+              {#if meta}<span>{meta}</span>{/if}
+              {#if estimate}
+                <span
+                  class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
+                  title="At least this long. Steps we can't time yet count as nothing, so the real cook takes longer."
+                  >{estimate}</span
+                >
+              {/if}
+            </p>
           {/if}
         </div>
       </article>

@@ -114,6 +114,13 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
  * A walk, as `/api/walk` returns it: real TheMealDB meals (ids/images verified
  * against the live corpus), threaded by an ingredient each pair shares. The first
  * stop has no `via` — it is where the wander began. Override for a specific story.
+ *
+ * `total_seconds` is the estimate the card shows (#84), and each one is the value
+ * the live corpus actually holds for that recipe — read out of Turso, not picked to
+ * make a story tidy. A number that merely *looks* right is the same mistake as an
+ * invented id or image: it renders a recipe that does not exist. Every meal on this
+ * walk has been read by the step worker; for the ~10% of the corpus that has not,
+ * see [`untimedCard`].
  */
 export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
   const base: WalkStop[] = [
@@ -127,6 +134,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/wyxwsp1486979827.jpg",
         category: "Chicken",
         area: "India",
+        total_seconds: 1380,
       },
     },
     {
@@ -139,6 +147,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/vwrpps1503068729.jpg",
         category: "Chicken",
         area: "Japanese",
+        total_seconds: 1980,
       },
     },
     {
@@ -151,6 +160,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/wvpsxx1468256321.jpg",
         category: "Chicken",
         area: "Japanese",
+        total_seconds: 3360,
       },
     },
     {
@@ -163,6 +173,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/tvttqv1504640475.jpg",
         category: "Beef",
         area: "Thai",
+        total_seconds: 7500,
       },
     },
     {
@@ -175,6 +186,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
           "https://www.themealdb.com/images/media/meals/sytuqu1511553755.jpg",
         category: "Beef",
         area: "British",
+        total_seconds: 9000,
       },
     },
   ];
@@ -208,6 +220,28 @@ export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
 /** A deck of real recipe cards for the pick swipe view — the walk's meals. */
 export function recipeCards(): RecipeCard[] {
   return walkStops().map((stop) => stop.recipe);
+}
+
+/**
+ * A card the step worker has genuinely not read: `total_seconds` is `null` in the
+ * live corpus, not blanked here to make a story (#84).
+ *
+ * That distinction is the point. Handing a *timed* recipe a `null` would render a
+ * meal the app does not have — the same failure as an invented id or image, and it
+ * misrepresents the state as rarer or commoner than it is. Roughly a tenth of the
+ * corpus is unread at any time (77 of 790 when this was written), so the state is
+ * real and permanent enough to deserve a real record: TheMealDB 53239.
+ */
+export function untimedCard(): RecipeCard {
+  return {
+    source: "themealdb",
+    id: "53239",
+    title: "Bang bang prawn salad",
+    image: "https://www.themealdb.com/images/media/meals/4xcfai1763765676.jpg",
+    category: "Seafood",
+    area: "Vietnamese",
+    total_seconds: null,
+  };
 }
 
 /** The structured readings the base fixture carries — what `buy`/`cook` render (#11). */
