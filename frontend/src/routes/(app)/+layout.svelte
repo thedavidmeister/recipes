@@ -46,8 +46,8 @@
       "/music/buy-3.mp3",
       "/music/buy-4.mp3",
     ],
-    // Their own tracks are still to come; empty until then.
-    cook: [],
+    cook: ["/music/cook-1.mp3", "/music/cook-2.mp3", "/music/cook-3.mp3"],
+    // Its own tracks are still to come; empty until then.
     joy: [],
   };
   function poolFor(pathname: string): string[] {
