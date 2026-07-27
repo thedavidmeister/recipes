@@ -106,41 +106,6 @@ export const TimeCapped: Story = {
   },
 };
 
-/** A plan for a kitchen whose equipment we know (#82): the deck is limited to what
- * that kitchen can make. Stated, not offered — a meal planned in a kitchen is cooked
- * in that kitchen, so there is nothing to turn on and no one's choice to attribute.
- * The honesty about recipes nobody has read for equipment still applies: they are
- * left out too. */
-export const KitchenLimited: Story = {
-  args: {
-    status: "ready",
-    host: true,
-    hostId: "4242",
-    mealType: "dinner",
-    hasKitchen: true,
-    kitchenEquipmentKnown: true,
-    inviteLink: invite,
-    voters: [{ telegram_user_id: "4242", username: "dave" }],
-  },
-};
-
-/** The same plan, for a kitchen nobody has recorded any equipment for (#82). Nothing
- * limits the deck — an unrecorded kitchen is one we have not recorded, never one with
- * no tools, and matching against it would empty the pick. Named as the gap it is,
- * alongside the one action that closes it. */
-export const KitchenEquipmentUnknown: Story = {
-  args: {
-    status: "ready",
-    host: true,
-    hostId: "4242",
-    mealType: "dinner",
-    hasKitchen: true,
-    kitchenEquipmentKnown: false,
-    inviteLink: invite,
-    voters: [{ telegram_user_id: "4242", username: "dave" }],
-  },
-};
-
 /** A guest in a capped plan sees the bound they will be swiping within — shown,
  * not settable: the cap is the host's call (#80). */
 export const GuestSeesTheCap: Story = {

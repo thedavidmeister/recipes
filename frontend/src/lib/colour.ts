@@ -48,36 +48,42 @@ export const USER_COLOURS = [
     dot: "bg-pesto-500",
     tint: "bg-pesto-100",
     accent: "accent-pesto-500",
+    edge: "border-pesto-500",
   },
   {
     token: "plum",
     dot: "bg-plum-500",
     tint: "bg-plum-100",
     accent: "accent-plum-500",
+    edge: "border-plum-500",
   },
   {
     token: "paprika",
     dot: "bg-paprika-500",
     tint: "bg-paprika-100",
     accent: "accent-paprika-500",
+    edge: "border-paprika-500",
   },
   {
     token: "honey",
     dot: "bg-honey-500",
     tint: "bg-honey-100",
     accent: "accent-honey-500",
+    edge: "border-honey-500",
   },
   {
     token: "sea",
     dot: "bg-sea-500",
     tint: "bg-sea-100",
     accent: "accent-sea-500",
+    edge: "border-sea-500",
   },
   {
     token: "berry",
     dot: "bg-berry-500",
     tint: "bg-berry-100",
     accent: "accent-berry-500",
+    edge: "border-berry-500",
   },
 ] as const;
 
@@ -131,4 +137,18 @@ export function userTint(telegramUserId: string): string {
  */
 export function userAccent(telegramUserId: string): string {
   return slotFor(telegramUserId).accent;
+}
+
+/**
+ * The border class for a user — their own edge, for a control already filled with
+ * their tint.
+ *
+ * A cocoa outline round a fill in somebody else's hue reads as two decisions
+ * arguing. The edge belongs to whoever the fill belongs to. It is reinforcement,
+ * not the boundary that carries the meaning: the control is identified by its
+ * `stone-900` label and its dot, which is what lets the two palest slots wear
+ * their own edge like the other four rather than borrowing one.
+ */
+export function userEdge(telegramUserId: string): string {
+  return slotFor(telegramUserId).edge;
 }

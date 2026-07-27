@@ -457,8 +457,6 @@
     mealType={lobby?.meal_type}
     additions={lobby?.additions}
     cap={lobby?.max_total_seconds ?? null}
-    hasKitchen={!!lobby?.kitchen_id}
-    kitchenEquipmentKnown={lobby?.kitchen_equipment_known ?? false}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     hostId={lobby?.host}
     inviteLink={page.url.href}

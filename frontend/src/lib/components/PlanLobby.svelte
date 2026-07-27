@@ -11,7 +11,7 @@
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
-  import { userColour, userTint } from "$lib/colour";
+  import { userColour, userEdge, userTint } from "$lib/colour";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -51,11 +51,9 @@
     cap?: number | null;
     /** Whether this plan is for a kitchen (#72). The deck is always limited to what
      * that kitchen can make (#82), so this decides whether there is anything to say. */
-    hasKitchen?: boolean;
     /** Whether we know what that kitchen owns (#82). Not a setting anyone chose:
      * `false` means its equipment is unrecorded — a gap, not a claim that it owns
      * nothing — so nothing limits the deck. */
-    kitchenEquipmentKnown?: boolean;
     /** The shareable URL that seats whoever opens it. */
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
@@ -83,8 +81,6 @@
     mealType,
     additions = [],
     cap = null,
-    hasKitchen = false,
-    kitchenEquipmentKnown = false,
     inviteLink,
     host = false,
     hostId,
@@ -142,7 +138,7 @@
    */
   const chosenPill = $derived(
     hostId
-      ? `border-cocoa-500 border text-stone-900 ${userTint(hostId)}`
+      ? `border ${userEdge(hostId)} text-stone-900 ${userTint(hostId)}`
       : "border-cocoa-500 border text-stone-900",
   );
 
@@ -292,29 +288,6 @@
           >
           Recipes estimated over this are left out. Estimates are a lower bound,
           and recipes we can't time yet still show.
-        </p>
-      {/if}
-
-      <!-- What the kitchen can make (#82). A statement, not a control: a meal
-           planned in a kitchen is cooked in that kitchen, so there is nothing to
-           turn on and nobody's choice to attribute — which is why this sits
-           outside the host/guest split and wears no tint.
-
-           The two states are a fact and the absence of one. With equipment
-           recorded, the deck is limited and the honesty about unread recipes
-           still applies. With nothing recorded, the deck is whole — because we
-           do not know what the kitchen has, not because it has nothing — and
-           saying so is what turns a silent gap into something fixable. -->
-      {#if hasKitchen}
-        <p class="mt-6 text-sm text-stone-600">
-          {#if kitchenEquipmentKnown}
-            Only recipes this kitchen has the tools for. Recipes we haven't read
-            for equipment yet are left out too, so this is narrower than what you
-            could really cook.
-          {:else}
-            Every recipe is in the deck: we don't know what this kitchen has yet.
-            Add its equipment and picks will stick to what you can actually make.
-          {/if}
         </p>
       {/if}
 

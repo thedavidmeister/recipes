@@ -387,13 +387,6 @@ pub struct LobbyView {
     /// Whether we know what this plan's kitchen owns (#82) — i.e. whether it has any
     /// equipment recorded at all.
     ///
-    /// Not a setting anyone chose: the walk is *always* limited to what the kitchen can
-    /// make, so this reports whether that limit is in force. `false` means the kitchen's
-    /// equipment is unrecorded, which is a gap in what we know rather than a claim that
-    /// it owns nothing, so the deck is unlimited (see [`crate::walk`]). The lobby states
-    /// which of the two the room is swiping in — a guest wondering where half the
-    /// recipes went deserves an answer on the page rather than a theory.
-    pub kitchen_equipment_known: bool,
     pub voters: Vec<Voter>,
     /// Members of the plan's kitchen who are not yet deciding — the host can seat any
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
@@ -1052,14 +1045,6 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         anyhow::anyhow!("pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}")
     })?;
     let max_total_seconds: Option<i64> = row.get(5)?;
-    // Whether the walk's kitchen limit (#82) is in force, which is not a stored choice
-    // but a consequence of whether anyone has recorded what the kitchen owns. Read here
-    // rather than derived by the client, so the lobby and the walk cannot disagree about
-    // the deck everyone is looking at.
-    let kitchen_equipment_known = match &kitchen_id {
-        Some(kid) => !crate::kitchens::equipment_of(conn, kid).await?.is_empty(),
-        None => false,
-    };
 
     let mut vrows = conn
         .query(
@@ -1106,7 +1091,6 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         host,
         started: started_at.is_some(),
         max_total_seconds,
-        kitchen_equipment_known,
         voters,
         candidates,
     }))
@@ -2091,71 +2075,6 @@ mod tests {
         )
         .await
         .unwrap();
-    }
-
-    /// The lobby states whether the walk's kitchen limit is in force (#82), and it is a
-    /// fact rather than a setting: a kitchen with equipment recorded limits the deck; a
-    /// kitchen with nothing recorded, or no kitchen at all, does not — because nothing
-    /// recorded means unknown, never "owns nothing".
-    #[tokio::test]
-    async fn the_lobby_says_whether_the_kitchen_limit_is_in_force() {
-        let conn = conn().await;
-        let stocked = kitchen(&conn, &["knife"]).await;
-        let bare = kitchen(&conn, &[]).await;
-        plan_for(&conn, "stocked", Some(&stocked)).await;
-        plan_for(&conn, "bare", Some(&bare)).await;
-        plan_for(&conn, "kitchenless", None).await;
-
-        async fn known(conn: &Connection, channel: &str) -> bool {
-            load_lobby(conn, channel)
-                .await
-                .unwrap()
-                .unwrap()
-                .kitchen_equipment_known
-        }
-        assert!(
-            known(&conn, "stocked").await,
-            "recorded equipment limits the deck"
-        );
-        assert!(
-            !known(&conn, "bare").await,
-            "nothing recorded is unknown, not empty"
-        );
-        assert!(
-            !known(&conn, "kitchenless").await,
-            "no kitchen, nothing to limit by"
-        );
-    }
-
-    /// It tracks the kitchen rather than the plan: stocking a kitchen mid-lobby brings
-    /// the limit into force, because what a kitchen owns is a fact about the world and
-    /// not a setting frozen onto this plan.
-    #[tokio::test]
-    async fn the_limit_follows_the_kitchen_not_the_plan() {
-        let conn = conn().await;
-        let kid = kitchen(&conn, &[]).await;
-        plan_for(&conn, "c", Some(&kid)).await;
-        assert!(
-            !load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .kitchen_equipment_known
-        );
-
-        conn.execute(
-            "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, 'wok')",
-            libsql::params![kid],
-        )
-        .await
-        .unwrap();
-        assert!(
-            load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .kitchen_equipment_known
-        );
     }
 
     /// The walk's read carries the plan's kitchen unconditionally — there is no flag to

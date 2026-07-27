@@ -1890,14 +1890,6 @@ mod tests {
             3,
             "unknown equipment must not empty the deck"
         );
-        // And the lobby says which of the two states the room is in, rather than
-        // leaving the wider deck unexplained.
-        let res = app
-            .clone()
-            .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
-            .await
-            .unwrap();
-        assert_eq!(body_json(res).await["kitchen_equipment_known"], false);
 
         // Record one thing, and the same plan narrows immediately.
         let kitchen = body_json(
@@ -1920,11 +1912,6 @@ mod tests {
         let ids = walked(&app, &cookie, &bare).await;
         assert_eq!(ids.len(), 1, "now limited to what it can make: {ids:?}");
         assert!(ids.contains("simple"));
-        let res = app
-            .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
-            .await
-            .unwrap();
-        assert_eq!(body_json(res).await["kitchen_equipment_known"], true);
     }
 
     /// A plan started outside a kitchen has nothing to match against, so it walks the
