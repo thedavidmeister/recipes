@@ -87,10 +87,18 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     // stored column always matches the `steps` beside it. `None` (→ NULL) when there is
     // no timing signal (un-read, or nothing timed): absence, not a wrong `0`.
     let total_seconds = recipe.total_seconds().map(i64::from);
+    // The equipment reading (#81) `derive` has just reattached. Migration 0014 added
+    // the column and `derive` fills the field, but this — the sole writer of `recipes`
+    // — never carried it, so every derived row kept the `'[]'` default and the reading
+    // was recomputed and thrown away on every run. Measured against production before
+    // fixing it: 790/790 recipes had a reading in `equipment_structures`, and 790/790
+    // rows of `recipes` read `'[]'`. Matching a kitchen against a recipe (#82, #83)
+    // reads this column, so it has to actually hold the reading.
+    let equipment = serde_json::to_string(&recipe.equipment)?;
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, equipment, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -109,6 +117,11 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             -- (empty steps) keeps both the stored steps and their stored estimate.
             total_seconds = CASE WHEN json_array_length(excluded.steps) > 0
                                 THEN excluded.total_seconds ELSE recipes.total_seconds END,
+            -- Merge-non-empty like `steps`, and for the sharper reason that `[]` is
+            -- not a reading at all here (#81 refuses an empty one on the way in): an
+            -- incoming `[]` means unread, so it must never blank a reading we hold.
+            equipment    = CASE WHEN json_array_length(excluded.equipment) > 0
+                                THEN excluded.equipment ELSE recipes.equipment END,
             source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
             video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch(),
@@ -128,6 +141,7 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             recipe.video_url.clone(),
             steps,
             total_seconds,
+            equipment,
             run_id,
         ],
     )
@@ -508,6 +522,71 @@ mod tests {
             read_total_seconds(&conn, "1").await,
             None,
             "the estimate follows the steps it summarises, even down to NULL"
+        );
+    }
+
+    async fn read_equipment(conn: &Connection, id: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT equipment FROM recipes WHERE source = 'themealdb' AND id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    fn eq(item: &str) -> recipe_core::equipment::RequiredEquipment {
+        recipe_core::equipment::RequiredEquipment { item: item.into() }
+    }
+
+    /// The derived view actually carries the equipment reading (#81). It did not: the
+    /// column existed and `derive` filled the field, but `upsert` never wrote it, so
+    /// all 790 production rows sat at the `'[]'` default while all 790 readings existed
+    /// in `equipment_structures`. Everything that matches a kitchen against a recipe
+    /// (#82, #83) reads this column, so it is pinned here.
+    #[tokio::test]
+    async fn upsert_stores_the_equipment_reading() {
+        let conn = conn().await;
+        let mut r = sample();
+        r.equipment = vec![eq("knife"), eq("bowl")];
+        upsert(&conn, &r, 1).await.unwrap();
+        assert_eq!(
+            read_equipment(&conn, "1").await,
+            r#"[{"item":"knife"},{"item":"bowl"}]"#
+        );
+    }
+
+    /// A recipe nobody has read for equipment stores `[]` — the degrade-not-die state,
+    /// which reads as "unread", never as "needs nothing" (#81).
+    #[tokio::test]
+    async fn an_unread_recipe_stores_an_empty_reading() {
+        let conn = conn().await;
+        upsert(&conn, &sample(), 1).await.unwrap();
+        assert_eq!(read_equipment(&conn, "1").await, "[]");
+    }
+
+    /// Merge-non-empty for the reading too, and here it matters more than elsewhere:
+    /// `[]` is not a reading at all (#81 refuses one), so an incoming empty must never
+    /// blank a reading we already hold — a category browse would otherwise silently
+    /// un-read the corpus.
+    #[tokio::test]
+    async fn a_partial_does_not_clobber_the_stored_reading() {
+        let conn = conn().await;
+        let mut full = sample();
+        full.equipment = vec![eq("wok")];
+        upsert(&conn, &full, 1).await.unwrap();
+
+        upsert(&conn, &partial(), 1).await.unwrap();
+        assert_eq!(
+            read_equipment(&conn, "1").await,
+            r#"[{"item":"wok"}]"#,
+            "an unread partial must not blank the stored reading"
         );
     }
 }

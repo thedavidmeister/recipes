@@ -795,6 +795,18 @@ async fn load_members(conn: &Connection, kitchen_id: &str) -> anyhow::Result<Vec
     Ok(out)
 }
 
+/// What one kitchen owns, in the corpus's normalised spelling (#81) — for anything
+/// matching a kitchen against recipes that does not want the rest of the kitchen with
+/// it: the pick's can-make bound (#82), and the equipment-to-buy ranking (#83) after
+/// it.
+///
+/// Deliberately a live read rather than something a plan snapshots. What a kitchen owns
+/// is a fact about the world, not a setting on a plan, so remembering the stand mixer
+/// halfway through should be believed at once.
+pub async fn equipment_of(conn: &Connection, kitchen_id: &str) -> anyhow::Result<Vec<String>> {
+    load_items(conn, "kitchen_equipment", kitchen_id).await
+}
+
 async fn load_items(
     conn: &Connection,
     table: &'static str,

@@ -240,6 +240,9 @@ export interface Lobby {
   started: boolean;
   /** The plan's total-time cap in seconds (#80); null = "Any". */
   max_total_seconds: number | null;
+  /** Whether we know what this plan's kitchen owns (#82). The walk is always limited
+   * to what the kitchen can make; `false` means its equipment is unrecorded — a gap,
+   * not a claim that it owns nothing — so nothing limits the deck. */
   voters: Voter[];
   /** Kitchen members not yet deciding — the host can add any without a link (#72). */
   candidates: Voter[];

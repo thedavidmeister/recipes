@@ -384,6 +384,9 @@ pub struct LobbyView {
     /// The plan's total-time cap in seconds (#80); `None` = no cap. Everyone in the
     /// lobby sees the bound they will be swiping within.
     pub max_total_seconds: Option<i64>,
+    /// Whether we know what this plan's kitchen owns (#82) — i.e. whether it has any
+    /// equipment recorded at all.
+    ///
     pub voters: Vec<Voter>,
     /// Members of the plan's kitchen who are not yet deciding — the host can seat any
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
@@ -1159,21 +1162,40 @@ async fn set_time_cap(
     Ok(written > 0)
 }
 
-/// A session's time cap, for the walk (#80): `Ok(None)` is an unknown session,
-/// `Ok(Some(None))` a session with no cap ("Any"), `Ok(Some(Some(secs)))` a capped
-/// one. The two layers are deliberate — an unknown channel must surface as an
-/// error to the caller, never read as "uncapped".
-pub async fn time_cap(conn: &Connection, channel: &str) -> anyhow::Result<Option<Option<i64>>> {
+/// Everything about a plan that bounds the walk it deals (#80, #82).
+///
+/// One struct and one read, rather than a query per facet: the walk resolves the whole
+/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen)
+/// would otherwise be another round trip on the pick page's hot path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanBounds {
+    /// The total-time cap in seconds (#80); `None` = "Any".
+    pub max_total_seconds: Option<i64>,
+    /// The kitchen this plan is for (#72), whose equipment limits what the walk deals
+    /// (#82); `None` for a plan started outside a kitchen. Unconditional — there is no
+    /// flag, because a meal planned in a kitchen is cooked in that kitchen.
+    pub kitchen_id: Option<String>,
+}
+
+/// A session's bounds, for the walk: `Ok(None)` is an unknown session, `Ok(Some(..))`
+/// its bounds. The two layers are deliberate — an unknown channel must surface as an
+/// error to the caller, never read as "unbounded", which would hand a mistyped channel
+/// the whole corpus (#80).
+pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Option<PlanBounds>> {
     let mut rows = conn
         .query(
-            "SELECT max_total_seconds FROM pick_sessions WHERE channel_id = ?1",
+            "SELECT max_total_seconds, kitchen_id
+             FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => Ok(Some(row.get::<Option<i64>>(0)?)),
-        None => Ok(None),
-    }
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(PlanBounds {
+        max_total_seconds: row.get(0)?,
+        kitchen_id: row.get(1)?,
+    }))
 }
 
 /// Point a plan at a different meal (#114), reporting whether it was written. The word
@@ -1979,12 +2001,12 @@ mod tests {
         assert_eq!(view.additions, vec![MealAddition::Dessert]);
     }
 
-    /// The walk's read of the cap distinguishes "no such session" from "no cap":
-    /// an unknown channel must surface as an error, never silently walk uncapped.
+    /// The walk's read of the bounds distinguishes "no such session" from "no bound":
+    /// an unknown channel must surface as an error, never silently walk unbounded.
     #[tokio::test]
-    async fn time_cap_distinguishes_unknown_from_uncapped() {
+    async fn plan_bounds_distinguish_unknown_from_unbounded() {
         let conn = conn().await;
-        assert_eq!(time_cap(&conn, "nope").await.unwrap(), None);
+        assert_eq!(plan_bounds(&conn, "nope").await.unwrap(), None);
         create_session(
             &conn,
             "open",
@@ -1997,7 +2019,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(time_cap(&conn, "open").await.unwrap(), Some(None));
+        assert_eq!(
+            plan_bounds(&conn, "open").await.unwrap(),
+            Some(PlanBounds::default())
+        );
         create_session(
             &conn,
             "capped",
@@ -2010,7 +2035,68 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(time_cap(&conn, "capped").await.unwrap(), Some(Some(7200)));
+        assert_eq!(
+            plan_bounds(&conn, "capped").await.unwrap(),
+            Some(PlanBounds {
+                max_total_seconds: Some(7200),
+                kitchen_id: None,
+            })
+        );
+    }
+
+    // ---- the kitchen limit (#82) -------------------------------------------
+
+    /// A kitchen, optionally with equipment recorded against it.
+    async fn kitchen(conn: &Connection, items: &[&str]) -> String {
+        let kid = crate::kitchens::create_kitchen(conn, "Home", "alice")
+            .await
+            .unwrap();
+        for item in items {
+            conn.execute(
+                "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, ?2)",
+                libsql::params![kid.clone(), *item],
+            )
+            .await
+            .unwrap();
+        }
+        kid
+    }
+
+    async fn plan_for(conn: &Connection, channel: &str, kitchen_id: Option<&str>) {
+        create_session(
+            conn,
+            channel,
+            "alice",
+            None,
+            kitchen_id,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The walk's read carries the plan's kitchen unconditionally — there is no flag to
+    /// consult, because a meal planned in a kitchen is cooked in that kitchen (#82).
+    #[tokio::test]
+    async fn plan_bounds_carry_the_plans_kitchen() {
+        let conn = conn().await;
+        let kid = kitchen(&conn, &["knife"]).await;
+        plan_for(&conn, "in-kitchen", Some(&kid)).await;
+        plan_for(&conn, "kitchenless", None).await;
+
+        assert_eq!(
+            plan_bounds(&conn, "in-kitchen").await.unwrap(),
+            Some(PlanBounds {
+                max_total_seconds: None,
+                kitchen_id: Some(kid),
+            })
+        );
+        assert_eq!(
+            plan_bounds(&conn, "kitchenless").await.unwrap(),
+            Some(PlanBounds::default())
+        );
     }
 
     // ---- buy checklist (#131) ----------------------------------------------

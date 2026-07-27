@@ -1766,6 +1766,174 @@ mod tests {
         assert_eq!(stops.as_array().unwrap().len(), 3);
     }
 
+    /// A kitchen holding `items`, and a plan for it, end to end through the router —
+    /// returns the plan's channel id (#82).
+    async fn kitchen_plan(
+        app: &Router,
+        conn: &libsql::Connection,
+        cookie: &str,
+        items: &[&str],
+    ) -> String {
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/kitchens",
+                Some(cookie),
+                r#"{"name":"Home"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let kitchen = body_json(res).await["id"].as_str().unwrap().to_owned();
+        // Straight in, because `POST /kitchens/{id}/equipment` only admits names the
+        // corpus asks for and this fixture's corpus is written directly too.
+        for item in items {
+            conn.execute(
+                "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, ?2)",
+                libsql::params![kitchen.clone(), *item],
+            )
+            .await
+            .unwrap();
+        }
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(cookie),
+                &format!(r#"{{"kitchen_id":"{kitchen}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// The ids a walk over `channel` deals.
+    async fn walked(
+        app: &Router,
+        cookie: &str,
+        channel: &str,
+    ) -> std::collections::HashSet<String> {
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_json(res).await["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Three recipes: one this kitchen can make, one needing a tool it lacks, one
+    /// nobody has read for equipment.
+    async fn seed_equipment_corpus(conn: &libsql::Connection) {
+        for (id, equipment) in [
+            ("simple", r#"[{"item":"knife"}]"#),
+            ("blender", r#"[{"item":"knife"},{"item":"blender"}]"#),
+            ("unread", "[]"),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, equipment) VALUES ('t', ?1, ?1, ?2)",
+                libsql::params![id, equipment],
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    /// End to end through the router (#82): a plan for a kitchen deals only recipes
+    /// that kitchen has every tool for — no flag, nothing to turn on. A recipe needing
+    /// a tool it lacks never appears, and neither does one nobody has read for
+    /// equipment, which cannot be proven makeable either way.
+    #[tokio::test]
+    async fn a_plans_walk_deals_only_what_its_kitchen_can_make() {
+        let (app, conn) = test_app().await;
+        seed_equipment_corpus(&conn).await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let channel = kitchen_plan(&app, &conn, &cookie, &["knife"]).await;
+
+        let ids = walked(&app, &cookie, &channel).await;
+        assert!(ids.contains("simple"), "every tool owned: {ids:?}");
+        assert!(!ids.contains("blender"), "one tool short: {ids:?}");
+        assert!(!ids.contains("unread"), "not proven makeable: {ids:?}");
+    }
+
+    /// The exception, and the reason it exists (#82): a kitchen with **nothing
+    /// recorded** limits nothing, because that is a gap in what we know and not a claim
+    /// that it owns no tools — the same ruling #81 made when it refused an empty
+    /// reading. Were zero read as a claim, every real user would get an empty pick: the
+    /// only kitchen in production holds zero items.
+    ///
+    /// Stocking the kitchen brings the limit into force on the very next walk, with no
+    /// new plan and nothing to switch on.
+    #[tokio::test]
+    async fn a_kitchen_with_nothing_recorded_limits_nothing() {
+        let (app, conn) = test_app().await;
+        seed_equipment_corpus(&conn).await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let bare = kitchen_plan(&app, &conn, &cookie, &[]).await;
+        assert_eq!(
+            walked(&app, &cookie, &bare).await.len(),
+            3,
+            "unknown equipment must not empty the deck"
+        );
+
+        // Record one thing, and the same plan narrows immediately.
+        let kitchen = body_json(
+            app.clone()
+                .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
+                .await
+                .unwrap(),
+        )
+        .await["kitchen_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        conn.execute(
+            "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, 'knife')",
+            libsql::params![kitchen],
+        )
+        .await
+        .unwrap();
+
+        let ids = walked(&app, &cookie, &bare).await;
+        assert_eq!(ids.len(), 1, "now limited to what it can make: {ids:?}");
+        assert!(ids.contains("simple"));
+    }
+
+    /// A plan started outside a kitchen has nothing to match against, so it walks the
+    /// whole corpus — the same gap, reached a different way.
+    #[tokio::test]
+    async fn a_kitchenless_plan_walks_everything() {
+        let (app, conn) = test_app().await;
+        seed_equipment_corpus(&conn).await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(walked(&app, &cookie, &channel).await.len(), 3);
+    }
+
     /// A walk naming a session that does not exist is refused — never silently
     /// walked uncapped, which would hand a mistyped channel the whole corpus.
     #[tokio::test]

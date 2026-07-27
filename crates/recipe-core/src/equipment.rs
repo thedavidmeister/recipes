@@ -17,6 +17,8 @@
 //! that lists only the obvious machinery is the failure mode to watch for, because a
 //! kitchen missing a knife would then appear able to cook everything.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 /// The one true spelling of an equipment name: trimmed, lowercased, and with runs of
@@ -68,6 +70,54 @@ pub fn validate(equipment: &[RequiredEquipment]) -> Result<(), String> {
     Ok(())
 }
 
+/// What a kitchen holding a given set of equipment can do with one recipe's reading.
+///
+/// The three answers are deliberately distinct, because two of them are facts and the
+/// third is an absence, and collapsing them is how a "you can make this" claim starts
+/// being made about recipes nobody has read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Capability {
+    /// Every item the reading names is held. The reading is complete, so this is a
+    /// proof, not an estimate — nothing else is needed to cook it.
+    CanMake,
+    /// The named items the kitchen does not hold, in the reading's order. Never empty:
+    /// an empty shortfall is [`Capability::CanMake`].
+    Missing(Vec<String>),
+    /// The recipe has no reading. **Not "needs nothing"** — an empty reading is
+    /// *refused* on the way in (#81: a salad still needs a bowl, a knife and a board),
+    /// precisely so that a kitchen owning no knife cannot appear able to cook
+    /// everything. An empty list therefore means unread, and makeability is simply
+    /// unknown.
+    Unread,
+}
+
+/// Assess one recipe's reading against the equipment a kitchen holds.
+///
+/// `owned` is a set of already-[`normalise`]d names — both sides of this comparison
+/// come from the same vocabulary by construction (a kitchen may only own items some
+/// recipe asks for, #81), so this is plain set containment and never a fuzzy match.
+///
+/// This is the whole of the matching rule, in one place, because two features need the
+/// *same* answer from opposite directions: #82 filters a pick to [`Capability::CanMake`],
+/// and #83 ranks equipment to buy by counting the recipes whose [`Capability::Missing`]
+/// is exactly one item. A second implementation of "can this kitchen cook this" would
+/// be a second chance to disagree.
+pub fn capability(required: &[RequiredEquipment], owned: &BTreeSet<String>) -> Capability {
+    if required.is_empty() {
+        return Capability::Unread;
+    }
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|e| !owned.contains(&e.item))
+        .map(|e| e.item.clone())
+        .collect();
+    if missing.is_empty() {
+        Capability::CanMake
+    } else {
+        Capability::Missing(missing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +165,82 @@ mod tests {
     #[test]
     fn an_empty_list_is_well_formed_but_not_a_reading() {
         assert!(validate(&[]).is_ok(), "shape is fine");
+    }
+
+    fn owns(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|i| (*i).to_owned()).collect()
+    }
+
+    /// The proof case: the kitchen holds every item the reading names. A reading is
+    /// complete by construction, so nothing is left to be surprised by at the stove.
+    /// Owning *more* than a recipe asks for changes nothing.
+    #[test]
+    fn holding_every_item_can_make_it() {
+        let needs = [eq("knife"), eq("bowl")];
+        assert_eq!(
+            capability(&needs, &owns(&["knife", "bowl"])),
+            Capability::CanMake
+        );
+        assert_eq!(
+            capability(&needs, &owns(&["knife", "bowl", "wok", "oven"])),
+            Capability::CanMake,
+            "a well-stocked kitchen is not penalised for it"
+        );
+    }
+
+    /// The shortfall is named, in the reading's order, so a caller can say *what* is
+    /// missing rather than only that something is. #83 counts the one-item case.
+    #[test]
+    fn a_shortfall_names_what_is_missing() {
+        let needs = [eq("wok"), eq("knife"), eq("blender")];
+        assert_eq!(
+            capability(&needs, &owns(&["knife"])),
+            Capability::Missing(vec!["wok".into(), "blender".into()])
+        );
+        assert_eq!(
+            capability(&needs, &owns(&["knife", "wok"])),
+            Capability::Missing(vec!["blender".into()]),
+            "one item short — the shape #83 ranks by"
+        );
+    }
+
+    /// An empty kitchen can make nothing, and says so as a shortfall rather than as
+    /// an absence: the recipe *is* read, we simply hold none of it.
+    #[test]
+    fn an_empty_kitchen_is_short_of_everything_not_unread() {
+        assert_eq!(
+            capability(&[eq("knife"), eq("bowl")], &owns(&[])),
+            Capability::Missing(vec!["knife".into(), "bowl".into()])
+        );
+    }
+
+    /// The ruling that matters most (#81): an empty reading is **unread**, never
+    /// "needs nothing". Read the other way, a kitchen holding nothing at all would be
+    /// able to cook every unread recipe — which is exactly the failure the submit
+    /// layer refuses an empty reading to prevent.
+    #[test]
+    fn an_empty_reading_is_unread_not_makeable() {
+        assert_eq!(capability(&[], &owns(&[])), Capability::Unread);
+        assert_eq!(
+            capability(&[], &owns(&["knife", "wok"])),
+            Capability::Unread,
+            "and no amount of equipment turns an absent reading into a proof"
+        );
+    }
+
+    /// Both sides come from one vocabulary (#81), so matching is containment and
+    /// nothing else — a differently-spelled name is a different item, loudly, rather
+    /// than a near-match quietly counted as owned.
+    #[test]
+    fn matching_is_containment_over_one_vocabulary() {
+        assert_eq!(
+            capability(&[eq("frying pan")], &owns(&["Frying Pan"])),
+            Capability::Missing(vec!["frying pan".into()])
+        );
+        assert_eq!(
+            capability(&[eq("skillet")], &owns(&["frying pan"])),
+            Capability::Missing(vec!["skillet".into()]),
+            "no synonym guessing here either — see `normalise`"
+        );
     }
 }

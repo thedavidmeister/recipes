@@ -11,7 +11,7 @@
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
-  import { userColour, userTint } from "$lib/colour";
+  import { userColour, userEdge, userTint } from "$lib/colour";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -49,6 +49,11 @@
     additions?: MealAddition[];
     /** The plan's total-time cap in seconds (#80); null = "Any". */
     cap?: number | null;
+    /** Whether this plan is for a kitchen (#72). The deck is always limited to what
+     * that kitchen can make (#82), so this decides whether there is anything to say. */
+    /** Whether we know what that kitchen owns (#82). Not a setting anyone chose:
+     * `false` means its equipment is unrecorded — a gap, not a claim that it owns
+     * nothing — so nothing limits the deck. */
     /** The shareable URL that seats whoever opens it. */
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
@@ -133,7 +138,7 @@
    */
   const chosenPill = $derived(
     hostId
-      ? `border-cocoa-500 border text-stone-900 ${userTint(hostId)}`
+      ? `border ${userEdge(hostId)} text-stone-900 ${userTint(hostId)}`
       : "border-cocoa-500 border text-stone-900",
   );
 
