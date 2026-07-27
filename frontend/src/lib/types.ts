@@ -188,7 +188,7 @@ export type BuyStatus = "pending" | "error" | "ready";
 /**
  * A consensus recipe from a pick, with the ingredients to buy for it. `buy` is
  * the arc after `pick` (#36): what the group agreed on, and what it needs.
- * `source`/`id` key the persisted checklist (what's already in the basket).
+ * `source`/`id` key the persisted checklist (what you already have).
  *
  * Ingredients are the structured reading (#11) — `item` + measured `amount`, never
  * the raw measure. `buy` shows what to get and how much; preparation ("finely

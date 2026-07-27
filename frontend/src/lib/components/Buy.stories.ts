@@ -23,7 +23,7 @@ const kit = { telegram_user_id: "3141", username: "kit" }; // honey
 const sam = { telegram_user_id: "8080", username: "sam" }; // sea
 const jo = { telegram_user_id: "9317", username: null }; // berry
 
-/** The shopping checklist for the picked recipe — two lines already in a basket,
+/** The shopping checklist for the picked recipe — two lines already got,
  * each wearing the colour of whoever got it (#131). */
 export const Ready: Story = {
   args: {

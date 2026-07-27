@@ -13,9 +13,8 @@
    *
    * The step after `pick` — what the group agreed on, and what it needs. Each line
    * ticks off as you shop, and a ticked line is *somebody's*: it wears the colour
-   * of whoever got it and says their name (#131/#145), so a group in a supermarket
-   * can see at a glance what is already in a basket and whose. Every state is a
-   * story.
+   * of whoever got it and says their name (#131/#145), so a group shopping apart
+   * can see at a glance what is already got and whose. Every state is a story.
    *
    * Each line is the structured reading (#11): the `item` to get, and how much —
    * the measured `amount`, or the `note` when a line states no quantity ("for
@@ -27,11 +26,15 @@
    * be used unconditionally, including the two too pale to be a boundary on their
    * own (see `$lib/colour`).
    *
-   * A finished list says so and offers the next leg of the arc (#132). The way
-   * onward sits *after* the list, where the shop ends — the same place the kitchen
-   * and the lobby put theirs, and the direction the page is read in. The arc in the
-   * `Nav` is left exactly as it was: it draws where you have *been*, and a full
-   * basket is not a cook you have done. It never blocked `cook` either, so lighting
+   * A finished list says so and offers the next leg of the arc (#132). It is said
+   * as *everything's in the kitchen* rather than in a basket: a tick means you have
+   * the thing, and plenty of them were never bought — the salt was in the cupboard,
+   * and once the pantry pre-ticks what a kitchen already holds (#156) a list can be
+   * finished without anyone shopping at all. The way onward sits *after* the list,
+   * the same place the kitchen and the lobby put theirs, and the direction the page
+   * is read in. The arc in the `Nav` is left exactly as it was: it draws where you
+   * have *been*, and a stocked kitchen is not a cook you have done. It never blocked
+   * `cook` either, so lighting
    * that stop would remove no obstacle — it would only restate this invitation
    * further from the tick that earned it. The button carries `cook`'s paprika dot
    * instead, so the tie to the arc is said in the palette rather than by moving a
@@ -174,7 +177,7 @@
       </div>
     {/if}
     <p class="mb-3 text-sm text-stone-500">
-      {ticked} of {recipe.ingredients.length} in the basket
+      {ticked} of {recipe.ingredients.length} in the kitchen
       {#if !shared}
         <!-- Said plainly rather than implied: a private list that looks shared is
              how two people both come home with the coriander. -->
@@ -229,19 +232,7 @@
            list finish rather than only find it on the next sweep. -->
       <div class="mt-6" role="status">
         <Notice>
-          <p class="font-display text-stone-900">Everything's in the basket.</p>
-          <p class="mt-1 text-sm text-stone-600">
-            {#if shared}
-              <!-- A property of the meal, not of whoever tapped last: anyone
-                   looking at this list sees it, and anyone can walk on. -->
-              That's the whole list — whoever's ready can start cooking.
-            {:else}
-              <!-- Said as small as it is. There is no group behind this list, so
-                   it claims none: it is done as far as this device knows. -->
-              That's the whole list, as this device has it — nobody else has ticked
-              along.
-            {/if}
-          </p>
+          <p class="font-display text-stone-900">Everything's in the kitchen.</p>
           <div class="mt-6">
             <Button href="/cook" dot="paprika">Let's cook!</Button>
           </div>
