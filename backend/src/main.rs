@@ -262,7 +262,6 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
-        .route("/session/{channel}/can-make", post(session::set_can_make))
         // The meal's shopping checklist (#131) — read by anyone holding the channel
         // id (like the lobby it belongs to), written only by the people deciding it.
         .route(
@@ -1767,8 +1766,8 @@ mod tests {
         assert_eq!(stops.as_array().unwrap().len(), 3);
     }
 
-    /// A kitchen with `items` in it, and a plan for it, end to end through the
-    /// router — returns the plan's channel id (#82).
+    /// A kitchen holding `items`, and a plan for it, end to end through the router —
+    /// returns the plan's channel id (#82).
     async fn kitchen_plan(
         app: &Router,
         conn: &libsql::Connection,
@@ -1835,13 +1834,9 @@ mod tests {
             .collect()
     }
 
-    /// End to end through the router (#82): a plan bounded to its kitchen deals only
-    /// recipes it has every tool for, and — the decision this feature turns on —
-    /// leaves out the one nobody has read for equipment. Lifting the bound deals the
-    /// whole corpus again, unread recipe included.
-    #[tokio::test]
-    async fn a_kitchen_bound_walk_deals_only_what_it_can_make() {
-        let (app, conn) = test_app().await;
+    /// Three recipes: one this kitchen can make, one needing a tool it lacks, one
+    /// nobody has read for equipment.
+    async fn seed_equipment_corpus(conn: &libsql::Connection) {
         for (id, equipment) in [
             ("simple", r#"[{"item":"knife"}]"#),
             ("blender", r#"[{"item":"knife"},{"item":"blender"}]"#),
@@ -1854,164 +1849,102 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    /// End to end through the router (#82): a plan for a kitchen deals only recipes
+    /// that kitchen has every tool for — no flag, nothing to turn on. A recipe needing
+    /// a tool it lacks never appears, and neither does one nobody has read for
+    /// equipment, which cannot be proven makeable either way.
+    #[tokio::test]
+    async fn a_plans_walk_deals_only_what_its_kitchen_can_make() {
+        let (app, conn) = test_app().await;
+        seed_equipment_corpus(&conn).await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let cookie = format!("recipes_session={token}");
         let channel = kitchen_plan(&app, &conn, &cookie, &["knife"]).await;
-        let can_make = format!("/api/session/{channel}/can-make");
-
-        // Unbounded to begin with — the default, so nothing is hidden from anyone who
-        // never asked for this.
-        assert_eq!(walked(&app, &cookie, &channel).await.len(), 3);
-
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &can_make,
-                Some(&cookie),
-                r#"{"require_kitchen_equipment":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(body_json(res).await["require_kitchen_equipment"], true);
 
         let ids = walked(&app, &cookie, &channel).await;
         assert!(ids.contains("simple"), "every tool owned: {ids:?}");
         assert!(!ids.contains("blender"), "one tool short: {ids:?}");
         assert!(!ids.contains("unread"), "not proven makeable: {ids:?}");
-
-        // Lifted, and the deck is whole again.
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &can_make,
-                Some(&cookie),
-                r#"{"require_kitchen_equipment":false}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(walked(&app, &cookie, &channel).await.len(), 3);
     }
 
-    /// The bound is the host's to set, only while the lobby is open, and only where it
-    /// could mean anything (#82) — a guest cannot narrow someone else's plan, a
-    /// started plan cannot have the corpus moved under it, and a plan with no kitchen
-    /// or an unstocked one is told why rather than handed an empty deck.
+    /// The exception, and the reason it exists (#82): a kitchen with **nothing
+    /// recorded** limits nothing, because that is a gap in what we know and not a claim
+    /// that it owns no tools — the same ruling #81 made when it refused an empty
+    /// reading. Were zero read as a claim, every real user would get an empty pick: the
+    /// only kitchen in production holds zero items.
+    ///
+    /// Stocking the kitchen brings the limit into force on the very next walk, with no
+    /// new plan and nothing to switch on.
     #[tokio::test]
-    async fn the_kitchen_bound_is_guarded_on_every_side() {
+    async fn a_kitchen_with_nothing_recorded_limits_nothing() {
         let (app, conn) = test_app().await;
-        conn.execute(
-            r#"INSERT INTO recipes (source, id, title, equipment)
-               VALUES ('t', 'r', 'r', '[{"item":"knife"}]')"#,
-            (),
-        )
-        .await
-        .unwrap();
-        let host = auth::issue_test_session(&conn, "host").await;
-        let guest = auth::issue_test_session(&conn, "guest").await;
-        let hcookie = format!("recipes_session={host}");
-        let gcookie = format!("recipes_session={guest}");
-        let on = r#"{"require_kitchen_equipment":true}"#;
+        seed_equipment_corpus(&conn).await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
 
-        // A plan with no kitchen has nothing to match against.
+        let bare = kitchen_plan(&app, &conn, &cookie, &[]).await;
+        assert_eq!(
+            walked(&app, &cookie, &bare).await.len(),
+            3,
+            "unknown equipment must not empty the deck"
+        );
+        // And the lobby says which of the two states the room is in, rather than
+        // leaving the wider deck unexplained.
         let res = app
             .clone()
-            .oneshot(json_post("/api/session", Some(&hcookie), "{}"))
+            .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
             .await
             .unwrap();
-        let kitchenless = body_json(res).await["channel_id"]
+        assert_eq!(body_json(res).await["kitchen_equipment_known"], false);
+
+        // Record one thing, and the same plan narrows immediately.
+        let kitchen = body_json(
+            app.clone()
+                .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
+                .await
+                .unwrap(),
+        )
+        .await["kitchen_id"]
             .as_str()
             .unwrap()
             .to_owned();
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{kitchenless}/can-make"),
-                Some(&hcookie),
-                on,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(body_json(res).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("not for a kitchen"));
+        conn.execute(
+            "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, 'knife')",
+            libsql::params![kitchen],
+        )
+        .await
+        .unwrap();
 
-        // A kitchen that has listed nothing could make nothing, and says so.
-        let bare = kitchen_plan(&app, &conn, &hcookie, &[]).await;
+        let ids = walked(&app, &cookie, &bare).await;
+        assert_eq!(ids.len(), 1, "now limited to what it can make: {ids:?}");
+        assert!(ids.contains("simple"));
         let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{bare}/can-make"),
-                Some(&hcookie),
-                on,
-            ))
+            .oneshot(get_req(&format!("/api/session/{bare}"), &cookie))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(body_json(res).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("has not listed any equipment"));
-
-        // A stocked kitchen, but not by a guest.
-        let channel = kitchen_plan(&app, &conn, &hcookie, &["knife"]).await;
-        let can_make = format!("/api/session/{channel}/can-make");
-        let res = app
-            .clone()
-            .oneshot(json_post(&can_make, Some(&gcookie), on))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-
-        // The host, lobby open → it lands.
-        let res = app
-            .clone()
-            .oneshot(json_post(&can_make, Some(&hcookie), on))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-
-        // Start the plan; frozen now, even for the host.
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/start"),
-                Some(&hcookie),
-                "{}",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let res = app
-            .oneshot(json_post(
-                &can_make,
-                Some(&hcookie),
-                r#"{"require_kitchen_equipment":false}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(res).await["kitchen_equipment_known"], true);
     }
 
-    /// The same refusal at create (#82): a body asking for the bound where it could
-    /// not mean anything is turned down rather than stored and quietly ignored.
+    /// A plan started outside a kitchen has nothing to match against, so it walks the
+    /// whole corpus — the same gap, reached a different way.
     #[tokio::test]
-    async fn creating_a_plan_bound_to_no_kitchen_is_refused() {
+    async fn a_kitchenless_plan_walks_everything() {
         let (app, conn) = test_app().await;
+        seed_equipment_corpus(&conn).await;
         let token = auth::issue_test_session(&conn, "4242").await;
         let cookie = format!("recipes_session={token}");
         let res = app
-            .oneshot(json_post(
-                "/api/session",
-                Some(&cookie),
-                r#"{"require_kitchen_equipment":true}"#,
-            ))
+            .clone()
+            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(walked(&app, &cookie, &channel).await.len(), 3);
     }
 
     /// A walk naming a session that does not exist is refused — never silently

@@ -53,12 +53,12 @@ const MAX_LEN: usize = 30;
 pub struct WalkParams {
     /// Requested number of stops, clamped to `1..=MAX_LEN`. Absent → [`DEFAULT_LEN`].
     len: Option<usize>,
-    /// The pick session this walk feeds (#80, #82). Present, the session's bounds —
-    /// its time cap, and whether it is limited to what its kitchen can make — bound
-    /// the corpus walked; an unknown channel is refused rather than read as
-    /// "unbounded". Absent, the walk is over the whole corpus, as ever. It scopes the
-    /// walk to the plan's bounds — it is not an access check (the session gate already
-    /// authenticated the caller, and a bound is a filter, not a secret).
+    /// The pick session this walk feeds (#80, #82). Present, the session's bounds — its
+    /// time cap, and what its kitchen can make — bound the corpus walked; an unknown
+    /// channel is refused rather than read as "unbounded". Absent, the walk is over the
+    /// whole corpus, as ever. It scopes the walk to the plan's bounds — it is not an
+    /// access check (the session gate already authenticated the caller, and a bound is
+    /// a filter, not a secret).
     channel: Option<String>,
 }
 
@@ -254,9 +254,13 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
 struct Bounds {
     /// The pick session's time cap in seconds (#80); `None` = "Any".
     max_total_seconds: Option<i64>,
-    /// The equipment the plan's kitchen holds (#82), when the plan is limited to what
-    /// it can make; `None` = unlimited. Already normalised (#81), so matching it is
-    /// containment, never a fuzzy compare.
+    /// The equipment the plan's kitchen is recorded as holding (#82). Already
+    /// normalised (#81), so matching it is containment, never a fuzzy compare.
+    ///
+    /// `None` means there is nothing to match against — no kitchen, or a kitchen whose
+    /// equipment nobody has recorded — and the walk is unlimited. Never `Some` of an
+    /// empty set: the two would behave in opposite ways (an empty set excludes
+    /// everything), and only one of them is ever true (see [`resolve_bounds`]).
     owned_equipment: Option<BTreeSet<String>>,
 }
 
@@ -280,10 +284,13 @@ struct Bounds {
 ///   pick outright. Enrichment is an addition, never a gate — a recipe must not vanish
 ///   from the product because a worker has not read it yet.
 ///
-/// # The kitchen bound (#82)
+/// # The kitchen limit (#82)
 ///
-/// A recipe enters the graph only if its equipment reading (#81) is a subset of what
-/// the kitchen owns — [`Capability::CanMake`].
+/// A meal planned in a kitchen is cooked in that kitchen, so this is **not an option
+/// anyone turns on**: whenever there is equipment to match against, a recipe enters the
+/// graph only if its equipment reading (#81) is a subset of what the kitchen holds —
+/// [`Capability::CanMake`]. Nobody should have to ask not to be shown a recipe needing
+/// a blender they do not own.
 ///
 /// **A recipe with no reading is left out**, which is the opposite call to the cap
 /// above, and the difference is what the two filters can *prove*:
@@ -392,9 +399,23 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
 /// hand a mistyped channel the deck the plan asked not to have (#80).
 ///
 /// The kitchen's inventory is read here, per walk, rather than frozen onto the plan:
-/// the *flag* is a plan setting and freezes at start, but what a kitchen owns is a fact
-/// about the world, so remembering the stand mixer should widen the deck immediately
-/// instead of needing a new plan (#82).
+/// what a kitchen owns is a fact about the world, not a setting on this plan, so
+/// remembering the stand mixer widens the deck immediately instead of needing a new
+/// plan (#82).
+///
+/// **A kitchen with nothing recorded limits nothing.** That is the same ruling #81
+/// already made about readings — an empty equipment reading was *refused*, because
+/// "needs nothing" is never true of a recipe; a salad still needs bowls and knives —
+/// applied to the other side of the same comparison. A kitchen with no equipment
+/// recorded is a kitchen **we have not recorded**, not a kitchen with no tools, so
+/// matching against it would prove nothing while excluding everything. Measured: the
+/// only kitchen in production holds zero items, so reading zero as a claim would deal
+/// every real user an empty pick.
+///
+/// It is a **gap, not a preference** (#158). The honest state is "we do not know what
+/// this kitchen has", and the answer to a gap is filling it, not narrowing the product
+/// against it — so the deck stays whole and the lobby says why, rather than leaving a
+/// wider deck unexplained.
 async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bounds, AppError> {
     let Some(channel) = channel else {
         return Ok(Bounds::default());
@@ -405,17 +426,20 @@ async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bound
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
 
-    let owned_equipment = match plan.makeable_in_kitchen.as_deref() {
-        Some(kitchen_id) => Some(
-            state
+    let owned_equipment = match plan.kitchen_id.as_deref() {
+        Some(kitchen_id) => {
+            let owned: BTreeSet<String> = state
                 .with_db(move |conn| async move {
                     crate::kitchens::equipment_of(&conn, kitchen_id).await
                 })
                 .await
                 .map_err(|e| AppError::Internal(e.to_string()))?
                 .into_iter()
-                .collect::<BTreeSet<String>>(),
-        ),
+                .collect();
+            // Nothing recorded collapses to `None` — unlimited — never `Some(empty)`,
+            // which would exclude the whole corpus. See this function's doc.
+            (!owned.is_empty()).then_some(owned)
+        }
         None => None,
     };
     Ok(Bounds {
@@ -425,8 +449,8 @@ async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bound
 }
 
 /// `GET /api/walk?len=<n>&channel=<pick>` — a fresh variety-first walk over the
-/// corpus, bounded to the pick session's time cap (#80) and, when it asks for it, to
-/// what its kitchen can make (#82), whenever a channel is named.
+/// corpus, bounded to the pick session's time cap (#80) and to what its kitchen can
+/// make (#82) whenever a channel is named.
 ///
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
@@ -934,16 +958,25 @@ mod tests {
         }
     }
 
-    /// The bound under pressure: a kitchen holding nothing can make nothing, and the
-    /// walk says so honestly rather than falling back to the whole corpus. This is
-    /// why the option is off by default and why the endpoint refuses to turn it on
-    /// for an unstocked kitchen — reaching here means someone emptied their kitchen
-    /// mid-plan.
+    /// A kitchen with nothing recorded is represented as *nothing to match against*
+    /// (`None`) and never as an empty set, so it limits nothing — `resolve_bounds`
+    /// collapses the one to the other. Pinned here because the two are one keystroke
+    /// apart and behave in opposite ways: an empty set excludes the entire corpus.
     #[tokio::test]
-    async fn an_empty_kitchen_can_make_nothing() {
+    async fn nothing_recorded_is_unlimited_not_empty() {
         let conn = equipment_conn().await;
-        let corpus = load_corpus(&conn, &owning(&[])).await.unwrap();
-        assert!(ids(&corpus).is_empty());
+        let unlimited = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert_eq!(
+            unlimited.cards.len(),
+            5,
+            "the whole corpus, unread included"
+        );
+
+        let empty_set = load_corpus(&conn, &owning(&[])).await.unwrap();
+        assert!(
+            ids(&empty_set).is_empty(),
+            "which is exactly why an unrecorded kitchen must not arrive as one"
+        );
     }
 
     /// The two bounds compose: over-cap recipes go by time, un-makeable ones by

@@ -14,7 +14,6 @@
     seatMember,
     setAdditions,
     setMealType,
-    setPlanCanMake,
     setPlanCap,
     type ConnStatus,
     type Lobby,
@@ -282,23 +281,6 @@
     }
   }
 
-  /** The host bounds the plan to what the kitchen can make (#82); frozen at start.
-   * The thrown message is the server's own where it has one — "this kitchen has not
-   * listed any equipment yet" is the whole answer, and a generic apology would send
-   * someone hunting a bug instead of going to stock their kitchen. */
-  async function canMakePlan(require: boolean) {
-    try {
-      lobby = await setPlanCanMake(channel, require);
-      deciders = lobby.voters.length;
-      started = lobby.started;
-    } catch (e) {
-      lobbyError =
-        e instanceof Error
-          ? e.message
-          : "Couldn't change what the kitchen can make.";
-    }
-  }
-
   // Who is looking, so the lobby knows whether to offer the start. The layout has
   // already fetched this, so it is a cache read rather than a request.
   const session = createQuery(() => ({
@@ -475,8 +457,8 @@
     mealType={lobby?.meal_type}
     additions={lobby?.additions}
     cap={lobby?.max_total_seconds ?? null}
-    requireKitchenEquipment={lobby?.require_kitchen_equipment ?? false}
     hasKitchen={!!lobby?.kitchen_id}
+    kitchenEquipmentKnown={lobby?.kitchen_equipment_known ?? false}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     hostId={lobby?.host}
     inviteLink={page.url.href}
@@ -486,6 +468,5 @@
     onMealType={chooseMeal}
     onAdditions={chooseAdditions}
     onCap={capPlan}
-    onCanMake={canMakePlan}
   />
 {/if}

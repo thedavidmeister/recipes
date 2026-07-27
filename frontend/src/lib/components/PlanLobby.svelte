@@ -49,11 +49,13 @@
     additions?: MealAddition[];
     /** The plan's total-time cap in seconds (#80); null = "Any". */
     cap?: number | null;
-    /** Whether the plan only surfaces recipes the kitchen has every tool for (#82). */
-    requireKitchenEquipment?: boolean;
-    /** Whether this plan is for a kitchen (#72). The can-make bound is offered only
-     * when it is: without a kitchen there is no equipment to match against. */
+    /** Whether this plan is for a kitchen (#72). The deck is always limited to what
+     * that kitchen can make (#82), so this decides whether there is anything to say. */
     hasKitchen?: boolean;
+    /** Whether we know what that kitchen owns (#82). Not a setting anyone chose:
+     * `false` means its equipment is unrecorded — a gap, not a claim that it owns
+     * nothing — so nothing limits the deck. */
+    kitchenEquipmentKnown?: boolean;
     /** The shareable URL that seats whoever opens it. */
     inviteLink?: string;
     /** Whether the viewer is the one who started the plan. */
@@ -72,9 +74,6 @@
     onAdditions?: (additions: MealAddition[]) => void;
     /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
     onCap?: (cap: number | null) => void;
-    /** Bound the plan to what the kitchen can make, or lift it (#82). Host only,
-     * while the lobby is open. */
-    onCanMake?: (require: boolean) => void;
   }
 
   let {
@@ -84,8 +83,8 @@
     mealType,
     additions = [],
     cap = null,
-    requireKitchenEquipment = false,
     hasKitchen = false,
+    kitchenEquipmentKnown = false,
     inviteLink,
     host = false,
     hostId,
@@ -95,7 +94,6 @@
     onMealType,
     onAdditions,
     onCap,
-    onCanMake,
   }: Props = $props();
 
   /**
@@ -108,16 +106,6 @@
     { label: "30 min", seconds: 1800 },
     { label: "1 hour", seconds: 3600 },
     { label: "2 hours", seconds: 7200 },
-  ];
-
-  /**
-   * The two ways a plan can answer "what can you make?" (#82). A pair of pills
-   * rather than a checkbox, so it reads as one choice from a set like every other
-   * row here — and so the unbounded side is a thing you can see you chose.
-   */
-  const CAN_MAKE: { label: string; require: boolean }[] = [
-    { label: "Anything", require: false },
-    { label: "What we can make", require: true },
   ];
 
   /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */
@@ -287,84 +275,47 @@
             lower bound, and recipes we can't time yet still show.
           </p>
         {/if}
+      {:else if cap !== null}
+        <!-- Guests see the bound they will be swiping within — shown, not
+             settable: the cap is the host's call (#80). -->
+        <p class="mt-6 text-sm text-stone-600">
+          <span
+            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill}"
+          >
+            {#if hostId}
+              <span
+                class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                aria-hidden="true"
+              ></span>
+            {/if}
+            {capLabel(cap)}</span
+          >
+          Recipes estimated over this are left out. Estimates are a lower bound,
+          and recipes we can't time yet still show.
+        </p>
+      {/if}
 
-        <!-- What this kitchen can make (#82): one bound per plan, single-select
-             like the rows above, frozen at start. Offered only for a plan that
-             has a kitchen — without one there is no equipment to match against,
-             and the server refuses it for the same reason.
+      <!-- What the kitchen can make (#82). A statement, not a control: a meal
+           planned in a kitchen is cooked in that kitchen, so there is nothing to
+           turn on and nobody's choice to attribute — which is why this sits
+           outside the host/guest split and wears no tint.
 
-             The note is not a footnote. This bound leaves out recipes nobody has
-             read for equipment yet, so the deck it deals is narrower than what
-             the kitchen could really cook, and saying so is the difference
-             between a filter and a mystery. -->
-        {#if hasKitchen}
-          <p class="mt-6 mb-3 text-xs text-stone-500">What can you make?</p>
-          <div class="flex flex-wrap gap-2">
-            {#each CAN_MAKE as c (c.label)}
-              <button
-                type="button"
-                aria-pressed={requireKitchenEquipment === c.require}
-                onclick={() => onCanMake?.(c.require)}
-                class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {requireKitchenEquipment ===
-                c.require
-                  ? chosenPill
-                  : 'border-stone-300 text-stone-600 border'}"
-              >
-                {#if requireKitchenEquipment === c.require && hostId}
-                  <span
-                    class="size-2 shrink-0 rounded-full {userColour(hostId)}"
-                    aria-hidden="true"
-                  ></span>
-                {/if}
-                {c.label}
-              </button>
-            {/each}
-          </div>
-          {#if requireKitchenEquipment}
-            <p class="mt-2 text-xs text-stone-500">
-              Only recipes this kitchen has every tool for. Recipes we haven't
-              read for equipment yet are left out too, so this is narrower than
-              what you could really cook.
-            </p>
+           The two states are a fact and the absence of one. With equipment
+           recorded, the deck is limited and the honesty about unread recipes
+           still applies. With nothing recorded, the deck is whole — because we
+           do not know what the kitchen has, not because it has nothing — and
+           saying so is what turns a silent gap into something fixable. -->
+      {#if hasKitchen}
+        <p class="mt-6 text-sm text-stone-600">
+          {#if kitchenEquipmentKnown}
+            Only recipes this kitchen has the tools for. Recipes we haven't read
+            for equipment yet are left out too, so this is narrower than what you
+            could really cook.
+          {:else}
+            Every recipe is in the deck: we don't know what this kitchen has yet.
+            Add its equipment and picks will stick to what you can actually make.
           {/if}
-        {/if}
-      {:else}
-        <!-- Guests see the bounds they will be swiping within — shown, not
-             settable: both are the host's call (#80, #82). -->
-        {#if cap !== null}
-          <p class="mt-6 text-sm text-stone-600">
-            <span
-              class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill}"
-            >
-              {#if hostId}
-                <span
-                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
-                  aria-hidden="true"
-                ></span>
-              {/if}
-              {capLabel(cap)}</span
-            >
-            Recipes estimated over this are left out. Estimates are a lower
-            bound, and recipes we can't time yet still show.
-          </p>
-        {/if}
-        {#if requireKitchenEquipment}
-          <p class="mt-6 text-sm text-stone-600">
-            <span
-              class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill}"
-            >
-              {#if hostId}
-                <span
-                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
-                  aria-hidden="true"
-                ></span>
-              {/if}
-              What we can make</span
-            >
-            Only recipes this kitchen has every tool for. Recipes we haven't read
-            for equipment yet are left out too.
-          </p>
-        {/if}
+        </p>
       {/if}
 
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>

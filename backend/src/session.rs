@@ -261,12 +261,6 @@ pub struct CreateBody {
     /// `recipes.total_seconds`, so the backend must understand it.
     #[serde(default)]
     max_total_seconds: Option<i64>,
-    /// Bound the plan to recipes its kitchen can actually make (#82) — every item of
-    /// the recipe's equipment reading (#81) already owned. `false` (the default) is
-    /// the whole corpus. Only meaningful alongside a `kitchen_id`, and asking for it
-    /// without one is refused rather than quietly ignored.
-    #[serde(default)]
-    require_kitchen_equipment: bool,
 }
 
 /// The bounds a time cap must sit in: at least a minute, at most a day.
@@ -290,47 +284,6 @@ fn validate_cap(cap: Option<i64>) -> Result<(), AppError> {
     }
 }
 
-/// Refuse "only what this kitchen can make" (#82) where it could not mean anything.
-///
-/// Two ways it cannot, and both are refused loudly rather than silently downgraded to
-/// an unfiltered plan — an option that reports itself on while doing nothing is worse
-/// than one that will not turn on:
-///
-/// - **No kitchen.** There is no equipment to match against. `kitchen_id` is the only
-///   place a plan says which kitchen it is for, so a kitchenless plan has no answer.
-/// - **A kitchen that has listed nothing.** It can make *nothing*, so the plan would
-///   deal an empty deck with no explanation. The fix is stocking the kitchen, and
-///   saying so here is the only place anyone would find that out.
-///
-/// The second check reads another table, so it is a moment in time: a kitchen emptied
-/// after this passes leaves the plan filtering against nothing. That is a person
-/// undoing their own kitchen mid-plan, and the walk reads the inventory live (#82), so
-/// it corrects itself the moment the equipment goes back.
-async fn validate_can_make(
-    state: &AppState,
-    kitchen_id: Option<&str>,
-    require: bool,
-) -> Result<(), AppError> {
-    if !require {
-        return Ok(());
-    }
-    let Some(kitchen_id) = kitchen_id else {
-        return Err(AppError::BadRequest(
-            "this meal plan is not for a kitchen, so there is no equipment to match against".into(),
-        ));
-    };
-    let owned = state
-        .with_db(move |db| async move { crate::kitchens::equipment_of(&db, kitchen_id).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    if owned.is_empty() {
-        return Err(AppError::BadRequest(
-            "this kitchen has not listed any equipment yet, so it could not make anything".into(),
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 pub struct Created {
     channel_id: String,
@@ -343,12 +296,6 @@ pub async fn create(
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
     validate_cap(body.max_total_seconds)?;
-    validate_can_make(
-        &state,
-        body.kitchen_id.as_deref(),
-        body.require_kitchen_equipment,
-    )
-    .await?;
     // Minted once, *outside* the retryable closure, so every attempt writes the
     // same plan: a re-run after a lost response then hits the primary key and
     // fails honestly instead of minting a second plan (#130).
@@ -370,7 +317,6 @@ pub async fn create(
                 body.meal_type.unwrap_or_default(),
                 &body.additions,
                 body.max_total_seconds,
-                body.require_kitchen_equipment,
             )
             .await?;
             // The host is in their own plan from the moment it exists, so a lobby is
@@ -438,11 +384,16 @@ pub struct LobbyView {
     /// The plan's total-time cap in seconds (#80); `None` = no cap. Everyone in the
     /// lobby sees the bound they will be swiping within.
     pub max_total_seconds: Option<i64>,
-    /// Whether the plan is bounded to what its kitchen can make (#82). Everyone in the
-    /// lobby sees it, for the same reason they see the time cap: it decides what the
-    /// deck holds, and a guest who wondered where half the recipes went deserves an
-    /// answer on the page rather than a theory.
-    pub require_kitchen_equipment: bool,
+    /// Whether we know what this plan's kitchen owns (#82) — i.e. whether it has any
+    /// equipment recorded at all.
+    ///
+    /// Not a setting anyone chose: the walk is *always* limited to what the kitchen can
+    /// make, so this reports whether that limit is in force. `false` means the kitchen's
+    /// equipment is unrecorded, which is a gap in what we know rather than a claim that
+    /// it owns nothing, so the deck is unlimited (see [`crate::walk`]). The lobby states
+    /// which of the two the room is swiping in — a guest wondering where half the
+    /// recipes went deserves an answer on the page rather than a theory.
+    pub kitchen_equipment_known: bool,
     pub voters: Vec<Voter>,
     /// Members of the plan's kitchen who are not yet deciding — the host can seat any
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
@@ -741,70 +692,6 @@ pub async fn set_cap(
     // the read above wins and this changes nothing (see `set_time_cap`).
     let written = state
         .with_db(move |db| async move { set_time_cap(&db, channel, body.max_total_seconds).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    if !written {
-        return Err(AppError::BadRequest(
-            "this meal plan has already started".into(),
-        ));
-    }
-    let view = reload_and_announce(&state, channel).await?;
-    Ok(Json(view))
-}
-
-/// Whether the host is bounding the plan to what the kitchen can make (#82).
-#[derive(Debug, Deserialize)]
-pub struct CanMakeBody {
-    #[serde(default)]
-    require_kitchen_equipment: bool,
-}
-
-/// `POST /api/session/{channel}/can-make` — the host bounds the plan to recipes the
-/// kitchen has every tool for, or lifts that bound.
-///
-/// The same guards as [`set_cap`] and for the same reason — host only, and only while
-/// the lobby is open — plus [`validate_can_make`], because unlike a time cap this one
-/// can be asked for where it could not mean anything.
-///
-/// Which kitchen is never a parameter: `pick_sessions.kitchen_id` already says, so a
-/// second answer here could only disagree with the first.
-pub async fn set_can_make(
-    State(state): State<AppState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(channel): Path<String>,
-    Json(body): Json<CanMakeBody>,
-) -> Result<Json<LobbyView>, AppError> {
-    let channel = channel.as_str();
-    let view = state
-        .with_db(move |db| async move { load_lobby(&db, channel).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
-
-    if view.host != user.telegram_user_id {
-        return Err(AppError::Forbidden(
-            "only whoever started this plan can bound it to the kitchen".into(),
-        ));
-    }
-    if view.started {
-        return Err(AppError::BadRequest(
-            "this meal plan has already started".into(),
-        ));
-    }
-    validate_can_make(
-        &state,
-        view.kitchen_id.as_deref(),
-        body.require_kitchen_equipment,
-    )
-    .await?;
-
-    // Not-started *and* has-a-kitchen ride in the predicate, the same race guard as
-    // `set_time_cap` — the second because turning the bound on for a plan with no
-    // kitchen would leave the walk with nothing to match against (see the migration).
-    let written = state
-        .with_db(move |db| async move {
-            set_require_kitchen_equipment(&db, channel, body.require_kitchen_equipment).await
-        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !written {
@@ -1141,8 +1028,7 @@ async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
 async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
     let mut rows = conn
         .query(
-            "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds,
-                    require_kitchen_equipment
+            "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1166,7 +1052,14 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         anyhow::anyhow!("pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}")
     })?;
     let max_total_seconds: Option<i64> = row.get(5)?;
-    let require_kitchen_equipment: i64 = row.get(6)?;
+    // Whether the walk's kitchen limit (#82) is in force, which is not a stored choice
+    // but a consequence of whether anyone has recorded what the kitchen owns. Read here
+    // rather than derived by the client, so the lobby and the walk cannot disagree about
+    // the deck everyone is looking at.
+    let kitchen_equipment_known = match &kitchen_id {
+        Some(kid) => !crate::kitchens::equipment_of(conn, kid).await?.is_empty(),
+        None => false,
+    };
 
     let mut vrows = conn
         .query(
@@ -1213,7 +1106,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         host,
         started: started_at.is_some(),
         max_total_seconds,
-        require_kitchen_equipment: require_kitchen_equipment != 0,
+        kitchen_equipment_known,
         voters,
         candidates,
     }))
@@ -1232,7 +1125,7 @@ async fn session_exists(conn: &Connection, channel: &str) -> anyhow::Result<bool
 /// Insert a new session. `channel_id` is unique (the primary key).
 ///
 /// The parameter list mirrors the INSERT's column list one-for-one — a struct
-/// here would relabel the same eight values without making any call site
+/// here would relabel the same seven values without making any call site
 /// clearer (the same trade `derive.rs` makes).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_session(
@@ -1244,13 +1137,11 @@ pub async fn create_session(
     meal_type: MealType,
     additions: &[MealAddition],
     max_total_seconds: Option<i64>,
-    require_kitchen_equipment: bool,
 ) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO pick_sessions
-            (channel_id, created_by, filter, kitchen_id, meal_type, additions, max_total_seconds,
-             require_kitchen_equipment)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (channel_id, created_by, filter, kitchen_id, meal_type, additions, max_total_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         libsql::params![
             channel_id,
             created_by,
@@ -1258,8 +1149,7 @@ pub async fn create_session(
             kitchen_id,
             meal_type.as_str(),
             serde_json::to_string(&normalize_additions(additions))?,
-            max_total_seconds,
-            i64::from(require_kitchen_equipment)
+            max_total_seconds
         ],
     )
     .await?;
@@ -1288,45 +1178,19 @@ async fn set_time_cap(
     Ok(written > 0)
 }
 
-/// Bound the plan to what its kitchen can make, or lift that bound (#82), reporting
-/// whether it was written.
-///
-/// Two conditions ride in the predicate rather than only in the handler's earlier read.
-/// `started_at IS NULL` is the same race guard as [`set_time_cap`] — a `start()` landing
-/// between the read and the write must not move the corpus under a plan already being
-/// swiped. `kitchen_id IS NOT NULL` is a stronger claim than a race guard: it is the
-/// invariant that "on" always has a kitchen to match against, kept by the only writes
-/// that can set it, so the walk never meets a plan asking to be filtered by nothing.
-async fn set_require_kitchen_equipment(
-    conn: &Connection,
-    channel: &str,
-    require: bool,
-) -> anyhow::Result<bool> {
-    let written = conn
-        .execute(
-            "UPDATE pick_sessions SET require_kitchen_equipment = ?2
-             WHERE channel_id = ?1 AND started_at IS NULL
-               AND (?2 = 0 OR kitchen_id IS NOT NULL)",
-            libsql::params![channel, i64::from(require)],
-        )
-        .await?;
-    Ok(written > 0)
-}
-
 /// Everything about a plan that bounds the walk it deals (#80, #82).
 ///
 /// One struct and one read, rather than a query per facet: the walk resolves the whole
-/// bound from the channel on every call, and each option added since (#80's cap, now
-/// this) would otherwise be another round trip on the pick page's hot path.
+/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen)
+/// would otherwise be another round trip on the pick page's hot path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanBounds {
     /// The total-time cap in seconds (#80); `None` = "Any".
     pub max_total_seconds: Option<i64>,
-    /// The kitchen whose equipment every dealt recipe must be makeable with (#82);
-    /// `None` = unbounded. Resolved to the id rather than a flag, because a flag would
-    /// leave the caller to re-derive which kitchen — and the invariant that "on" has
-    /// one is kept here, in the one place that reads both columns together.
-    pub makeable_in_kitchen: Option<String>,
+    /// The kitchen this plan is for (#72), whose equipment limits what the walk deals
+    /// (#82); `None` for a plan started outside a kitchen. Unconditional — there is no
+    /// flag, because a meal planned in a kitchen is cooked in that kitchen.
+    pub kitchen_id: Option<String>,
 }
 
 /// A session's bounds, for the walk: `Ok(None)` is an unknown session, `Ok(Some(..))`
@@ -1336,7 +1200,7 @@ pub struct PlanBounds {
 pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Option<PlanBounds>> {
     let mut rows = conn
         .query(
-            "SELECT max_total_seconds, require_kitchen_equipment, kitchen_id
+            "SELECT max_total_seconds, kitchen_id
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1344,23 +1208,9 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let max_total_seconds: Option<i64> = row.get(0)?;
-    let require: i64 = row.get(1)?;
-    let kitchen_id: Option<String> = row.get(2)?;
-    // Every write that can set the flag carries `kitchen_id IS NOT NULL`, so this pair
-    // cannot legitimately disagree. If it somehow does, the row is corrupt and the walk
-    // must not guess which half to believe — the alternatives are silently dealing the
-    // whole corpus to a plan that asked to be narrowed, or silently dealing nothing.
-    let makeable_in_kitchen = match (require != 0, kitchen_id) {
-        (true, Some(id)) => Some(id),
-        (true, None) => anyhow::bail!(
-            "pick_sessions {channel:?} requires kitchen equipment but names no kitchen"
-        ),
-        (false, _) => None,
-    };
     Ok(Some(PlanBounds {
-        max_total_seconds,
-        makeable_in_kitchen,
+        max_total_seconds: row.get(0)?,
+        kitchen_id: row.get(1)?,
     }))
 }
 
@@ -1601,7 +1451,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -1629,19 +1478,9 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(
-            &conn,
-            "c",
-            "4242",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         seat_voter(&conn, "c", "4242").await.unwrap();
 
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
@@ -1670,7 +1509,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -1694,19 +1532,9 @@ mod tests {
     #[tokio::test]
     async fn a_kitchenless_plan_has_no_candidates() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "host",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "host", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
         assert!(load_lobby(&conn, "c")
             .await
@@ -1721,19 +1549,9 @@ mod tests {
     #[tokio::test]
     async fn starting_is_idempotent() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         begin_session(&conn, "c").await.unwrap();
         let first: Option<i64> = {
             let mut rows = conn
@@ -1780,7 +1598,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -1808,19 +1625,9 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         record_vote(&conn, "c", "s", "1", "alice", true)
             .await
             .unwrap();
@@ -1839,19 +1646,9 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
         assert_eq!(participants, 0);
         assert!(rows.is_empty());
@@ -1870,7 +1667,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -1891,7 +1687,6 @@ mod tests {
             MealType::Breakfast,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -1931,19 +1726,9 @@ mod tests {
     #[tokio::test]
     async fn the_meal_type_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         update_meal_type(&conn, "c", MealType::Lunch).await.unwrap();
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(view.meal_type, MealType::Lunch);
@@ -2047,7 +1832,6 @@ mod tests {
                 MealAddition::Drink,
             ],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -2064,19 +1848,9 @@ mod tests {
     #[tokio::test]
     async fn additions_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         update_additions(&conn, "c", &[MealAddition::Side])
             .await
             .unwrap();
@@ -2157,7 +1931,6 @@ mod tests {
             MealType::Dinner,
             &[],
             Some(1800),
-            false,
         )
         .await
         .unwrap();
@@ -2170,7 +1943,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -2186,19 +1958,9 @@ mod tests {
     #[tokio::test]
     async fn the_cap_can_be_set_and_lifted() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         set_time_cap(&conn, "c", Some(3600)).await.unwrap();
         assert_eq!(
             load_lobby(&conn, "c")
@@ -2227,19 +1989,9 @@ mod tests {
     #[tokio::test]
     async fn a_started_plan_refuses_every_lobby_write() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         // Everything is still movable while the lobby is open.
         assert!(set_time_cap(&conn, "c", Some(1800)).await.unwrap());
         assert!(update_meal_type(&conn, "c", MealType::Lunch).await.unwrap());
@@ -2280,7 +2032,6 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
@@ -2297,7 +2048,6 @@ mod tests {
             MealType::Dinner,
             &[],
             Some(7200),
-            false,
         )
         .await
         .unwrap();
@@ -2305,262 +2055,129 @@ mod tests {
             plan_bounds(&conn, "capped").await.unwrap(),
             Some(PlanBounds {
                 max_total_seconds: Some(7200),
-                makeable_in_kitchen: None,
+                kitchen_id: None,
             })
         );
     }
 
-    // ---- the kitchen bound (#82) -------------------------------------------
+    // ---- the kitchen limit (#82) -------------------------------------------
 
-    /// A kitchen with something in it, for the bound to be legal against.
-    async fn stocked_kitchen(conn: &Connection) -> String {
+    /// A kitchen, optionally with equipment recorded against it.
+    async fn kitchen(conn: &Connection, items: &[&str]) -> String {
         let kid = crate::kitchens::create_kitchen(conn, "Home", "alice")
             .await
             .unwrap();
-        conn.execute(
-            "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, 'knife')",
-            libsql::params![kid.clone()],
-        )
-        .await
-        .unwrap();
-        kid
-    }
-
-    /// A plan created bounded to its kitchen reads back that way; one created without
-    /// is unbounded — the default, and where every session from before the column
-    /// existed stays.
-    #[tokio::test]
-    async fn a_plan_carries_its_kitchen_bound_and_defaults_to_off() {
-        let conn = conn().await;
-        let kid = stocked_kitchen(&conn).await;
-        create_session(
-            &conn,
-            "bounded",
-            "alice",
-            None,
-            Some(&kid),
-            MealType::Dinner,
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-        create_session(
-            &conn,
-            "open",
-            "alice",
-            None,
-            Some(&kid),
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            load_lobby(&conn, "bounded")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment
-        );
-        assert!(
-            !load_lobby(&conn, "open")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment
-        );
-    }
-
-    /// The host turns the bound on and off again while the lobby is open, and the
-    /// lobby reads whatever the plan currently says.
-    #[tokio::test]
-    async fn the_kitchen_bound_can_be_set_and_lifted() {
-        let conn = conn().await;
-        let kid = stocked_kitchen(&conn).await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            Some(&kid),
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(set_require_kitchen_equipment(&conn, "c", true)
-            .await
-            .unwrap());
-        assert!(
-            load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment
-        );
-        assert!(set_require_kitchen_equipment(&conn, "c", false)
-            .await
-            .unwrap());
-        assert!(
-            !load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment
-        );
-    }
-
-    /// The invariant lives in the write, not only in the handler: a plan with no
-    /// kitchen has nothing to match against, so the bound cannot be turned on for one
-    /// however the call arrives. Lifting it stays legal — a no-op that must never be
-    /// the thing that fails.
-    #[tokio::test]
-    async fn a_kitchenless_plan_cannot_be_bound_to_a_kitchen() {
-        let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            !set_require_kitchen_equipment(&conn, "c", true)
-                .await
-                .unwrap(),
-            "there is no kitchen to be able to make anything"
-        );
-        assert!(
-            !load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment
-        );
-        assert!(
-            set_require_kitchen_equipment(&conn, "c", false)
-                .await
-                .unwrap(),
-            "turning it off is always fine"
-        );
-    }
-
-    /// Start freezes this one too, in the write, for the reason every other lobby
-    /// setting freezes: the corpus everyone is voting within must not move under them.
-    #[tokio::test]
-    async fn a_started_plan_refuses_the_kitchen_bound() {
-        let conn = conn().await;
-        let kid = stocked_kitchen(&conn).await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            Some(&kid),
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(set_require_kitchen_equipment(&conn, "c", true)
-            .await
-            .unwrap());
-
-        begin_session(&conn, "c").await.unwrap();
-
-        assert!(!set_require_kitchen_equipment(&conn, "c", false)
-            .await
-            .unwrap());
-        assert!(
-            load_lobby(&conn, "c")
-                .await
-                .unwrap()
-                .unwrap()
-                .require_kitchen_equipment,
-            "the deck was dealt against the frozen value"
-        );
-    }
-
-    /// The walk's read resolves the bound to *which* kitchen, so the caller never has
-    /// to re-derive it — and an unbounded plan resolves to nothing even though it has
-    /// a kitchen, because having one is not asking to be limited by it.
-    #[tokio::test]
-    async fn plan_bounds_resolve_the_kitchen_to_match_against() {
-        let conn = conn().await;
-        let kid = stocked_kitchen(&conn).await;
-        for (channel, require) in [("bounded", true), ("open", false)] {
-            create_session(
-                &conn,
-                channel,
-                "alice",
-                None,
-                Some(&kid),
-                MealType::Dinner,
-                &[],
-                None,
-                require,
+        for item in items {
+            conn.execute(
+                "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, ?2)",
+                libsql::params![kid.clone(), *item],
             )
             .await
             .unwrap();
         }
-        assert_eq!(
-            plan_bounds(&conn, "bounded").await.unwrap(),
-            Some(PlanBounds {
-                max_total_seconds: None,
-                makeable_in_kitchen: Some(kid),
-            })
-        );
-        assert_eq!(
-            plan_bounds(&conn, "open").await.unwrap(),
-            Some(PlanBounds::default())
-        );
+        kid
     }
 
-    /// A row claiming both "bound me to my kitchen" and "I have no kitchen" is
-    /// corruption no write can produce. The walk must not guess which half to
-    /// believe — dealing the whole corpus to a plan that asked to be narrowed, and
-    /// dealing nothing at all, are both wrong — so it fails loudly instead.
-    #[tokio::test]
-    async fn an_impossible_bound_is_an_error_not_a_guess() {
-        let conn = conn().await;
+    async fn plan_for(conn: &Connection, channel: &str, kitchen_id: Option<&str>) {
         create_session(
-            &conn,
-            "c",
+            conn,
+            channel,
             "alice",
             None,
-            None,
+            kitchen_id,
             MealType::Dinner,
             &[],
             None,
-            false,
         )
         .await
         .unwrap();
-        // Straight past the guarded writes, the way only corruption could.
+    }
+
+    /// The lobby states whether the walk's kitchen limit is in force (#82), and it is a
+    /// fact rather than a setting: a kitchen with equipment recorded limits the deck; a
+    /// kitchen with nothing recorded, or no kitchen at all, does not — because nothing
+    /// recorded means unknown, never "owns nothing".
+    #[tokio::test]
+    async fn the_lobby_says_whether_the_kitchen_limit_is_in_force() {
+        let conn = conn().await;
+        let stocked = kitchen(&conn, &["knife"]).await;
+        let bare = kitchen(&conn, &[]).await;
+        plan_for(&conn, "stocked", Some(&stocked)).await;
+        plan_for(&conn, "bare", Some(&bare)).await;
+        plan_for(&conn, "kitchenless", None).await;
+
+        async fn known(conn: &Connection, channel: &str) -> bool {
+            load_lobby(conn, channel)
+                .await
+                .unwrap()
+                .unwrap()
+                .kitchen_equipment_known
+        }
+        assert!(
+            known(&conn, "stocked").await,
+            "recorded equipment limits the deck"
+        );
+        assert!(
+            !known(&conn, "bare").await,
+            "nothing recorded is unknown, not empty"
+        );
+        assert!(
+            !known(&conn, "kitchenless").await,
+            "no kitchen, nothing to limit by"
+        );
+    }
+
+    /// It tracks the kitchen rather than the plan: stocking a kitchen mid-lobby brings
+    /// the limit into force, because what a kitchen owns is a fact about the world and
+    /// not a setting frozen onto this plan.
+    #[tokio::test]
+    async fn the_limit_follows_the_kitchen_not_the_plan() {
+        let conn = conn().await;
+        let kid = kitchen(&conn, &[]).await;
+        plan_for(&conn, "c", Some(&kid)).await;
+        assert!(
+            !load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .kitchen_equipment_known
+        );
+
         conn.execute(
-            "UPDATE pick_sessions SET require_kitchen_equipment = 1 WHERE channel_id = 'c'",
-            (),
+            "INSERT INTO kitchen_equipment (kitchen_id, item) VALUES (?1, 'wok')",
+            libsql::params![kid],
         )
         .await
         .unwrap();
-        assert!(plan_bounds(&conn, "c").await.is_err());
+        assert!(
+            load_lobby(&conn, "c")
+                .await
+                .unwrap()
+                .unwrap()
+                .kitchen_equipment_known
+        );
+    }
+
+    /// The walk's read carries the plan's kitchen unconditionally — there is no flag to
+    /// consult, because a meal planned in a kitchen is cooked in that kitchen (#82).
+    #[tokio::test]
+    async fn plan_bounds_carry_the_plans_kitchen() {
+        let conn = conn().await;
+        let kid = kitchen(&conn, &["knife"]).await;
+        plan_for(&conn, "in-kitchen", Some(&kid)).await;
+        plan_for(&conn, "kitchenless", None).await;
+
+        assert_eq!(
+            plan_bounds(&conn, "in-kitchen").await.unwrap(),
+            Some(PlanBounds {
+                max_total_seconds: None,
+                kitchen_id: Some(kid),
+            })
+        );
+        assert_eq!(
+            plan_bounds(&conn, "kitchenless").await.unwrap(),
+            Some(PlanBounds::default())
+        );
     }
 
     // ---- buy checklist (#131) ----------------------------------------------
@@ -2570,19 +2187,9 @@ mod tests {
     #[tokio::test]
     async fn a_tick_round_trips_and_is_scoped_to_its_recipe() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
 
         tick_item(&conn, "c", "themealdb", "52772", 2, "alice")
             .await
@@ -2636,7 +2243,6 @@ mod tests {
                 MealType::Dinner,
                 &[],
                 None,
-                false,
             )
             .await
             .unwrap();
@@ -2667,19 +2273,9 @@ mod tests {
     #[tokio::test]
     async fn a_second_ticker_takes_the_item_over() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         tick_item(&conn, "c", "themealdb", "52772", 3, "alice")
             .await
             .unwrap();
@@ -2698,19 +2294,9 @@ mod tests {
     #[tokio::test]
     async fn unticking_an_untouched_line_is_fine() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "c",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         untick_item(&conn, "c", "themealdb", "52772", 7)
             .await
             .unwrap();
@@ -2732,19 +2318,9 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(
-            &conn,
-            "c",
-            "4242",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
         tick_item(&conn, "c", "themealdb", "52772", 0, "4242")
             .await
             .unwrap();
