@@ -34,10 +34,13 @@ const got = (by: Voter): Tick => ({ by, pantry: null });
  *
  * The names used are real corpus vocabulary with real weight behind them — `salt`
  * is in 302 of the 790 recipes, `garlic` 238, `onion` 224, `vegetable oil` 116. The
- * fixture is Chicken Handi, whose eight lines read `Chicken · Onion · Tomatoes ·
- * Garlic · Ginger paste · Vegetable oil · Salt · Coriander Leaves`, so a pantry
- * holding `tomato` pre-ticks `Tomatoes` — one food, two spellings, which is the
- * whole of what the matcher's plural fold does.
+ * fixture is Chicken Handi, and the indices below are positions in *its own*
+ * sixteen-line record (#157), so a pantry holding `tomato` pre-ticks `tomatoes` —
+ * one food, two spellings, which is the whole of what the matcher's plural fold
+ * does. Positions are the thing to get right here: `salt` is the sixteenth line,
+ * and while these ticks were written against an earlier eight-line fixture the
+ * salt sat on the seventh, which pre-ticked `cumin seeds` — a fixture asserting
+ * exactly the false match this matcher exists to refuse.
  */
 const inPantry = (item: string): Tick => ({ by: null, pantry: item });
 
@@ -71,7 +74,7 @@ export const StartedFromThePantry: Story = {
       2: inPantry("tomato"),
       3: inPantry("garlic"),
       5: inPantry("vegetable oil"),
-      6: inPantry("salt"),
+      15: inPantry("salt"),
     },
   },
 };
@@ -99,7 +102,7 @@ export const PantryAndPeople: Story = {
       2: inPantry("tomato"),
       3: inPantry("garlic"),
       5: got(kit),
-      6: inPantry("salt"),
+      15: inPantry("salt"),
       7: got(jo),
     },
   },
@@ -127,8 +130,16 @@ export const NothingToBuy: Story = {
       3: inPantry("garlic"),
       4: inPantry("ginger paste"),
       5: inPantry("vegetable oil"),
-      6: inPantry("salt"),
-      7: inPantry("coriander leaves"),
+      6: inPantry("cumin seeds"),
+      7: inPantry("coriander seeds"),
+      8: inPantry("turmeric powder"),
+      9: inPantry("chilli powder"),
+      10: inPantry("green chilli"),
+      11: inPantry("yogurt"),
+      12: inPantry("cream"),
+      13: inPantry("fenugreek"),
+      14: inPantry("garam masala"),
+      15: inPantry("salt"),
     },
   },
 };
@@ -150,8 +161,16 @@ export const CompleteAfterOneRealShop: Story = {
       3: inPantry("garlic"),
       4: inPantry("ginger paste"),
       5: inPantry("vegetable oil"),
-      6: inPantry("salt"),
-      7: inPantry("coriander leaves"),
+      6: inPantry("cumin seeds"),
+      7: inPantry("coriander seeds"),
+      8: inPantry("turmeric powder"),
+      9: inPantry("chilli powder"),
+      10: inPantry("green chilli"),
+      11: inPantry("yogurt"),
+      12: inPantry("cream"),
+      13: inPantry("fenugreek"),
+      14: inPantry("garam masala"),
+      15: inPantry("salt"),
     },
   },
 };
