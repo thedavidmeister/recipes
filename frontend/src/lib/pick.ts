@@ -112,8 +112,22 @@ export type ServerMsg =
       type: "buy";
       source: string;
       id: string;
-      checks: { index: number; by: Voter }[];
+      checks: RoomBuyCheck[];
     };
+
+/**
+ * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
+ * stated here rather than imported so this module stays the wire's own description
+ * and does not import from a module that imports it back.
+ *
+ * Exactly one of `by` and `pantry` is set: a person got it, or the plan's kitchen
+ * already had it (#156). The server's schema enforces that; see `session::BuyCheck`.
+ */
+export interface RoomBuyCheck {
+  index: number;
+  by: Voter | null;
+  pantry: string | null;
+}
 
 /** The connection's live state, surfaced so the UI can show "reconnecting…". */
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
@@ -137,11 +151,7 @@ export interface PickHandlers {
   onVote?: (voter: string, source: string, id: string, vote: boolean) => void;
   /** One recipe's shopping checklist, **whole** — someone ticked or unticked a
    * line, so this replaces the list rather than merging into it (#131). */
-  onBuy?: (
-    source: string,
-    id: string,
-    checks: { index: number; by: Voter }[],
-  ) => void;
+  onBuy?: (source: string, id: string, checks: RoomBuyCheck[]) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
