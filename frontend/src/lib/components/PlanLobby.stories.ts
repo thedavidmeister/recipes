@@ -184,8 +184,14 @@ export const Error: Story = {
  * Said plainly rather than as an alert: nothing failed, there is simply nothing
  * left to decide — and no Start and no Leave, because there is no plan to start
  * and nothing left to leave.
+ *
+ * The meal is named because it is always known here: a client only learns a plan
+ * ended by being in its room, which means it had already read the lobby. (`Error`
+ * leaves it out for the opposite reason — there, the read is what failed.)
  */
-export const PlanEnded: Story = { args: { status: "ended" } };
+export const PlanEnded: Story = {
+  args: { status: "ended", mealType: "dinner" },
+};
 
 /**
  * The same lobby with a host whose colour is `honey` — the palest slot there is.
