@@ -15,20 +15,29 @@ import type { MealAddition, MealType, RecipeCard } from "./types";
 
 /** `POST /api/session` — start a pick, returning its shareable channel id.
  * `maxTotalSeconds` caps the plan to recipes estimated at that long or less
- * (#80); omitted = "Any". The host can still move it in the lobby, until start.
+ * (#80); `null` asks for "Any", and omitting it takes the backend's default —
+ * half an hour (#163). The host can still move it in the lobby, until start.
  */
 export async function createPick(
   filter?: string,
   kitchenId?: string,
   maxTotalSeconds?: number | null,
 ): Promise<string> {
+  // The cap is left OUT of the body rather than sent as null when the caller
+  // names none, and the two are not the same thing (#163): the backend reads an
+  // absent cap as the 30-minute default and an explicit null as "Any". Collapsing
+  // them with `?? null` — which is what this used to do — would start every plan
+  // unbounded again while the code still looked like it asked for the default.
+  const asked: Record<string, string | number | null> = {
+    filter: filter ?? null,
+    kitchen_id: kitchenId ?? null,
+  };
+  if (maxTotalSeconds !== undefined) {
+    asked.max_total_seconds = maxTotalSeconds;
+  }
   const res = await apiFetch("/api/session", {
     method: "POST",
-    body: JSON.stringify({
-      filter: filter ?? null,
-      kitchen_id: kitchenId ?? null,
-      max_total_seconds: maxTotalSeconds ?? null,
-    }),
+    body: JSON.stringify(asked),
   });
   if (!res.ok) {
     throw new ApiError(

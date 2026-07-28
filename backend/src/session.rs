@@ -256,10 +256,16 @@ pub struct CreateBody {
     /// plain meal, and the host can add them in the lobby.
     #[serde(default)]
     additions: Vec<MealAddition>,
-    /// The plan's total-time cap in seconds (#80); `None` = no cap ("Any"). Not
+    /// The plan's total-time cap in seconds (#80); `null` = no cap ("Any"). Not
     /// opaque like `filter`: the walk enforces it server-side against
     /// `recipes.total_seconds`, so the backend must understand it.
-    #[serde(default)]
+    ///
+    /// **Absent and `null` are different here** (#163). A body that says nothing
+    /// gets [`DEFAULT_CAP_SECONDS`] — a plan is born capped. A body that says
+    /// `null` gets "Any", the same word that lifts the cap in the lobby. That is
+    /// what keeps the default a default rather than a floor: the caller who wants
+    /// the whole corpus asks for it, instead of being unable to say so.
+    #[serde(default = "default_cap")]
     max_total_seconds: Option<i64>,
 }
 
@@ -271,6 +277,32 @@ pub struct CreateBody {
 /// frontend edit, not a migration (#80).
 const MIN_CAP_SECONDS: i64 = 60;
 const MAX_CAP_SECONDS: i64 = 86_400;
+
+/// What a plan is born capped at (#163): half an hour.
+///
+/// A plan used to be born unbounded, which put the control on the one setting that
+/// filters nothing — inert until somebody touched it — and cheerfully offered a
+/// five-hour braise to whoever is hungry now. Half an hour is where most meals
+/// live, and the person with the afternoon widens it in one tap.
+///
+/// It bounds the deck to what we can *prove* fits plus what we cannot time at all:
+/// `recipes.total_seconds` counts untimed steps as zero (#84, #158) and a recipe
+/// with no estimate is deliberately kept under a cap, so the exclusions are sound
+/// (a lower bound already over the cap really is over it) while the inclusions are
+/// optimistic. Measured against the corpus when this landed, 1800 seconds left
+/// 390 of 790 recipes — 313 estimated at or under it, plus 77 with no estimate.
+///
+/// The column carries the same number as its default (migration 0019), so a row
+/// inserted without one and a plan created without one read identically — the same
+/// pairing #114's `meal_type` makes with `'dinner'`.
+const DEFAULT_CAP_SECONDS: i64 = 1800;
+
+/// Serde's stand-in for an absent `max_total_seconds`. Only reached when the field
+/// is missing entirely; an explicit `null` deserializes to `None` ("Any") and never
+/// consults this.
+fn default_cap() -> Option<i64> {
+    Some(DEFAULT_CAP_SECONDS)
+}
 
 /// Refuse a nonsense cap. `None` is "any" and always fine; zero, negative, and
 /// longer-than-a-day are author errors, not bounds anyone cooks to.
@@ -2093,11 +2125,16 @@ mod tests {
         }
     }
 
-    /// A plan created with a time cap reads it back in the lobby; one created
-    /// without is uncapped — "Any" is the default, and every session from before
-    /// the column existed stays that way.
+    /// A plan written with a time cap reads it back in the lobby; one written with
+    /// `None` is uncapped.
+    ///
+    /// This is the *writer*, which sits below #163's default: `None` here still
+    /// means "Any" and always will, because that is the value the lobby writes when
+    /// a host lifts the cap, and the value every plan made before #163 carries. What
+    /// changed is what the create *handler* passes when a caller names nothing — see
+    /// [`default_cap`] and `main`'s `a_plan_is_born_capped_at_thirty_minutes`.
     #[tokio::test]
-    async fn a_plan_carries_its_time_cap_and_defaults_to_any() {
+    async fn a_plan_carries_its_time_cap_and_none_is_any() {
         let conn = conn().await;
         create_session(
             &conn,
