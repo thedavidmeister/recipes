@@ -1,5 +1,6 @@
 import { ApiError, apiFetch } from "./client";
 import type { Voter } from "./pick";
+import { shoppingLines } from "./shopping";
 import { turso } from "./turso";
 import type { BuyRecipe, Ingredient, StructuredMeasure } from "./types";
 
@@ -60,6 +61,9 @@ export function consensusRef(): ConsensusRef | null {
 /**
  * The ingredients to buy: the consensus recipe's list, read **client-direct** from
  * Turso (the `recipes` table is public). `null` when no pick has decided yet.
+ *
+ * The lines come from {@link shoppingLines}, which is the projection the tick indices
+ * count against and lives apart from here for exactly that reason (#156).
  */
 export async function getBuyList(): Promise<BuyRecipe | null> {
   const ref = consensusRef();
@@ -72,18 +76,12 @@ export async function getBuyList(): Promise<BuyRecipe | null> {
   const row = rs.rows[0];
   const title = row ? String(row.title) : ref.title;
 
-  // The list is the structured reading (#11), never the raw measure — the reading
-  // is what `buy` renders. A line with no reading yet is dropped rather than shown
-  // raw; `pick` serves read recipes, so a decided one carries readings throughout.
   let ingredients: StructuredMeasure[] = [];
   if (row) {
     try {
-      const parsed = JSON.parse(String(row.ingredients)) as Ingredient[];
-      ingredients = parsed
-        .map((i) => i.structured)
-        .filter(
-          (s): s is StructuredMeasure => !!s && !!s.item && s.item.trim() !== "",
-        );
+      ingredients = shoppingLines(
+        JSON.parse(String(row.ingredients)) as Ingredient[],
+      );
     } catch {
       // Malformed ingredients JSON: show the recipe with no lines rather than fail.
     }
@@ -93,12 +91,22 @@ export async function getBuyList(): Promise<BuyRecipe | null> {
 
 // ---- the shared checklist (#131) -------------------------------------------
 
-/** One ticked line of the meal's shopping list. Mirrors `session::BuyCheck`. */
+/**
+ * One ticked line of the meal's shopping list. Mirrors `session::BuyCheck`.
+ *
+ * **Exactly one of `by` and `pantry` is set**, and the server's schema enforces it
+ * (migration 0021). They are different claims, not two spellings of one: `by` is a
+ * person who got it, `pantry` is the kitchen having already had it (#156) and names
+ * the pantry entry that answered for the line. A pre-tick wears nobody's colour
+ * because nobody claimed it.
+ */
 export interface BuyCheck {
   /** The 0-based position in the recipe's ingredient list. */
   index: number;
-  /** Who has it. */
-  by: Voter;
+  /** Who has it, when a person got it. */
+  by: Voter | null;
+  /** The pantry entry that pre-ticked it, when the kitchen already had it. */
+  pantry: string | null;
 }
 
 /** A meal's checklist for one recipe. Mirrors `session::BuyList`. */
