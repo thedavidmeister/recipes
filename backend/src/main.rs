@@ -1187,6 +1187,22 @@ mod tests {
             .to_owned()
     }
 
+    /// Close the lobby and begin the swiping, as the host. Everything on the far side
+    /// of a decision — the tally, the shopping list — only exists once this has
+    /// happened, so a test about either has to walk through it (#175).
+    async fn begin_plan(app: &Router, host_cookie: &str, channel: &str) {
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(host_cookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
     /// Seating someone into a plan is gated like everything a person reaches (#25).
     #[tokio::test]
     async fn seating_requires_a_session() {
@@ -2560,6 +2576,8 @@ mod tests {
         )
         .await
         .unwrap();
+        // The swiping begins, which is what gives this meal a list to shop (#175).
+        begin_plan(&app, &host_cookie, &channel).await;
 
         // Nothing is in the basket yet.
         let res = app
@@ -2653,6 +2671,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
+    }
+
+    /// A plan still in its lobby has no list to shop (#175). `buy` is reached
+    /// *through* a decision, so a tick before the swiping has begun is a client bug —
+    /// 400, the answer every other write against the wrong stage of a plan gives.
+    ///
+    /// The refusal is checked for what it left behind, not just for its status: the
+    /// sentence comes from the handler's read, but what actually keeps the row out is
+    /// the same fact repeated inside the write's own predicate.
+    #[tokio::test]
+    async fn a_shopping_list_belongs_to_a_started_plan() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let host_cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &host_cookie, "Home").await;
+        let channel = make_plan(&app, &host_cookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(res).await["checks"].as_array().unwrap().len(),
+            0,
+            "and nothing was written on the way to the refusal"
+        );
+
+        // The same tap, once the plan is under way.
+        begin_plan(&app, &host_cookie, &channel).await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&host_cookie),
+                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let checks = body_json(res).await["checks"].clone();
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
     }
 
     /// A checklist for a channel that does not exist is refused on both verbs — a

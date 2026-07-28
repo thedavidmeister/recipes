@@ -68,7 +68,9 @@ fn mint_channel_id() -> String {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
     /// This client's yes/no on a recipe. The voter is the authenticated session,
-    /// never a field the client supplies — a client cannot vote as someone else.
+    /// never a field the client supplies — a client cannot vote as someone else, and
+    /// cannot vote at all unless that session holds a seat at a plan whose swiping
+    /// has begun (see [`record_vote`]).
     Vote {
         source: String,
         id: String,
@@ -915,12 +917,19 @@ pub async fn buy_list(
 
 /// `POST /api/session/{channel}/buy` — tick a line off the shopping list, or clear it.
 ///
-/// **Deciders only.** The roster is who is having this meal; a stranger holding the
-/// channel id must not be able to write into their basket, so a non-member is
-/// refused (403) rather than quietly ignored. Anyone on the roster may clear
+/// **Deciders only, and only once the meal is decided.** The roster is who is having
+/// this meal; a stranger holding the channel id must not be able to write into their
+/// basket, so a non-member is refused (403) rather than quietly ignored, and a plan
+/// still in its lobby has no list to shop (400). Anyone on the roster may clear
 /// anyone's tick — a shopping list is a shared object, and "I put that back" is a
 /// normal thing to say out loud; the write records who has it *now*, which is the
 /// only claim it ever made.
+///
+/// Both refusals are read here so they can be *said*, and repeated inside the write's
+/// own predicate ([`seated_in_a_started_plan`]) so they are also *true*: a read and a
+/// write are two round trips, and a departure landing between them must win — the
+/// same reason [`remove_voter`]'s seat delete carries `started_at IS NULL` rather
+/// than trusting its caller's read (#175).
 ///
 /// The result is the whole list, and the same list is announced to the room, so the
 /// caller and every other open client land on one answer.
@@ -952,6 +961,15 @@ pub async fn set_buy_check(
             "only the people having this meal can tick things off its list".into(),
         ));
     }
+    // A shopping list belongs to a decided meal, and nothing is decided until the
+    // swiping has begun — `buy` is only reachable through a consensus. Said here so
+    // the refusal has a sentence; the write carries the same fact in its own predicate
+    // (see [`tick_item`]), which is what actually keeps the row out.
+    if !view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has not started yet".into(),
+        ));
+    }
 
     // A tick can be the first thing that ever touches this list (a peer opened `buy`
     // and tapped before this client read it), so the seed runs here too — before the
@@ -973,7 +991,15 @@ pub async fn set_buy_check(
                 )
                 .await
             } else {
-                untick_item(&db, channel, &body.source, &body.id, body.index).await
+                untick_item(
+                    &db,
+                    channel,
+                    &body.source,
+                    &body.id,
+                    body.index,
+                    &user.telegram_user_id,
+                )
+                .await
             }
         })
         .await
@@ -1046,6 +1072,14 @@ fn announce_departure(state: &AppState, channel: &str, voter: Voter, ended: bool
 ///
 /// Session-gated like every person-facing route (#25); the upgrade carries the
 /// session cookie, so the socket knows who is voting.
+///
+/// **Anyone signed in with the channel id may listen, and only a decider may vote.**
+/// The upgrade deliberately asks nothing about the roster — someone who followed the
+/// link after the swiping began cannot join (`join_lobby` refuses them) but can still
+/// watch it happen, and this socket is how watching works; they can already read the
+/// same lobby and tally over HTTP. What must not follow from holding the link is a
+/// *write*, so the refusal lives on the vote itself, in [`record_vote`]'s own
+/// predicate, rather than on the door (#175).
 pub async fn ws(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -1136,10 +1170,18 @@ async fn socket_loop(
                     if let Ok(ClientMsg::Vote { source, id, vote }) =
                         serde_json::from_str::<ClientMsg>(&t)
                     {
-                        // Durable write first, then the live push — Turso is the truth.
+                        // Durable write first, then the live push — Turso is the truth,
+                        // so a vote it declined is a vote the room never hears about.
+                        // Peers apply this frame to their tally incrementally, so
+                        // announcing an unwritten vote would put a phantom yes on every
+                        // open client until each one next rehydrates. `false` is the
+                        // write's own predicate refusing (not a decider in this plan, or
+                        // the swiping has not begun); an `Err` is a database fault. The
+                        // socket has nowhere to report either, and the answer is the
+                        // same: nothing was recorded, so nothing is announced.
                         if record_vote(&db, &channel, &source, &id, &voter, vote)
                             .await
-                            .is_ok()
+                            .unwrap_or(false)
                         {
                             if let Ok(txt) = serde_json::to_string(&ServerMsg::Vote {
                                 voter: voter.clone(),
@@ -1213,11 +1255,14 @@ enum Removed {
 /// other reason to write nothing is a seat that was already gone — the same
 /// departure arriving twice.
 ///
-/// **Nothing else is theirs to take.** Votes and shopping claims only exist after
-/// the start, and the predicate above is the proof this plan had not started, so
-/// there is deliberately no vote sweep and no claim sweep here. Cleanup written for
-/// a state the guard makes unreachable is an invitation to relax the guard later,
-/// believing it is handled.
+/// **Nothing else is theirs to take.** A vote and a shopping claim are each written
+/// under `started_at IS NOT NULL` in the write's *own* predicate
+/// ([`seated_in_a_started_plan`]), and the predicate above is the proof this plan had
+/// not started — so there is deliberately no vote sweep and no claim sweep here.
+/// Cleanup written for a state the guard makes unreachable is an invitation to relax
+/// the guard later, believing it is handled. The one row that can exist on a plan
+/// still in its lobby is a pantry pre-tick, and that is nobody's claim (#156): the
+/// cupboard is not a person, so a leaver has nothing in it to release (#175).
 ///
 /// **The host passes it on rather than taking the plan down.** Forbidding the host
 /// to leave traps the one person who cannot escape their own plan — the hostage
@@ -1272,9 +1317,11 @@ async fn remove_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::R
     }
 
     // Nothing of theirs needs sweeping, and deliberately no code pretends otherwise.
-    // Votes and shopping claims only exist after the start, and the predicate above
-    // proves this plan had not started — cleanup for a state the guard makes
-    // unreachable is an invitation to relax the guard later, believing it is handled.
+    // A vote and a shopping claim each carry `started_at IS NOT NULL` in their own
+    // write predicate, and the predicate above proves this plan had not started —
+    // cleanup for a state the guard makes unreachable is an invitation to relax the
+    // guard later, believing it is handled. A pantry pre-tick can be here, and is not
+    // swept either: nobody claimed it, so it is nobody's to give up (#156, #175).
 
     // The last one out. This delete is the serialization point: once the plan row is
     // gone, `load_lobby` answers `None`, so every seating path (join, seat) refuses
@@ -1555,8 +1602,56 @@ async fn update_additions(
     Ok(written > 0)
 }
 
-/// Record (or update) a voter's call on a recipe. Re-voting overwrites — a swipe is
-/// a current decision, not an append.
+/// The precondition every vote and every shopping claim is written under (#175):
+/// **a seat at a plan whose swiping has begun**.
+///
+/// It is a SQL fragment rather than a Rust check because it belongs *inside* the
+/// write, alongside [`remove_voter`]'s `started_at IS NULL`. The two halves are here
+/// for different reasons, and neither is quite the other's:
+///
+/// - **The roster.** On the vote path nothing asked at all — the socket upgrade gates
+///   on the channel existing — so a signed-in stranger holding the invite link wrote
+///   into the very tally the room is measured by. On the buy path [`set_buy_check`]
+///   does ask, but in a preceding read: two round trips, so that read is what gives
+///   the 403 a sentence, and *this* is what keeps the row out.
+/// - **The start.** Not a race. `started_at` only ever goes NULL → set, so a caller
+///   that saw "started" still sees it when the write lands. What this buys is the
+///   sentence #169 wrote in [`remove_voter`] — "votes and shopping claims only exist
+///   after the start" — made true by the database rather than by the browser, which
+///   is what makes the absent sweeps sound.
+///
+/// Together they close each other's remaining gap, and that is why they go in
+/// together: a seat can only be given up before the start, and neither table may be
+/// written before it, so the roster a write is judged against can no longer move
+/// underneath one. Each is still asked on its own, because a guard that holds only
+/// while a *different* guard holds is the kind that quietly stops holding.
+///
+/// Deliberately **not** applied to the pantry seed ([`write_seed`]): a pre-tick is
+/// nobody's claim — it is a function of the plan's kitchen and the recipe, reachable
+/// from the ungated read ([`buy_list`]) precisely because it depends on nothing about
+/// the caller. Nobody's claim is nobody's to lose, which is why [`remove_voter`] still
+/// has nothing to sweep.
+///
+/// `person` is the **placeholder** the caller bound the telegram id to (`"?4"`), not
+/// an id — the channel is always `?1`, and the person's position differs between the
+/// statements below. Every argument it is ever given is a literal written here.
+fn seated_in_a_started_plan(person: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM pick_sessions s, pick_voters v
+                  WHERE s.channel_id = ?1 AND s.started_at IS NOT NULL
+                    AND v.channel_id = ?1 AND v.user_id = {person})"
+    )
+}
+
+/// Record (or update) a voter's call on a recipe, reporting whether it was written.
+/// Re-voting overwrites — a swipe is a current decision, not an append.
+///
+/// Only a decider in a started plan may write one, and that lives in the insert's own
+/// predicate ([`seated_in_a_started_plan`]). A vote is not a private note: the tally
+/// is read as `yes` against the *roster*, so a yes from outside the roster completes
+/// a consensus the people deciding never reached. Nothing before this checked — the
+/// socket upgrade asks only that the channel exist — so a signed-in stranger holding
+/// the invite link voted into somebody else's dinner.
 async fn record_vote(
     conn: &Connection,
     channel: &str,
@@ -1564,16 +1659,21 @@ async fn record_vote(
     id: &str,
     voter: &str,
     vote: bool,
-) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO votes (channel_id, source, id, voter_id, vote) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(channel_id, source, id, voter_id) DO UPDATE SET
-            vote = excluded.vote,
-            created_at = unixepoch()",
-        libsql::params![channel, source, id, voter, vote as i64],
-    )
-    .await?;
-    Ok(())
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            &format!(
+                "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE {}
+                 ON CONFLICT(channel_id, source, id, voter_id) DO UPDATE SET
+                    vote = excluded.vote,
+                    created_at = unixepoch()",
+                seated_in_a_started_plan("?4")
+            ),
+            libsql::params![channel, source, id, voter, vote as i64],
+        )
+        .await?;
+    Ok(written > 0)
 }
 
 /// Claim one line of a meal's shopping list for `user` (#131).
@@ -1587,6 +1687,12 @@ async fn record_vote(
 /// nobody made; the moment somebody taps that line it becomes theirs, and a row
 /// carrying both would be two answers to "who has this". The CHECK in migration 0021
 /// would refuse it anyway.
+///
+/// The roster and the start are in the insert's own predicate
+/// ([`seated_in_a_started_plan`]), not only in [`set_buy_check`]'s preceding read:
+/// the roster this is judged against is the one that exists when the write lands,
+/// exactly as [`remove_voter`]'s seat delete is judged against the start that exists
+/// when *it* lands.
 async fn tick_item(
     conn: &Connection,
     channel: &str,
@@ -1596,12 +1702,16 @@ async fn tick_item(
     user: &str,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id, pantry_item)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL)
-         ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
-            user_id = excluded.user_id,
-            pantry_item = NULL,
-            created_at = unixepoch()",
+        &format!(
+            "INSERT INTO buy_checks
+                (channel_id, source, id, ingredient_index, user_id, pantry_item)
+             SELECT ?1, ?2, ?3, ?4, ?5, NULL WHERE {}
+             ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
+                user_id = excluded.user_id,
+                pantry_item = NULL,
+                created_at = unixepoch()",
+            seated_in_a_started_plan("?5")
+        ),
         libsql::params![channel, source, id, index, user],
     )
     .await?;
@@ -1615,17 +1725,27 @@ async fn tick_item(
 /// A pantry pre-tick (#156) goes the same way as anyone's, and that is the point: the
 /// jar was empty, and saying so must not be a special case. The seed marker in
 /// `buy_seeds` is what stops the pantry putting it straight back.
+///
+/// Clearing is a write on a shared list, so it carries the same predicate the tick
+/// does ([`seated_in_a_started_plan`]) and therefore needs to know *who* is asking,
+/// even though the row it removes records somebody else. Anyone deciding this meal
+/// may put anything back; nobody else may.
 async fn untick_item(
     conn: &Connection,
     channel: &str,
     source: &str,
     id: &str,
     index: i64,
+    user: &str,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "DELETE FROM buy_checks
-         WHERE channel_id = ?1 AND source = ?2 AND id = ?3 AND ingredient_index = ?4",
-        libsql::params![channel, source, id, index],
+        &format!(
+            "DELETE FROM buy_checks
+              WHERE channel_id = ?1 AND source = ?2 AND id = ?3 AND ingredient_index = ?4
+                AND {}",
+            seated_in_a_started_plan("?5")
+        ),
+        libsql::params![channel, source, id, index, user],
     )
     .await?;
     Ok(())
@@ -1908,6 +2028,29 @@ mod tests {
         rows.iter().find(|r| r.id == id).expect("a tally row")
     }
 
+    /// A plan mid-swipe: `who` on the roster and the lobby closed behind them — the
+    /// only state a vote or a shopping claim can be written in (#175). Fixtures that
+    /// wrote either against a bare `create_session` were building a state no client
+    /// can produce, which is exactly what let the gap sit unnoticed.
+    async fn started_plan(conn: &Connection, channel: &str, who: &[&str]) {
+        create_session(
+            conn,
+            channel,
+            who.first().copied().unwrap_or("alice"),
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        for person in who {
+            seat_voter(conn, channel, person).await.unwrap();
+        }
+        begin_session(conn, channel).await.unwrap();
+    }
+
     /// Two voters, two recipes: the tally counts yes/no per recipe and the distinct
     /// voters, and ranks by yeses — enough for the client to read both plurality and
     /// consensus off it.
@@ -2063,18 +2206,7 @@ mod tests {
     #[tokio::test]
     async fn create_vote_and_tally() {
         let conn = conn().await;
-        create_session(
-            &conn,
-            "chan1",
-            "alice",
-            None,
-            None,
-            MealType::Dinner,
-            &[],
-            None,
-        )
-        .await
-        .unwrap();
+        started_plan(&conn, "chan1", &["alice", "bob"]).await;
 
         record_vote(&conn, "chan1", "themealdb", "r1", "alice", true)
             .await
@@ -2099,9 +2231,7 @@ mod tests {
     #[tokio::test]
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        started_plan(&conn, "c", &["alice"]).await;
         record_vote(&conn, "c", "s", "1", "alice", true)
             .await
             .unwrap();
@@ -2113,6 +2243,108 @@ mod tests {
         assert_eq!(participants, 1);
         assert_eq!(rows.len(), 1, "one row, not two");
         assert_eq!((rows[0].yes, rows[0].no), (0, 1), "the changed-to no");
+    }
+
+    // ---- who may write a vote (#175) ---------------------------------------
+
+    /// The wrong answer this closes, and it needed no crafted request to reach.
+    ///
+    /// Two people are deciding. A third holds the invite link and opened it after the
+    /// swiping began: `join_lobby` refuses them (the roster is closed), and nothing
+    /// then stopped them voting — the socket upgrade asks only that the channel
+    /// exist, and the insert asked nothing at all. Meanwhile the client reads
+    /// consensus as `yes === deciders`, and `deciders` is the **roster**. So one
+    /// member's yes plus one outsider's yes read as "everybody agreed", and the plan
+    /// jumped to `buy` on a recipe a decider had never seen.
+    ///
+    /// It also restores what #169 claimed was already structural: a tally can never
+    /// carry more yeses than there are deciders.
+    #[tokio::test]
+    async fn a_yes_from_outside_the_roster_never_reaches_the_tally() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        let deciders = roster(&conn, "c").await.len();
+
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap());
+        assert!(
+            !record_vote(&conn, "c", "t", "r1", "mallory", true)
+                .await
+                .unwrap(),
+            "a signed-in stranger holding the channel id is not deciding this meal"
+        );
+
+        let (participants, rows) = load_tally(&conn, "c").await.unwrap();
+        let r1 = row(&rows, "r1");
+        assert_eq!((r1.yes, r1.no), (1, 0), "alice's yes, and only alice's");
+        assert_eq!(r1.yes_voters, vec!["alice".to_owned()]);
+        assert!(
+            (r1.yes as usize) < deciders,
+            "bob has not swiped, so this is not agreement"
+        );
+        assert_eq!(participants, 1, "one person has voted, not two");
+    }
+
+    /// "Votes only exist after the start" is the premise #169 rests its absent sweeps
+    /// on, and until now the browser was the only thing holding it up: the vote path
+    /// has no preceding read to carry it, so the insert carries it itself.
+    ///
+    /// Not a race — `started_at` only goes NULL → set, so nobody can lose one. It is
+    /// the invariant, asserted where it is claimed.
+    #[tokio::test]
+    async fn a_vote_before_the_start_is_not_a_vote() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+
+        assert!(
+            !record_vote(&conn, "c", "t", "r1", "alice", true)
+                .await
+                .unwrap(),
+            "the lobby is where you gather, not where you swipe"
+        );
+        assert_eq!(
+            load_tally(&conn, "c").await.unwrap().0,
+            0,
+            "and the refusal is real: nothing was written"
+        );
+
+        begin_session(&conn, "c").await.unwrap();
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap());
+        assert_eq!(load_tally(&conn, "c").await.unwrap().0, 1);
+    }
+
+    /// A channel nobody ever created is not a room to vote into, the same answer the
+    /// WS upgrade and the walk already give a mistyped channel — and now the answer
+    /// holds even for a socket that was opened before the plan was emptied.
+    #[tokio::test]
+    async fn a_vote_into_a_plan_that_is_gone_is_not_recorded() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap());
+
+        conn.execute("DELETE FROM pick_sessions WHERE channel_id = 'c'", ())
+            .await
+            .unwrap();
+        assert!(
+            !record_vote(&conn, "c", "t", "r2", "alice", true)
+                .await
+                .unwrap(),
+            "no plan, no vote"
+        );
+        assert!(!load_tally(&conn, "c")
+            .await
+            .unwrap()
+            .1
+            .iter()
+            .any(|r| r.id == "r2"));
     }
 
     /// A channel with no votes yet tallies to nothing — the join rehydrate on a
@@ -2607,9 +2839,7 @@ mod tests {
     #[tokio::test]
     async fn a_tick_round_trips_and_is_scoped_to_its_recipe() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        started_plan(&conn, "c", &["alice"]).await;
 
         tick_item(&conn, "c", "themealdb", "52772", 2, "alice")
             .await
@@ -2630,7 +2860,7 @@ mod tests {
             "in ingredient order, and only this recipe's lines"
         );
 
-        untick_item(&conn, "c", "themealdb", "52772", 0)
+        untick_item(&conn, "c", "themealdb", "52772", 0, "alice")
             .await
             .unwrap();
         let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
@@ -2654,18 +2884,7 @@ mod tests {
     async fn ticking_is_idempotent_and_scoped_to_its_session() {
         let conn = conn().await;
         for channel in ["c1", "c2"] {
-            create_session(
-                &conn,
-                channel,
-                "alice",
-                None,
-                None,
-                MealType::Dinner,
-                &[],
-                None,
-            )
-            .await
-            .unwrap();
+            started_plan(&conn, channel, &["alice"]).await;
         }
         tick_item(&conn, "c1", "themealdb", "52772", 1, "alice")
             .await
@@ -2693,9 +2912,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_ticker_takes_the_item_over() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        started_plan(&conn, "c", &["alice", "bob"]).await;
         tick_item(&conn, "c", "themealdb", "52772", 3, "alice")
             .await
             .unwrap();
@@ -2714,10 +2931,8 @@ mod tests {
     #[tokio::test]
     async fn unticking_an_untouched_line_is_fine() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
-        untick_item(&conn, "c", "themealdb", "52772", 7)
+        started_plan(&conn, "c", &["alice"]).await;
+        untick_item(&conn, "c", "themealdb", "52772", 7, "alice")
             .await
             .unwrap();
         assert!(load_buy_checks(&conn, "c", "themealdb", "52772")
@@ -2738,9 +2953,7 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        started_plan(&conn, "c", &["4242", "5150"]).await;
         tick_item(&conn, "c", "themealdb", "52772", 0, "4242")
             .await
             .unwrap();
@@ -2765,11 +2978,130 @@ mod tests {
         );
     }
 
+    // ---- who may write a shopping claim (#175) ------------------------------
+
+    /// A claim is written under the same rule as a vote: a seat, at a plan under way.
+    /// A shopping list is reached *through* a decision, so a plan still in its lobby
+    /// has nothing to shop for; and the roster is who is having this meal, so holding
+    /// the channel id is not a licence to fill their basket.
+    #[tokio::test]
+    async fn a_shopping_claim_needs_a_seat_at_a_started_plan() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+            .await
+            .unwrap();
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing is decided yet, so there is no list to tick"
+        );
+
+        begin_session(&conn, "c").await.unwrap();
+        tick_item(&conn, "c", "themealdb", "52772", 0, "mallory")
+            .await
+            .unwrap();
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .is_empty(),
+            "and a stranger with the channel id is not one of the shoppers"
+        );
+
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+            .await
+            .unwrap();
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap();
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "alice");
+    }
+
+    /// Anyone deciding this meal may put anything back; nobody else may. Clearing is a
+    /// write on a shared list, so it carries the same predicate the tick does — a
+    /// guarded claim with an unguarded release is not guarded.
+    #[tokio::test]
+    async fn only_a_decider_can_put_a_line_back() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+            .await
+            .unwrap();
+
+        untick_item(&conn, "c", "themealdb", "52772", 0, "mallory")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a stranger holding the channel id does not empty somebody's basket"
+        );
+
+        untick_item(&conn, "c", "themealdb", "52772", 0, "bob")
+            .await
+            .unwrap();
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .is_empty(),
+            "but the person beside you can — a shopping list is a shared object"
+        );
+    }
+
+    /// The guard is in the write, not in the caller's read.
+    ///
+    /// `set_buy_check` checks the roster and *then* writes — two round trips — so what
+    /// the write is judged against is the roster as it stands when it lands, not the
+    /// one its caller saw. Deleting the seat directly is that state arriving between
+    /// the two.
+    ///
+    /// Today no API path can produce it: `remove_voter` refuses a departure after the
+    /// start, and a claim cannot be written before it, so the two guards make each
+    /// other's race unreachable. That is the reason to pin it rather than to skip it —
+    /// a guard that only holds while a *different* guard holds is the kind that
+    /// quietly stops holding when the other one moves.
+    #[tokio::test]
+    async fn a_tick_is_judged_against_the_roster_at_write_time() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        conn.execute(
+            "DELETE FROM pick_voters WHERE channel_id = 'c' AND user_id = 'bob'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        tick_item(&conn, "c", "themealdb", "52772", 0, "bob")
+            .await
+            .unwrap();
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the seat was gone by the time the write arrived, so the write loses"
+        );
+    }
+
     // ---- the pantry seed (#156) --------------------------------------------
 
     /// A kitchen stocked with `pantry`, and a plan in it — the whole precondition for
     /// a pre-tick. The entries go in raw, exactly as `kitchens::add_pantry` writes them
     /// (normalised names taken from the corpus vocabulary).
+    ///
+    /// The plan is **under way**, with alice deciding it: a shopping list is only
+    /// reached through a decision, so that is the state these tests are about (#175).
     async fn stocked_plan(conn: &Connection, channel: &str, pantry: &[&str]) -> String {
         let kid = crate::kitchens::create_kitchen(conn, "Home", "alice")
             .await
@@ -2783,6 +3115,8 @@ mod tests {
             .unwrap();
         }
         plan_for(conn, channel, Some(&kid)).await;
+        seat_voter(conn, channel, "alice").await.unwrap();
+        begin_session(conn, channel).await.unwrap();
         kid
     }
 
@@ -2933,7 +3267,7 @@ mod tests {
             .await
             .unwrap());
 
-        untick_item(&conn, "c", "themealdb", "52795", 0)
+        untick_item(&conn, "c", "themealdb", "52795", 0, "alice")
             .await
             .unwrap();
         assert!(
@@ -3047,6 +3381,55 @@ mod tests {
             .is_empty());
     }
 
+    /// The one write on this table the roster rule deliberately does not cover (#175).
+    ///
+    /// A pre-tick is **nobody's** claim: it is a function of the plan's kitchen and
+    /// the recipe, which is exactly why it is safe to reach from the ungated read.
+    /// Gating it on a seat would be gating it on something it does not depend on, and
+    /// it would put the seed behind a `started_at` the read has never needed.
+    ///
+    /// It is also why `remove_voter` still sweeps nothing: this is the only row a plan
+    /// in its lobby can have, and nobody's claim is nobody's to give up.
+    #[tokio::test]
+    async fn the_pantry_seed_is_nobodys_claim_and_carries_no_roster() {
+        let conn = conn().await;
+        let kid = crate::kitchens::create_kitchen(&conn, "Home", "alice")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kitchen_pantry (kitchen_id, item) VALUES (?1, 'salt')",
+            libsql::params![kid.clone()],
+        )
+        .await
+        .unwrap();
+        // Still in its lobby, and nobody seated but the host-to-be.
+        plan_for(&conn, "c", Some(&kid)).await;
+
+        write_seed(
+            &conn,
+            "c",
+            "themealdb",
+            "52795",
+            &[(0usize, "salt".to_string())],
+        )
+        .await
+        .unwrap();
+
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap();
+        assert_eq!(
+            checks.len(),
+            1,
+            "the cupboard answered, roster or no roster"
+        );
+        assert_eq!(
+            checks[0].by, None,
+            "and it is nobody's, so there is no seat to check it against"
+        );
+        assert_eq!(checks[0].pantry.as_deref(), Some("salt"));
+    }
+
     /// A row cannot claim both a person and the pantry, and cannot claim neither. The
     /// database says so, so no code path can talk it into an ambiguous tick.
     #[tokio::test]
@@ -3073,6 +3456,7 @@ mod tests {
     #[tokio::test]
     async fn the_tally_names_the_yes_voters() {
         let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
         record_vote(&conn, "c", "t", "a", "alice", true)
             .await
             .unwrap();
