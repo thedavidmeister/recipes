@@ -40,9 +40,9 @@
    * (#164): one device per meaning, and colour says its one thing once. Whose it
    * is, the dot; that it is chosen, a quiet achromatic fill and `aria-pressed`, so
    * chosen-ness never leans on colour perception; that it is a button, the same
-   * cocoa outline every button wears. Nothing here is filled with a person — a
-   * tinted control makes the shared cocoa ring look like an argument, and then the
-   * ring has to be recoloured too, and the pill is a different species of button
+   * stone outline `Button` wears. Nothing here is filled with a person — a tinted
+   * control makes the shared ring look like an argument, and then the ring has to
+   * be recoloured too, and the pill is a different species of button
    * from the rest of the app.
    */
   interface Props {
@@ -139,8 +139,8 @@
     );
 
   /**
-   * The classes for a pill the host has chosen: the cocoa outline every button in
-   * the app wears, a `stone-200` fill, and ink at full strength.
+   * The classes for a pill the host has chosen: the `stone-300` outline `Button`
+   * wears, a `stone-200` fill, and ink at full strength.
    *
    * The fill is achromatic on purpose — "chosen" is the one thing every viewer has
    * to be able to see, so it may not ride on a hue (the same call #155 made for the
@@ -152,7 +152,7 @@
    * on the dot beside the label, and a lobby still loading simply has no dot yet —
    * an unattributed choice, not a wrong one.
    */
-  const CHOSEN_PILL = "border-cocoa-500 bg-stone-200 border text-stone-900";
+  const CHOSEN_PILL = "border-stone-300 bg-stone-200 border text-stone-900";
 
   let copied = $state(false);
 
@@ -211,7 +211,7 @@
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {t ===
               mealType
                 ? CHOSEN_PILL
-                : 'border-cocoa-500 text-cocoa-500 border'}"
+                : 'border-stone-300 text-stone-600 border'}"
             >
               {#if t === mealType && hostId}
                 <span
@@ -226,8 +226,7 @@
 
         <!-- The secondary tier: several may come with the meal, or none, so these
              pills toggle rather than choose — and they read quieter than the meal
-             row (stone outline, not cocoa) because they are not what the pick
-             decides. -->
+             row because they are not what the pick decides. -->
         <p class="mt-6 mb-3 text-xs text-stone-500">What comes with it</p>
         <div class="flex flex-wrap gap-2">
           {#each MEAL_ADDITIONS as a (a)}
