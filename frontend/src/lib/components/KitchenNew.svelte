@@ -59,7 +59,7 @@
 
       <div>
         <Button type="submit" disabled={saving} dot="cocoa">
-        {saving ? "Making it…" : "Create kitchen"}
+        {saving ? "Creating…" : "Create kitchen"}
         </Button>
       </div>
     </form>

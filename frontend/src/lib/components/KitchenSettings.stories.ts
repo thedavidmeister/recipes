@@ -23,6 +23,6 @@ export const Error: Story = {
   args: {
     status: "error",
     id: "k1",
-    error: "not a member of this kitchen (403)",
+    error: "Couldn't open this kitchen (403).",
   },
 };

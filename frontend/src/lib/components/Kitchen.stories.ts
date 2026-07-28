@@ -26,5 +26,5 @@ export const Pending: Story = { args: { status: "pending" } };
 
 /** A kitchen that won't open — removed from it, or an id that no longer exists. */
 export const Error: Story = {
-  args: { status: "error", error: "not a member of this kitchen (403)" },
+  args: { status: "error", error: "Couldn't open this kitchen (403)." },
 };

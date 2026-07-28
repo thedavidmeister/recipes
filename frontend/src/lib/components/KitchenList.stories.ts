@@ -23,12 +23,12 @@ export const ActionFailed: Story = {
   args: {
     status: "ready",
     kitchens: kitchenList(),
-    actionError: "that invite has already been used",
+    actionError: "That invite link has already been used.",
   },
 };
 
 export const Pending: Story = { args: { status: "pending" } };
 
 export const Error: Story = {
-  args: { status: "error", error: "could not load your kitchens (502)" },
+  args: { status: "error", error: "Couldn't load your kitchens (502)." },
 };

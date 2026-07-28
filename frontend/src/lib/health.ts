@@ -18,10 +18,10 @@ export async function fetchHealth(): Promise<HealthStats> {
     throw new ApiError(
       res.status,
       res.status === 401
-        ? "Your session has expired."
+        ? "You've been signed out. Sign in again to carry on."
         : res.status === 403
           ? "This page is for the admin."
-          : `could not load health (${res.status})`,
+          : `Couldn't load health (${res.status}).`,
     );
   }
   return (await res.json()) as HealthStats;

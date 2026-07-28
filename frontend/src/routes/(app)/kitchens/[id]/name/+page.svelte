@@ -25,7 +25,7 @@
       await qc.invalidateQueries({ queryKey: ["kitchens"] });
       await goto(`/kitchens/${k.id}`);
     } catch (e) {
-      error = e instanceof Error ? e.message : "could not rename the kitchen";
+      error = e instanceof Error ? e.message : "Couldn't rename the kitchen.";
       throw e;
     }
   }

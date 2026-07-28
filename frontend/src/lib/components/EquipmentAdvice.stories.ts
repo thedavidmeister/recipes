@@ -79,5 +79,5 @@ export const Pending: Story = {
 };
 
 export const Failed: Story = {
-  args: { status: "error", error: "Your session has expired." },
+  args: { status: "error", error: "You've been signed out. Sign in again to carry on." },
 };

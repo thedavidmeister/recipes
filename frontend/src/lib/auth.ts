@@ -39,7 +39,8 @@ export function botLink(): string {
 export async function me(): Promise<User | null> {
   const res = await apiFetch("/api/me");
   if (res.status === 401) return null;
-  if (!res.ok) throw new Error(`could not check session (${res.status})`);
+  if (!res.ok)
+    throw new Error(`Couldn't check whether you're signed in (${res.status}).`);
   return (await res.json()) as User;
 }
 
@@ -53,11 +54,11 @@ export async function completeLogin(c: string): Promise<void> {
     body: JSON.stringify({ c }),
   });
   if (res.status === 401) throw new Error("That link is expired or already used.");
-  if (!res.ok) throw new Error(`could not sign in (${res.status})`);
+  if (!res.ok) throw new Error(`Couldn't sign you in (${res.status}).`);
 }
 
 /** Drop the session, server-side and in the browser. */
 export async function logout(): Promise<void> {
   const res = await apiFetch("/api/auth/logout", { method: "POST" });
-  if (!res.ok) throw new Error(`logout failed (${res.status})`);
+  if (!res.ok) throw new Error(`Couldn't sign you out (${res.status}).`);
 }

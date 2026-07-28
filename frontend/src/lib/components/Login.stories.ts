@@ -31,6 +31,6 @@ export const ErrorState: Story = {
   args: {
     status: "error",
     link: "https://t.me/lehlehlehbot",
-    error: "could not check session (503)",
+    error: "Couldn't check whether you're signed in (503).",
   },
 };

@@ -15,5 +15,5 @@ export const Default: Story = { args: {} };
 
 /** It didn't land — the reason stays, and so does what you typed. */
 export const Failed: Story = {
-  args: { error: "could not create the kitchen (502)" },
+  args: { error: "Couldn't create the kitchen (502)." },
 };
