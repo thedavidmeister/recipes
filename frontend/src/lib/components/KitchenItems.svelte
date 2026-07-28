@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import Skeleton from "./Skeleton.svelte";
   import Panel from "./Panel.svelte";
   import type { KitchensStatus } from "$lib/types";
@@ -32,6 +33,13 @@
     actionError?: string;
     onAdd?: (item: string) => void | Promise<void>;
     onRemove?: (item: string) => void | Promise<void>;
+    /**
+     * Anything the page wants to say underneath its list, inside the same panel. The
+     * equipment page puts what to add next here (#83): it is advice about the list
+     * directly above, and the one thing to do about it is the field directly above.
+     * The pantry passes nothing.
+     */
+    footer?: Snippet;
   }
 
   let {
@@ -45,6 +53,7 @@
     actionError,
     onAdd,
     onRemove,
+    footer,
   }: Props = $props();
 
   let value = $state("");
@@ -167,6 +176,8 @@
           </p>
         {/if}
       {/if}
+
+      {#if footer}{@render footer()}{/if}
     {/if}
   </Panel>
 </div>

@@ -280,9 +280,16 @@ struct Bounds {
 ///   #79) — so `total_seconds <= cap` never *proves* a recipe fits. Excluding
 ///   "unknown" while admitting "at least this long" would hold the two to different
 ///   standards for the same uncertainty.
-/// - Most of the corpus has no step reading yet; excluding `NULL` would empty a capped
-///   pick outright. Enrichment is an addition, never a gate — a recipe must not vanish
-///   from the product because a worker has not read it yet.
+/// - Enrichment is an addition, never a gate — a recipe must not vanish from the product
+///   because a worker has not read it yet. Measured against production while #163 was
+///   being landed, 77 of 790 recipes carry no estimate; the number shrinks as the worker
+///   reads, and the ruling does not depend on its size, because a newly ingested recipe
+///   always sits unread for a while.
+///
+/// Now that every plan is *born* capped (#163) this is the common path rather than the
+/// exception, which is the same measurement seen from the other side: a 1800-second cap
+/// leaves 390 of 790 recipes — 313 that fit it on the estimate we have, plus those 77 we
+/// cannot time at all.
 ///
 /// # The kitchen limit (#82)
 ///
