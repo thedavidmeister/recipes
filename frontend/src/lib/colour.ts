@@ -21,14 +21,11 @@
  * a colour has to survive all of them (#131):
  *
  * - `dot` — the solid `-500` mark beside a name. The saturated end of the hue.
- * - `tint` — the `-100` wash a *row* they have claimed is filled with: a ticked
- *   shopping line, a yes already cast. A tint rather than the solid, because a
+ * - `tint` — the `-100` wash a thing they have claimed is filled with: a ticked
+ *   shopping line, a pill the host chose. A tint rather than the solid, because a
  *   `-500` fill would have to carry text, and no single text colour is legible on
  *   all six (`honey-500` is nearly as light as the paper; `berry-500` is nearly as
  *   dark as the ink). On the `-100`s the ink never changes and stays past 12:1.
- *   A row is not a button: a *button* wears the app's one button language (cream
- *   surface, cocoa outline, a coloured dot) and says whose it is with the dot
- *   alone, so nothing here fills a control with a person (#164).
  * - `accent` — the same `-500` as `accent-color` on a native checkbox, so the box
  *   a person ticked is filled in *their* colour. The browser draws the tick itself
  *   and picks its own contrasting mark against the accent, which is exactly the
@@ -51,36 +48,42 @@ export const USER_COLOURS = [
     dot: "bg-pesto-500",
     tint: "bg-pesto-100",
     accent: "accent-pesto-500",
+    edge: "border-pesto-500",
   },
   {
     token: "plum",
     dot: "bg-plum-500",
     tint: "bg-plum-100",
     accent: "accent-plum-500",
+    edge: "border-plum-500",
   },
   {
     token: "paprika",
     dot: "bg-paprika-500",
     tint: "bg-paprika-100",
     accent: "accent-paprika-500",
+    edge: "border-paprika-500",
   },
   {
     token: "honey",
     dot: "bg-honey-500",
     tint: "bg-honey-100",
     accent: "accent-honey-500",
+    edge: "border-honey-500",
   },
   {
     token: "sea",
     dot: "bg-sea-500",
     tint: "bg-sea-100",
     accent: "accent-sea-500",
+    edge: "border-sea-500",
   },
   {
     token: "berry",
     dot: "bg-berry-500",
     tint: "bg-berry-100",
     accent: "accent-berry-500",
+    edge: "border-berry-500",
   },
 ] as const;
 
@@ -114,17 +117,11 @@ export function userColour(telegramUserId: string): string {
 }
 
 /**
- * The `-100` fill class for a user — the wash on a *row* they have claimed.
+ * The `-100` fill class for a user — the wash on something they have claimed.
  *
- * Attribution as a *surface* rather than a mark: a ticked shopping line or a yes
- * already cast is filled with it, so "whose is this" is answered by the shape
- * itself instead of by a badge beside it (#131). A list of lines is the one place
- * that pays off — the eye sweeps the column and the claimed ones group by hue
- * without reading a word.
- *
- * Not for buttons (#164). A button already has the app's device for whose it is —
- * the dot — so tinting one says the same thing twice and costs it the shared
- * button language on the way.
+ * Attribution as a *surface* rather than a mark: a ticked shopping line or a pill
+ * the host chose is filled with it, so "whose is this" is answered by the shape
+ * itself instead of by a badge beside it (#131).
  */
 export function userTint(telegramUserId: string): string {
   return slotFor(telegramUserId).tint;
@@ -142,10 +139,16 @@ export function userAccent(telegramUserId: string): string {
   return slotFor(telegramUserId).accent;
 }
 
-/*
- * There is deliberately no per-user *border* (#164). A control is a button before
- * it is anybody's: it wears the one cocoa outline every button in the app wears,
- * and says whose it is with the dot. A hue-matched edge is only ever wanted to
- * stop a cocoa ring clashing with a fill in somebody's colour — and no control
- * here carries such a fill, so there is nothing for one to settle.
+/**
+ * The border class for a user — their own edge, for a control already filled with
+ * their tint.
+ *
+ * A cocoa outline round a fill in somebody else's hue reads as two decisions
+ * arguing. The edge belongs to whoever the fill belongs to. It is reinforcement,
+ * not the boundary that carries the meaning: the control is identified by its
+ * `stone-900` label and its dot, which is what lets the two palest slots wear
+ * their own edge like the other four rather than borrowing one.
  */
+export function userEdge(telegramUserId: string): string {
+  return slotFor(telegramUserId).edge;
+}

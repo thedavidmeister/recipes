@@ -11,7 +11,7 @@
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
-  import { userColour } from "$lib/colour";
+  import { userColour, userEdge, userTint } from "$lib/colour";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -30,20 +30,21 @@
    * the kitchen — so "who is here" is a glance rather than a read.
    *
    * So does every choice on the plan. What the meal is, what comes with it and how
-   * long there is are all the host's calls, and a chosen pill says so with the
-   * host's dot (#131) — the app's one device for whose a thing is, the same one
-   * `Start` and `Let's cook!` wear. A guest reads "someone decided this, and it was
-   * them" off the mark rather than off a flat fill that could have come from
-   * anywhere.
+   * long there is are all the host's calls, and a chosen pill wears the host's
+   * colour whole — their tint, their edge, their dot (#131). A guest reads "someone
+   * decided this, and it was them" off the pill itself, not off a flat grey fill
+   * that could have come from anywhere.
    *
-   * These are buttons, so they are in the app's button language and nothing else
-   * (#164): one device per meaning, and colour says its one thing once. Whose it
-   * is, the dot; that it is chosen, a quiet achromatic fill and `aria-pressed`, so
-   * chosen-ness never leans on colour perception; that it is a button, the same
-   * stone outline `Button` wears. Nothing here is filled with a person — a tinted
-   * control makes the shared ring look like an argument, and then the ring has to
-   * be recoloured too, and the pill is a different species of button
-   * from the rest of the app.
+   * A resting pill is in the app's ordinary button language — cream, a quiet stone
+   * outline, secondary ink — which is the half of #164 that was right: a cocoa
+   * outline *and* cocoa text made the meal row a different species of control from
+   * every other button on the page. The half that was wrong was answering that by
+   * draining the colour out of the chosen ones too, which only moved the brown from
+   * the outline into the fill.
+   *
+   * Chosen-ness does not lean on colour perception: `aria-pressed`, the full-strength
+   * label and the dot all say it, and the tint is the fourth signal rather than the
+   * only one.
    */
   interface Props {
     status: "pending" | "error" | "ready";
@@ -146,20 +147,37 @@
     );
 
   /**
-   * The classes for a pill the host has chosen: the `stone-300` outline `Button`
-   * wears, a `stone-200` fill, and ink at full strength.
+   * The classes for a pill the host has chosen: **the host's own colour**, all the
+   * way through — their `-100` tint as the fill, their `-500` as the edge, their dot
+   * beside the label, ink at full strength.
    *
-   * The fill is achromatic on purpose — "chosen" is the one thing every viewer has
-   * to be able to see, so it may not ride on a hue (the same call #155 made for the
-   * buy rows). It is a step down in weight from the `cream-50` paper a bare pill
-   * sits on, not a step sideways in colour, so it survives greyscale and reads the
-   * same behind a pale host as behind a dark one.
+   * A choice in this lobby is somebody's, and this app says whose in colour (#131).
+   * The one thing the edge may not be is brown: a cocoa or stone outline drawn round
+   * a fill in somebody's hue reads as two decisions arguing, which is the whole of
+   * what #164 was about. The edge belongs to whoever the fill belongs to.
    *
-   * It does not depend on the host, so it is a constant: whose the choice is lives
-   * on the dot beside the label, and a lobby still loading simply has no dot yet —
-   * an unattributed choice, not a wrong one.
+   * It is reinforcement rather than the boundary carrying the meaning — the pill is
+   * identified by its `stone-900` label, its dot and `aria-pressed`, so nothing here
+   * asks a `-500` to be a control's boundary on its own. That is what lets the two
+   * palest slots wear their own edge like the other four, and none of the six is
+   * weaker than the neutral it replaces: `honey-500`, the palest, sits at 2.0:1 on
+   * cream against the `stone-300` unchosen border's 1.65:1.
+   *
+   * With no host loaded yet there is no colour to wear, so the pill falls back to the
+   * resting outline and simply has no dot — an unattributed choice, not a wrong one.
    */
-  const CHOSEN_PILL = "border-stone-300 bg-stone-200 border text-stone-900";
+  const chosenPill = (id: string | undefined) =>
+    id
+      ? `border ${userEdge(id)} ${userTint(id)} text-stone-900`
+      : "border border-stone-300 text-stone-900";
+
+  /**
+   * A pill nobody has chosen: the resting `Button` language exactly — cream paper, a
+   * quiet `stone-300` outline, secondary ink. It was a cocoa outline **and** cocoa
+   * text, which made the meal row look like a different species of control from every
+   * other button on the page (#164 again, the half of it that was right).
+   */
+  const RESTING_PILL = "border border-stone-300 text-stone-600";
 
   let copied = $state(false);
 
@@ -217,8 +235,8 @@
               onclick={() => onMealType?.(t)}
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {t ===
               mealType
-                ? CHOSEN_PILL
-                : 'border-stone-300 text-stone-600 border'}"
+                ? chosenPill(hostId)
+                : RESTING_PILL}"
             >
               {#if t === mealType && hostId}
                 <span
@@ -244,8 +262,8 @@
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {additions.includes(
                 a,
               )
-                ? CHOSEN_PILL
-                : 'border-stone-300 text-stone-600 border'}"
+                ? chosenPill(hostId)
+                : RESTING_PILL}"
             >
               {#if additions.includes(a) && hostId}
                 <span
@@ -270,8 +288,8 @@
               onclick={() => onCap?.(b.seconds)}
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {cap ===
               b.seconds
-                ? CHOSEN_PILL
-                : 'border-stone-300 text-stone-600 border'}"
+                ? chosenPill(hostId)
+                : RESTING_PILL}"
             >
               {#if cap === b.seconds && hostId}
                 <span
@@ -294,7 +312,7 @@
              settable: the cap is the host's call (#80). -->
         <p class="mt-6 text-sm text-stone-600">
           <span
-            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {CHOSEN_PILL}"
+            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(hostId)}"
           >
             {#if hostId}
               <span
