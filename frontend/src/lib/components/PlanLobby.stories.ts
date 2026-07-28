@@ -11,14 +11,21 @@ const meta = {
     onMealType: () => {},
     onAdditions: () => {},
     onCap: () => {},
+    onLeave: () => {},
   },
 } satisfies Meta<typeof PlanLobby>;
 export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** Alone, which is a complete meal plan: start whenever, or invite someone first.
- * Every plan is born for dinner (#114); the host's picker is there to say otherwise. */
+/**
+ * Alone, which is a complete meal plan: start whenever, or invite someone first.
+ * Every plan is born for dinner (#114); the host's picker is there to say otherwise.
+ *
+ * Also the last-person-out case for leaving (#96): with nobody else here, walking
+ * away ends the plan rather than shrinking it, so the button says so before it is
+ * tapped instead of a modal asking afterwards.
+ */
 export const Solo: Story = {
   args: {
     status: "ready",
@@ -30,7 +37,14 @@ export const Solo: Story = {
   },
 };
 
-/** Three deciding — the number a recipe now has to win over. */
+/**
+ * Three deciding — the number a recipe now has to win over.
+ *
+ * And the host-leaving case (#96): the plan passes to the next person in the room
+ * rather than being taken down, so the note under Leave names who would get it. A
+ * host who could not leave would be trapped in their own plan, and one who took it
+ * down with them would cancel a meal other people are having.
+ */
 export const Gathered: Story = {
   args: {
     status: "ready",

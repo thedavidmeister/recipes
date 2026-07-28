@@ -256,7 +256,13 @@ pub fn app(state: AppState) -> Router {
         // never anonymous (#25).
         .route("/session", post(session::create))
         .route("/session/{channel}", get(session::lobby))
-        .route("/session/{channel}/join", post(session::join_lobby))
+        // Joining and leaving (#96) are one thing said in two directions, so they
+        // share a path with two verbs rather than becoming `/join` and `/leave`,
+        // which could drift apart.
+        .route(
+            "/session/{channel}/join",
+            post(session::join_lobby).delete(session::leave_lobby),
+        )
         .route("/session/{channel}/start", post(session::start))
         .route("/session/{channel}/seat", post(session::seat))
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
@@ -2576,5 +2582,383 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ---- leaving a plan (#96) ----------------------------------------------
+
+    /// A `DELETE` with a cookie — the way out of a plan.
+    fn delete_req(uri: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("DELETE").uri(uri);
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// Seat `who` into `channel` as the host, through the router.
+    async fn seat_into(app: &Router, host_cookie: &str, channel: &str, who: &str) {
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/seat"),
+                Some(host_cookie),
+                &format!(r#"{{"user_id":"{who}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// Leaving is a person-facing act, so it is session-gated like the rest (#25).
+    #[tokio::test]
+    async fn leaving_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let cookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &kid).await;
+
+        let res = app
+            .oneshot(delete_req(&format!("/api/session/{channel}/join"), None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// An unknown channel is a client bug, not a plan to leave — 400, the same answer
+    /// every other read of a channel gives.
+    #[tokio::test]
+    async fn leaving_an_unknown_plan_is_a_bad_request() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(delete_req(
+                "/api/session/nope/join",
+                Some(&format!("recipes_session={token}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Someone who was never in the plan is refused rather than quietly answered —
+    /// 403, because the session is valid and the identity simply is not on the
+    /// roster. Holding the channel id is not membership.
+    #[tokio::test]
+    async fn leaving_a_plan_you_are_not_in_is_forbidden() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let stranger = auth::issue_test_session(&conn, "stranger").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&format!("recipes_session={stranger}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // And the plan is untouched by the attempt.
+        let res = app
+            .oneshot(get_req(&format!("/api/session/{channel}"), &hcookie))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["voters"].as_array().unwrap().len(), 1);
+    }
+
+    /// A guest leaves the lobby end to end: the answer names where to go back to, the
+    /// plan carries on under the same host, and the roster is one shorter.
+    #[tokio::test]
+    async fn a_guest_leaves_the_lobby_and_lands_back_in_the_kitchen() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        seat_into(&app, &hcookie, &channel, "mel").await;
+        let mel = auth::issue_test_session(&conn, "mel").await;
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&format!("recipes_session={mel}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["channel_id"], channel);
+        assert_eq!(body["kitchen_id"], kid, "back where the plan was called");
+        assert_eq!(body["plan_ended"], false);
+        assert_eq!(body["host"], "host", "a guest leaving moves nothing");
+
+        let res = app
+            .oneshot(get_req(&format!("/api/session/{channel}"), &hcookie))
+            .await
+            .unwrap();
+        let lobby = body_json(res).await;
+        assert_eq!(lobby["voters"].as_array().unwrap().len(), 1);
+        assert_eq!(lobby["host"], "host");
+    }
+
+    /// Leaving is allowed **after** the start, which is the whole point of it: a
+    /// person who joined and went to bed otherwise holds the plan hostage, because
+    /// every recipe needs a yes that is never coming.
+    #[tokio::test]
+    async fn leaving_is_allowed_after_the_plan_has_started() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        seat_into(&app, &hcookie, &channel, "mel").await;
+        let mel = auth::issue_test_session(&conn, "mel").await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&hcookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // A late *joiner* is still refused — the roster may shrink, never grow.
+        let outsider = auth::issue_test_session(&conn, "outsider").await;
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/join"),
+                Some(&format!("recipes_session={outsider}")),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&format!("recipes_session={mel}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["plan_ended"], false);
+
+        let res = app
+            .oneshot(get_req(&format!("/api/session/{channel}"), &hcookie))
+            .await
+            .unwrap();
+        let lobby = body_json(res).await;
+        assert_eq!(lobby["started"], true, "the plan is still under way");
+        assert_eq!(lobby["voters"].as_array().unwrap().len(), 1);
+    }
+
+    /// The host is not trapped in their own plan: leaving hands it to the next person
+    /// in the room, who then holds the host-only powers.
+    #[tokio::test]
+    async fn a_departing_host_hands_the_plan_to_the_next_person() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        seat_into(&app, &hcookie, &channel, "mel").await;
+        let mel = auth::issue_test_session(&conn, "mel").await;
+        let mcookie = format!("recipes_session={mel}");
+
+        // Mel cannot start it while the host is here.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&mcookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&hcookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["plan_ended"], false);
+        assert_eq!(body["host"], "mel", "handed on, not taken down");
+
+        // …and now she can, which is what "hands it on" has to mean to be worth
+        // anything: the plan is startable rather than stranded.
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&mcookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["started"], true);
+    }
+
+    /// The last person out closes the plan, so a stale link finds nothing to rejoin —
+    /// an empty plan must not linger as a ghost.
+    #[tokio::test]
+    async fn the_last_person_out_ends_the_plan() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&hcookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["plan_ended"], true);
+        assert_eq!(body["host"], serde_json::Value::Null);
+        assert_eq!(body["kitchen_id"], kid);
+
+        // The link is dead: nothing to read, and nothing to be seated into.
+        let res = app
+            .clone()
+            .oneshot(get_req(&format!("/api/session/{channel}"), &hcookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let stranger = auth::issue_test_session(&conn, "stranger").await;
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/join"),
+                Some(&format!("recipes_session={stranger}")),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Leaving releases the shopping claims the leaver was holding (#131): the lines
+    /// go back on the list for somebody else, and nobody else's ticks move.
+    #[tokio::test]
+    async fn leaving_puts_your_shopping_claims_back_on_the_list() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        seat_into(&app, &hcookie, &channel, "mel").await;
+        let mel = auth::issue_test_session(&conn, "mel").await;
+        let mcookie = format!("recipes_session={mel}");
+
+        for (cookie, index) in [(&hcookie, 0), (&mcookie, 1)] {
+            let res = app
+                .clone()
+                .oneshot(json_post(
+                    &format!("/api/session/{channel}/buy"),
+                    Some(cookie),
+                    &format!(
+                        r#"{{"source":"themealdb","id":"52772","index":{index},"checked":true}}"#
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&mcookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &hcookie,
+            ))
+            .await
+            .unwrap();
+        let checks = body_json(res).await;
+        let checks = checks["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 1, "mel's line is unclaimed again");
+        assert_eq!(checks[0]["index"], 0);
+        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
+    }
+
+    /// Having left, you are out: a second attempt is refused, and the plan cannot be
+    /// written to as a member any more.
+    #[tokio::test]
+    async fn leaving_twice_is_refused_the_second_time() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+        let kid = make_kitchen(&app, &hcookie, "Home").await;
+        let channel = make_plan(&app, &hcookie, &kid).await;
+        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
+        seat_into(&app, &hcookie, &channel, "mel").await;
+        let mel = auth::issue_test_session(&conn, "mel").await;
+        let mcookie = format!("recipes_session={mel}");
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&mcookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/api/session/{channel}/join"),
+                Some(&mcookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // The shopping list is a decider-only write, and she is not one now.
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&mcookie),
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 }

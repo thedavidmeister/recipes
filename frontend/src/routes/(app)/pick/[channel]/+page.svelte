@@ -10,6 +10,7 @@
     fetchCard,
     getLobby,
     joinLobby,
+    leavePlan,
     startPlan,
     seatMember,
     setAdditions,
@@ -66,6 +67,12 @@
   let started = $state<boolean | undefined>(); // undefined until the lobby is known
   let lobby = $state<Lobby | undefined>();
   let lobbyError = $state<string | undefined>();
+  // Who last stepped out (#96), and whether that emptied the plan. Sticky: the
+  // roster is the number a recipe has to win over, so a departure can complete an
+  // agreement that was one holdout away, and the room is owed the reason rather
+  // than a target that moved by itself.
+  let departed = $state<Voter | undefined>();
+  let planEnded = $state(false);
 
   // Dedupe only (never rendered), so plain Sets are fine. `queued` guards the deck
   // (a recipe is queued once); `pulling` guards in-flight card fetches so a failing
@@ -241,6 +248,26 @@
     }
   }
 
+  /**
+   * Step out of the plan (#96), in the lobby or mid-swipe.
+   *
+   * The socket is closed *before* the request lands so this client cannot vote its
+   * way back into a tally it has just been removed from, and then it goes back to
+   * the kitchen the plan was called in — or to `/`, which resolves your own.
+   */
+  async function leave() {
+    try {
+      client?.stop();
+      const gone = await leavePlan(channel);
+      await goto(gone.kitchen_id ? `/kitchens/${gone.kitchen_id}` : "/");
+    } catch (e) {
+      // Still in the plan, so the room is still worth listening to.
+      client?.start();
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't leave this meal plan.";
+    }
+  }
+
   async function seat(userId: string) {
     try {
       lobby = await seatMember(channel, userId);
@@ -300,6 +327,16 @@
         // The roster changed under us — re-read it so the lobby list matches the
         // number it is about to be measured against.
         if (!begun) void refreshLobby();
+      },
+      onLeft: (who, ended) => {
+        departed = who;
+        // Everyone left, so there is no plan to keep swiping in — only a
+        // non-decider can still be listening at that point, and letting them carry
+        // on would be swiping into a channel that no longer exists.
+        if (ended) {
+          planEnded = true;
+          client?.stop();
+        }
       },
       onTally: (participants, votes) => {
         serverParticipants = participants;
@@ -407,14 +444,18 @@
     }
   });
 
+  // An ended plan outranks every connection state: the room is gone, so
+  // "reconnecting…" would be a promise nothing can keep (#96).
   const status = $derived<PickStatus>(
-    conn === "reconnecting"
-      ? "reconnecting"
-      : current
-        ? "swiping"
-        : conn === "connecting" || !loadedOnce
-          ? "connecting"
-          : "loading",
+    planEnded
+      ? "ended"
+      : conn === "reconnecting"
+        ? "reconnecting"
+        : current
+          ? "swiping"
+          : conn === "connecting" || !loadedOnce
+            ? "connecting"
+            : "loading",
   );
 
   function vote(y: boolean) {
@@ -444,8 +485,10 @@
     {yesVoters}
     shareUrl={page.url.href}
     {copied}
+    {departed}
     onVote={vote}
     onShare={share}
+    onLeave={leave}
   />
 {:else}
   <!-- Until the host begins, this is the lobby: the plan exists, the roster is still
@@ -466,5 +509,6 @@
     onMealType={chooseMeal}
     onAdditions={chooseAdditions}
     onCap={capPlan}
+    onLeave={leave}
   />
 {/if}

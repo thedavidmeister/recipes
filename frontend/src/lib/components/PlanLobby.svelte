@@ -72,6 +72,9 @@
     onAdditions?: (additions: MealAddition[]) => void;
     /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
     onCap?: (cap: number | null) => void;
+    /** Step out of the plan (#96). Everyone has it, the host included — a host who
+     * cannot leave is trapped in their own plan. */
+    onLeave?: () => void;
   }
 
   let {
@@ -90,7 +93,25 @@
     onMealType,
     onAdditions,
     onCap,
+    onLeave,
   }: Props = $props();
+
+  /**
+   * What leaving would do, said before it is tapped rather than confirmed after.
+   *
+   * Leaving is cheap for a guest and consequential for the last person or the host,
+   * so the warning belongs on the two cases that carry a consequence — a modal
+   * asking "are you sure" on all three would tax the ordinary case to cover the
+   * unusual one, and would say less.
+   */
+  const lastOneHere = $derived(voters.length <= 1);
+  /** Who the plan would pass to: the next person in the room, which is the order
+   * the roster above is already listed in. */
+  const successor = $derived(
+    host && !lastOneHere
+      ? voters.find((v) => v.telegram_user_id !== hostId)
+      : undefined,
+  );
 
   /**
    * The presented time buckets (#80). A UI vocabulary, deliberately not a schema:
@@ -339,6 +360,32 @@
           Waiting for whoever started this to begin.
         </p>
       {/if}
+
+      <!-- The way out (#96). Quiet — stone, not cocoa — because it is the opposite
+           of the thing this page is for, but present for everyone including the
+           host: the roster is the number a recipe has to win over, so a person who
+           cannot leave holds the plan hostage. -->
+      <div class="mt-8 border-t border-stone-200 pt-4">
+        <button
+          type="button"
+          onclick={() => onLeave?.()}
+          class="rounded-pill border border-stone-300 px-3 py-1 text-sm text-stone-600"
+        >
+          Leave
+        </button>
+        {#if lastOneHere}
+          <p class="mt-2 text-xs text-stone-500">
+            You're the only one here, so leaving ends this plan.
+          </p>
+        {:else if successor}
+          <p class="mt-2 text-xs text-stone-500">
+            You started this, so leaving hands it to <UserName
+              user={successor}
+              inline
+            />.
+          </p>
+        {/if}
+      </div>
     {/if}
   </Panel>
 </div>
