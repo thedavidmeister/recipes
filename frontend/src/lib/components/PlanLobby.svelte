@@ -38,7 +38,13 @@
    * and that is exactly why they are safe to use for all six people.
    */
   interface Props {
-    status: "pending" | "error" | "ready";
+    /**
+     * `ended` is the plan everybody walked out of (#96). It belongs here rather
+     * than on the swipe view because a plan can only be emptied *before* it starts
+     * — the roster closes at the start in both directions — so the lobby is the
+     * only screen that can still be open on a plan that no longer exists.
+     */
+    status: "pending" | "error" | "ready" | "ended";
     voters?: Voter[];
     /** Kitchen members not yet in — the host can add them without a link (#72). */
     candidates?: Voter[];
@@ -74,6 +80,14 @@
     onAdditions?: (additions: MealAddition[]) => void;
     /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
     onCap?: (cap: number | null) => void;
+    /** Step out of the plan (#96). Everyone has it, the host included — a host who
+     * cannot leave is trapped in their own plan.
+     *
+     * And **only** here. The roster closes at the start in both directions, so the
+     * lobby is the whole of the way out: once the swiping begins the set of people
+     * a recipe has to win over is fixed, and neither a late joiner nor a departure
+     * may move it under everybody. */
+    onLeave?: () => void;
   }
 
   let {
@@ -92,7 +106,25 @@
     onMealType,
     onAdditions,
     onCap,
+    onLeave,
   }: Props = $props();
+
+  /**
+   * What leaving would do, said before it is tapped rather than confirmed after.
+   *
+   * Leaving is cheap for a guest and consequential for the last person or the host,
+   * so the warning belongs on the two cases that carry a consequence — a modal
+   * asking "are you sure" on all three would tax the ordinary case to cover the
+   * unusual one, and would say less.
+   */
+  const lastOneHere = $derived(voters.length <= 1);
+  /** Who the plan would pass to: the next person in the room, which is the order
+   * the roster above is already listed in. */
+  const successor = $derived(
+    host && !lastOneHere
+      ? voters.find((v) => v.telegram_user_id !== hostId)
+      : undefined,
+  );
 
   /**
    * The presented time buckets (#80). A UI vocabulary, deliberately not a schema:
@@ -179,7 +211,17 @@
       </p>
     {/if}
 
-    {#if status === "error"}
+    {#if status === "ended"}
+      <!-- Stated, not styled as a failure: nothing went wrong. The last person in
+           the plan left it, so it is simply over (#96) and the link no longer
+           resolves. Said plainly, in the same place the error would be, because
+           the one thing this screen must not do is keep offering a Start and a
+           Leave for a plan that is gone. -->
+      <p class="font-display mt-4 text-stone-900">This meal plan is over.</p>
+      <p class="mt-1 text-sm text-stone-600">
+        Everyone left it, so there is nothing left to decide.
+      </p>
+    {:else if status === "error"}
       <p class="mt-4 text-sm text-stone-600">
         {error ?? "Couldn't open this meal plan."}
       </p>
@@ -346,6 +388,32 @@
           Waiting for whoever started this to begin.
         </p>
       {/if}
+
+      <!-- The way out (#96). Quiet — stone, not cocoa — because it is the opposite
+           of the thing this page is for, but present for everyone including the
+           host: the roster is the number a recipe has to win over, so a person who
+           cannot leave holds the plan hostage. -->
+      <div class="mt-8 border-t border-stone-200 pt-4">
+        <button
+          type="button"
+          onclick={() => onLeave?.()}
+          class="rounded-pill border border-stone-300 px-3 py-1 text-sm text-stone-600"
+        >
+          Leave
+        </button>
+        {#if lastOneHere}
+          <p class="mt-2 text-xs text-stone-500">
+            You're the only one here, so leaving ends this plan.
+          </p>
+        {:else if successor}
+          <p class="mt-2 text-xs text-stone-500">
+            You started this, so leaving hands it to <UserName
+              user={successor}
+              inline
+            />.
+          </p>
+        {/if}
+      </div>
     {/if}
   </Panel>
 </div>

@@ -180,6 +180,12 @@ export type MealAddition = (typeof MEAL_ADDITIONS)[number];
  * - `loading` — the deck ran low; fetching more from the walk. A pick is **endless**
  *   until you decide (there is no "caught up"), so this is a brief bridge, not a stop.
  * - `error` — the room could not be reached.
+ *
+ * There is deliberately no "the plan ended" state here. A plan can only be emptied
+ * before it starts (#96 — the roster closes at the start in both directions), and
+ * this view only exists after it has started, so a swipe view can never be looking
+ * at a plan that everyone walked out of. That state lives on `PlanLobby`, which is
+ * the only screen it can reach.
  */
 export type PickStatus =
   | "connecting"

@@ -10,6 +10,7 @@
     fetchCard,
     getLobby,
     joinLobby,
+    leavePlan,
     startPlan,
     seatMember,
     setAdditions,
@@ -66,6 +67,10 @@
   let started = $state<boolean | undefined>(); // undefined until the lobby is known
   let lobby = $state<Lobby | undefined>();
   let lobbyError = $state<string | undefined>();
+  // The last person walked out, so this plan is gone (#96). Only ever reachable
+  // while the lobby is open — a plan can only be emptied before it starts — so it
+  // is the lobby that says so, and it outranks everything else it could say.
+  let planEnded = $state(false);
 
   // Dedupe only (never rendered), so plain Sets are fine. `queued` guards the deck
   // (a recipe is queued once); `pulling` guards in-flight card fetches so a failing
@@ -241,6 +246,28 @@
     }
   }
 
+  /**
+   * Step out of the plan (#96) — a lobby act, because that is the only place the
+   * roster moves at all: it closes at the start in both directions, so the server
+   * refuses this once the swiping has begun.
+   *
+   * The socket is closed *before* the request lands, so a client on its way out is
+   * not still holding a room it is being removed from, and then it goes back to the
+   * kitchen the plan was called in — or to `/`, which resolves your own.
+   */
+  async function leave() {
+    try {
+      client?.stop();
+      const gone = await leavePlan(channel);
+      await goto(gone.kitchen_id ? `/kitchens/${gone.kitchen_id}` : "/");
+    } catch (e) {
+      // Still in the plan, so the room is still worth listening to.
+      client?.start();
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't leave this meal plan.";
+    }
+  }
+
   async function seat(userId: string) {
     try {
       lobby = await seatMember(channel, userId);
@@ -300,6 +327,18 @@
         // The roster changed under us — re-read it so the lobby list matches the
         // number it is about to be measured against.
         if (!begun) void refreshLobby();
+      },
+      onLeft: (_who, ended) => {
+        // Who left is not rendered: a lobby announces neither arrivals nor
+        // departures, it shows who is here, and the roster frame beside this one
+        // already re-reads that list. What has no other frame to carry it is the
+        // plan being gone — nobody is left to send a smaller roster — so that is
+        // what this handler is for. Stop listening to a room that no longer
+        // exists rather than leaving a socket to reconnect at nothing.
+        if (ended) {
+          planEnded = true;
+          client?.stop();
+        }
       },
       onTally: (participants, votes) => {
         serverParticipants = participants;
@@ -449,9 +488,19 @@
   />
 {:else}
   <!-- Until the host begins, this is the lobby: the plan exists, the roster is still
-       forming, and nothing is being decided yet. -->
+       forming, and nothing is being decided yet. It is also where a plan can end —
+       the roster only moves before the start (#96), so the last person out empties
+       it here, and "this plan is over" outranks anything else the lobby could say:
+       every read of a channel that no longer exists 400s, which would otherwise
+       show as "couldn't open this meal plan" and send someone hunting a fault. -->
   <PlanLobby
-    status={lobbyError ? "error" : lobby ? "ready" : "pending"}
+    status={planEnded
+      ? "ended"
+      : lobbyError
+        ? "error"
+        : lobby
+          ? "ready"
+          : "pending"}
     voters={lobby?.voters}
     candidates={lobby?.candidates}
     mealType={lobby?.meal_type}
@@ -466,5 +515,6 @@
     onMealType={chooseMeal}
     onAdditions={chooseAdditions}
     onCap={capPlan}
+    onLeave={leave}
   />
 {/if}

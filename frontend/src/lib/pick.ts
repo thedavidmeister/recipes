@@ -113,7 +113,8 @@ export type ServerMsg =
       source: string;
       id: string;
       checks: RoomBuyCheck[];
-    };
+    }
+  | { type: "left"; voter: Voter; ended: boolean };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -152,6 +153,13 @@ export interface PickHandlers {
   /** One recipe's shopping checklist, **whole** — someone ticked or unticked a
    * line, so this replaces the list rather than merging into it (#131). */
   onBuy?: (source: string, id: string, checks: RoomBuyCheck[]) => void;
+  /** Somebody left the plan (#96) — always from its lobby, because that is the only
+   * place the roster moves. The `lobby` frame beside this one already carries the
+   * smaller roster, so `voter` is who, for a screen that wants to name them.
+   *
+   * `ended` is the part nothing else can say: they were the last, so the plan itself
+   * is gone and there is no roster left to send. */
+  onLeft?: (voter: Voter, ended: boolean) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
@@ -226,6 +234,8 @@ export class PickClient {
         this.handlers.onVote?.(msg.voter, msg.source, msg.id, msg.vote);
       } else if (msg.type === "buy") {
         this.handlers.onBuy?.(msg.source, msg.id, msg.checks);
+      } else if (msg.type === "left") {
+        this.handlers.onLeft?.(msg.voter, msg.ended);
       }
     };
     ws.onclose = () => {
@@ -298,6 +308,38 @@ export async function joinLobby(channel: string): Promise<Lobby> {
   );
   if (!res.ok) throw lobbyFailed(res.status, "join this meal plan");
   return (await res.json()) as Lobby;
+}
+
+/** What a departure left behind (#96). Mirrors `session::Departure`. */
+export interface Departure {
+  channel_id: string;
+  /** The kitchen the plan was for — where leaving puts you back. Null for a plan
+   * started outside one, in which case the client falls back to your own. */
+  kitchen_id: string | null;
+  /** Whether that was the last person, so the plan is gone rather than smaller. */
+  plan_ended: boolean;
+  /** Who holds the plan now; null when it ended. Different from you exactly when
+   * you were the host and it passed on. */
+  host: string | null;
+}
+
+/**
+ * Leave a meal plan (#96) — the inverse of {@link joinLobby}, on the same path.
+ *
+ * A **lobby** act, exactly like joining: the roster closes at the start in both
+ * directions, so once the swiping has begun the set of people a recipe has to win
+ * over is fixed and this is refused with the same 400 every other lobby write gives.
+ *
+ * If you started the plan it passes to the next person in the room; if you were the
+ * last one in it the plan ends.
+ */
+export async function leavePlan(channel: string): Promise<Departure> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/join`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "leave this meal plan");
+  return (await res.json()) as Departure;
 }
 
 /** Add a kitchen member to the plan without a link. Host only, before it starts. */
