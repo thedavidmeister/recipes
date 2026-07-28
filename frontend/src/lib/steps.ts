@@ -12,17 +12,33 @@ import type { StructuredStep } from "./types";
  * nothing honest to say (#84).
  *
  * The number this formats is `recipes.total_seconds`: the critical path over the
- * same step DAG the rest of this module walks (#79). It is **not** exact and it is
+ * same step DAG the rest of this module walks (#79). It is **never** exact and it is
  * **not** always known, and both are a display problem, so both are handled here
- * rather than at every call site:
+ * rather than at every call site.
  *
- * - **Unknown** (`null`, or a non-positive/garbled value) returns `null`, so the
- *   surface shows *nothing*. An un-read recipe is not an instant one, and "0 min"
- *   would be a confident lie about the case we know least about.
- * - **A lower bound.** Untimed steps ("until golden") contribute nothing to the
- *   path, so the real cook takes *at least* this long. Hence the trailing `+`:
- *   `23 min+` says at-least, where `23 min` would claim exact. Minutes are floored
- *   for the same reason — rounding up would overstate a bound already optimistic.
+ * **Unknown** (`null`, or a non-positive/garbled value) returns `null`, so the
+ * surface shows *nothing*. An un-read recipe is not an instant one, and "0 min"
+ * would be a confident lie about the case we know least about.
+ *
+ * **Otherwise the estimate is marked, and `fullyTimed` picks which mark**, because
+ * the error runs in a different direction in each case (#158):
+ *
+ * - **`false` — a floor.** At least one step carries no duration, so it contributed
+ *   0 to the critical path and the real cook takes *at least* this long. `23 min+`
+ *   says at-least. Minutes are floored for the same reason: rounding up would
+ *   overstate a bound that is already optimistic.
+ * - **`true` — an approximation.** Every step counted, so the remaining error is
+ *   ordinary estimation noise in **both** directions — it is cooking, and every
+ *   duration in it is an estimate, the ones a source printed included. `~23 min`
+ *   says about. A `+` here would claim the number can only be too low, which stopped
+ *   being true the moment the reading stopped leaving holes.
+ *
+ * The caller passes the flag rather than this deciding it, and the flag is a column
+ * (`recipes.fully_timed`) computed by `recipe-core` from the same steps as the total
+ * — so the badge is read off the data at every moment, not assumed from whichever
+ * deploy is live. The corpus is re-read recipe by recipe, in a manual pass that can
+ * lag a deploy by days; hardcoding either mark would make this lie for the whole of
+ * that window.
  *
  * Under an hour reads as minutes (`23 min+`); over it, as hours carrying the
  * remainder (`2 hours 5 min+`). Same "min"/"hour"/"hours" vocabulary the plan lobby
@@ -33,16 +49,24 @@ import type { StructuredStep } from "./types";
  */
 export function formatEstimate(
   seconds: number | null | undefined,
+  fullyTimed = false,
 ): string | null {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  // The whole difference between the two marks: a floor trails `+`, an
+  // approximation leads with `~`. Nothing else about the wording changes, so the
+  // two readings stay comparable at a glance down a deck of cards.
+  const open = fullyTimed ? "~" : "";
+  const close = fullyTimed ? "" : "+";
   const total = Math.floor(seconds);
-  if (total < 60) return `${total} sec+`;
+  if (total < 60) return `${open}${total} sec${close}`;
   const minutes = Math.floor(total / 60);
-  if (minutes < 60) return `${minutes} min+`;
+  if (minutes < 60) return `${open}${minutes} min${close}`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   const label = hours === 1 ? "1 hour" : `${hours} hours`;
-  return rest === 0 ? `${label}+` : `${label} ${rest} min+`;
+  return rest === 0
+    ? `${open}${label}${close}`
+    : `${open}${label} ${rest} min${close}`;
 }
 
 /** A duration as a clock: `30:00`, `1:00`, `1:05:00`. Seconds always two digits. */

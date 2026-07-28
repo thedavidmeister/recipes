@@ -74,6 +74,11 @@ function card(id: string): RecipeCard {
     category: r.category,
     area: r.area,
     total_seconds: r.total_seconds,
+    // Measured, not convenient: of the corpus's 790 recipes **not one** carries a
+    // duration on every step (2,072 of 9,152 are timed, #158), so every sampled row
+    // is a floor and the badge really does read `23 min+`. `fullyTimedCard` is the
+    // other state — what these become as the re-read reaches them.
+    fully_timed: false,
   };
 }
 
@@ -244,6 +249,36 @@ export function recipeCards(): RecipeCard[] {
  */
 export function untimedCard(): RecipeCard {
   return card("53239");
+}
+
+/**
+ * A card whose every step carries a duration, so its estimate is an approximation
+ * rather than a floor and the badge reads `~19 min` instead of `19 min+` (#158/#84).
+ *
+ * TheMealDB 53541 — a real record, and the closest thing the live corpus has to this
+ * state: 4 steps, of which 3 already carry durations the source stated (300s, 300s,
+ * 420s) and one does not — "heat olive oil in a pan over medium-high heat", which
+ * takes about 2 minutes whether or not the recipe says so. That is precisely the step
+ * the #158 re-read fills in. The chain is linear (0 → 1 → 2 → 3), so the critical
+ * path is their sum: the corpus stores 1020 today, counting the unread step as 0, and
+ * 1140 once it is read.
+ *
+ * The 1140 is therefore the one number here the corpus does not yet hold — it cannot,
+ * because no recipe in it is fully timed yet. Everything else (id, image, title,
+ * category, the three stored durations, the shape of the graph) is the live record,
+ * and the arithmetic between them is `total_seconds`'s own.
+ */
+export function fullyTimedCard(): RecipeCard {
+  return {
+    source: "themealdb",
+    id: "53541",
+    title: "Gallo pinto",
+    image: "https://www.themealdb.com/images/media/meals/ytogg31784397116.jpg",
+    category: "Vegetarian",
+    area: null,
+    total_seconds: 1140,
+    fully_timed: true,
+  };
 }
 
 /** The structured readings the base fixture carries — what `buy`/`cook` render (#11). */

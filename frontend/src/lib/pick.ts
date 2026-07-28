@@ -67,7 +67,7 @@ export async function fetchCard(
   const rs = await turso().execute({
     // Named columns, never `SELECT *` — the row is read by name below, and a
     // wildcard would hand back whatever order the table happens to have (#109).
-    sql: "SELECT source, id, title, image, category, area, total_seconds FROM recipes WHERE source = ? AND id = ? LIMIT 1",
+    sql: "SELECT source, id, title, image, category, area, total_seconds, fully_timed FROM recipes WHERE source = ? AND id = ? LIMIT 1",
     args: [source, id],
   });
   const row = rs.rows[0];
@@ -84,6 +84,11 @@ export async function fetchCard(
     // however it reached the deck, and one that arrived this way must not silently
     // lose a field the walk's cards have. `null` stays `null` — unknown, not zero.
     total_seconds: row.total_seconds == null ? null : Number(row.total_seconds),
+    // And the mark that estimate is rendered with (#158). Dropping it here would
+    // show a peer-injected card as a floor (`23 min+`) while the identical card
+    // reached by walking showed `~23 min` — the same recipe contradicting itself
+    // across the deck. SQLite has no boolean type, so this arrives as 0/1.
+    fully_timed: Number(row.fully_timed) !== 0,
   };
 }
 

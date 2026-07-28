@@ -85,6 +85,18 @@ impl Recipe {
     pub fn total_seconds(&self) -> Option<u32> {
         crate::step::total_seconds(&self.steps)
     }
+
+    /// Whether every one of this recipe's steps carries a duration (#158/#84) — so
+    /// whether [`Self::total_seconds`] is a complete estimate or only a lower bound.
+    ///
+    /// Stored beside the total for the same reason the total is stored at all: the
+    /// browser reads Turso directly and cannot run `recipe-core` (no WASM,
+    /// deliberately), and deciding this in JS would be a second definition of "is the
+    /// number complete" free to drift from this one. Read off the same `steps` as the
+    /// total, in the same place, so they cannot disagree.
+    pub fn fully_timed(&self) -> bool {
+        crate::step::fully_timed(&self.steps)
+    }
 }
 
 #[cfg(test)]
