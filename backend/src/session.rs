@@ -535,18 +535,27 @@ pub async fn leave_lobby(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let plan_ended = departed.host.is_none();
+    let (plan_ended, host) = match departed {
+        Removed::Left { host } => (false, Some(host)),
+        Removed::Ended => (true, None),
+        // The roster closed while this was in flight. The same answer every other
+        // lobby write gives, because it is the same fact.
+        Removed::Started => {
+            return Err(AppError::BadRequest(
+                "this meal plan has already started".into(),
+            ));
+        }
+    };
+
     // Tell the room before answering the leaver, so the people still in the plan and
-    // the person walking out of it learn the same thing from the same act. The
-    // whole-state frames go first and the event that explains them last: a client
-    // that reads them in order never renders "someone left" against a roster that
-    // still contains them.
+    // the person walking out of it learn the same thing from the same act. The roster
+    // frame goes first and the event that explains it last: a client that reads them in
+    // order never renders "someone left" against a roster that still contains them.
+    //
+    // Only the roster moves. Leaving is a lobby act, so there are no votes to retract
+    // and no shopping claims to release — nothing else about the meal is decided yet.
     if !plan_ended {
         reload_and_announce(&state, channel).await?;
-        announce_tally(&state, channel).await?;
-        for (source, id) in &departed.released {
-            reload_and_announce_buy(&state, channel, source, id).await?;
-        }
     }
     announce_departure(&state, channel, who, plan_ended);
 
@@ -554,7 +563,7 @@ pub async fn leave_lobby(
         channel_id: channel.to_owned(),
         kitchen_id: view.kitchen_id,
         plan_ended,
-        host: departed.host,
+        host,
     }))
 }
 
@@ -979,32 +988,8 @@ async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyVie
     Ok(view)
 }
 
-/// Re-read the tally and tell the room — the same frame a (re)connecting client
-/// rehydrates from, sent mid-session.
-///
-/// Every other tally update is incremental, because every other one *adds* a vote
-/// and a [`ServerMsg::Vote`] frame is enough to fold in. A departure is the one
-/// thing that takes votes away (#96), and there is no negative vote frame to send —
-/// so the honest correction is the whole tally, which every client already knows how
-/// to replace rather than merge.
-async fn announce_tally(state: &AppState, channel: &str) -> Result<(), AppError> {
-    let (participants, votes) = state
-        .with_db(move |db| async move { load_tally(&db, channel).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let tx = room(&state.rooms, channel);
-    if let Ok(txt) = serde_json::to_string(&ServerMsg::Tally {
-        participants,
-        votes,
-    }) {
-        // No receivers is an error and also a non-event: nobody is listening yet.
-        let _ = tx.send(txt);
-    }
-    Ok(())
-}
-
-/// Name whoever just left to the room (#96) — the event behind the roster and tally
-/// frames that went before it. Infallible on purpose: the durable state is already
+/// Name whoever just left to the room (#96) — the event behind the roster frame that
+/// went before it. Infallible on purpose: the durable state is already
 /// written, so a room nobody is listening to must not turn a completed departure
 /// into an error.
 fn announce_departure(state: &AppState, channel: &str, voter: Voter, ended: bool) {
@@ -1153,15 +1138,20 @@ async fn seat_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::Res
     Ok(())
 }
 
-/// What a departure changed, so the room can be told the truth about all of it.
+/// What became of the plan when somebody left it.
+///
+/// Three outcomes rather than "who holds it now", because that cannot express the one
+/// that matters most: a departure the plan **refused**. The roster is fixed once
+/// swiping starts, so a leave arriving late changes nothing and has to say so rather
+/// than reporting a plan with no host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Removed {
-    /// Who holds the plan now; `None` when it ended with them.
-    host: Option<String>,
-    /// The recipes whose shopping lists lost a claim — `(source, id)` each. They are
-    /// announced one whole list at a time, so a `buy` screen open on any of them
-    /// stops showing a tick nobody is standing behind.
-    released: Vec<(String, String)>,
+enum Removed {
+    /// They are out and the plan carries on, now held by this telegram id.
+    Left { host: String },
+    /// They were the last one, so the plan went with them.
+    Ended,
+    /// Swiping had already begun, so the roster is closed and nothing was written.
+    Started,
 }
 
 /// Take someone out of a plan (#96), and everything that was theirs in it.
@@ -1209,36 +1199,30 @@ struct Removed {
 /// a moment earlier — the same shape as `started_at IS NULL` on the lobby writes —
 /// so a join landing in that gap wins and the plan survives.
 async fn remove_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::Result<Removed> {
-    conn.execute(
-        "DELETE FROM pick_voters WHERE channel_id = ?1 AND user_id = ?2",
-        libsql::params![channel, user],
-    )
-    .await?;
-    conn.execute(
-        "DELETE FROM votes WHERE channel_id = ?1 AND voter_id = ?2",
-        libsql::params![channel, user],
-    )
-    .await?;
-    // Which lists lose a claim, read on the same connection immediately before the
-    // delete that clears them — a `buy` screen open on one of those recipes has to be
-    // told, and asking afterwards would only find the rows already gone.
-    let mut rrows = conn
-        .query(
-            "SELECT DISTINCT source, id FROM buy_checks
+    // The roster is fixed once swiping starts, in **both** directions, so this carries
+    // `started_at IS NULL` in its own predicate rather than trusting a preceding read.
+    // Those are two round trips and a start landing between them must win: the people
+    // swiping agreed to decide together, and the number they have to agree on cannot
+    // fall out from under them any more than a late joiner may raise it.
+    let seat = conn
+        .execute(
+            "DELETE FROM pick_voters
              WHERE channel_id = ?1 AND user_id = ?2
-             ORDER BY source, id",
+               AND EXISTS (SELECT 1 FROM pick_sessions
+                           WHERE channel_id = ?1 AND started_at IS NULL)",
             libsql::params![channel, user],
         )
         .await?;
-    let mut released = Vec::new();
-    while let Some(r) = rrows.next().await? {
-        released.push((r.get::<String>(0)?, r.get::<String>(1)?));
+    if seat == 0 {
+        // Membership was established a moment ago, so nothing written means the plan
+        // started in between.
+        return Ok(Removed::Started);
     }
-    conn.execute(
-        "DELETE FROM buy_checks WHERE channel_id = ?1 AND user_id = ?2",
-        libsql::params![channel, user],
-    )
-    .await?;
+
+    // Nothing of theirs needs sweeping, and deliberately no code pretends otherwise.
+    // Votes and shopping claims only exist after the start, and the predicate above
+    // proves this plan had not started — cleanup for a state the guard makes
+    // unreachable is an invitation to relax the guard later, believing it is handled.
 
     // The last one out. This delete is the serialization point: once the plan row is
     // gone, `load_lobby` answers `None`, so every seating path (join, seat) refuses
@@ -1252,21 +1236,11 @@ async fn remove_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::R
         )
         .await?;
     if ended > 0 {
-        // Whatever the plan accumulated goes with it. Votes can outlive their voter's
-        // seat (the room takes a vote from anyone holding the channel id), so this
-        // sweeps by channel rather than trusting the per-person deletes above to have
-        // covered everything.
-        for sql in [
-            "DELETE FROM votes WHERE channel_id = ?1",
-            "DELETE FROM buy_checks WHERE channel_id = ?1",
-            "DELETE FROM pick_voters WHERE channel_id = ?1",
-        ] {
-            conn.execute(sql, libsql::params![channel]).await?;
-        }
-        return Ok(Removed {
-            host: None,
-            released,
-        });
+        // Nothing to sweep after it: a plan can only be emptied before it starts, so it
+        // never accumulated a vote or a shopping claim, and the `NOT EXISTS` above is
+        // exactly the proof that no seat is left either. A path that one day deletes a
+        // *started* plan owns that cleanup; it should not be written here on spec.
+        return Ok(Removed::Ended);
     }
 
     // Hand the plan on, but only if the person leaving is the one holding it.
@@ -1287,12 +1261,13 @@ async fn remove_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::R
         )
         .await?;
     // No row means a concurrent departure emptied it between the two statements —
-    // the plan is gone either way, which is what `None` says.
-    let host = match rows.next().await? {
-        Some(r) => Some(r.get::<String>(0)?),
-        None => None,
-    };
-    Ok(Removed { host, released })
+    // the plan is gone either way, which is what `Ended` says.
+    Ok(match rows.next().await? {
+        Some(r) => Removed::Left {
+            host: r.get::<String>(0)?,
+        },
+        None => Removed::Ended,
+    })
 }
 
 /// Close the lobby and begin the pick. Idempotent, and deliberately keeps the first
