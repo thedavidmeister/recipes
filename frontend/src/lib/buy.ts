@@ -109,28 +109,6 @@ export interface BuyCheck {
   pantry: string | null;
 }
 
-/**
- * A ticked line as the screen holds it — the three ways a line can be ticked, in one
- * shape, so no surface can render two of them and forget the third.
- *
- * - `by` set → a person got it, and it wears their colour (#131).
- * - `pantry` set → the plan's kitchen already had it (#156). Nobody's, so no colour;
- *   it says which jar instead.
- * - both `null` → ticked with nothing behind it: a tap still in flight (the server has
- *   not said whose it is yet), or the device-local list, which has no whose at all.
- *
- * Structurally identical to {@link BuyCheck} minus its index, because it is the same
- * fact: keeping the two in step means the map the component reads is the row the
- * server wrote, with nothing invented in between.
- */
-export interface Tick {
-  by: Voter | null;
-  pantry: string | null;
-}
-
-/** A tick with nothing behind it — in flight, or this device's own list. */
-export const NOBODY: Tick = { by: null, pantry: null };
-
 /** A meal's checklist for one recipe. Mirrors `session::BuyList`. */
 export interface BuyList {
   channel_id: string;

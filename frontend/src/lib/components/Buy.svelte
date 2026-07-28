@@ -3,7 +3,7 @@
   import Button from "./Button.svelte";
   import Notice from "./Notice.svelte";
   import UserName from "./UserName.svelte";
-  import type { Tick } from "$lib/buy";
+  import type { Tick } from "$lib/shopping";
   import type { BuyRecipe, BuyStatus, StructuredMeasure } from "$lib/types";
   import { userAccent, userTint } from "$lib/colour";
   import { formatAmount } from "$lib/measure";
@@ -58,7 +58,7 @@
      * Which ingredient indices are ticked off, and where each tick came from — a
      * person, the kitchen's pantry, or nothing at all (a tap in flight, or the
      * device-local list a decision with no meal session falls back to). See
-     * `Tick` in `$lib/buy`.
+     * `Tick` in `$lib/shopping`.
      */
     ticks?: Record<number, Tick>;
     onToggle?: (index: number) => void;

@@ -4,12 +4,11 @@
     getBuyList,
     getChecks,
     loadChecks,
-    NOBODY,
     saveChecks,
     setCheck,
     type BuyCheck,
-    type Tick,
   } from "$lib/buy";
+  import { NOBODY, type Tick } from "$lib/shopping";
   import { PickClient } from "$lib/pick";
   import Buy from "$lib/components/Buy.svelte";
 

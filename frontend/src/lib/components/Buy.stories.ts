@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Buy from "./Buy.svelte";
-import { NOBODY, type Tick } from "$lib/buy";
+import { NOBODY, type Tick } from "$lib/shopping";
 import { buyRecipe } from "$lib/fixtures";
 import type { Voter } from "$lib/pick";
 
