@@ -56,7 +56,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // the max already recorded — a smaller version merged later would never run.
     (
         22,
-        include_str!("../migrations/0022_step_estimated_durations.sql"),
+        include_str!("../migrations/0022_recipe_fully_timed.sql"),
     ),
 ];
 

@@ -2,11 +2,11 @@
 name: enrich-steps
 description: >-
   Run the recipes step-reading worker. Pull recipes whose method has not been read
-  into structured steps, read each method into a DAG of steps (every step timed —
-  stated durations captured, unstated ones estimated — with dependencies), and push
-  the results back — a fixed pull → read → push loop until the queue is empty. Use
-  when reading the recipes corpus's methods into steps (a cron, or "read the
-  steps"). The two tools do all I/O; you do only the reading.
+  into structured steps, read each method into a DAG of steps with a duration on
+  every step and the dependencies between them, and push the results back — a fixed
+  pull → read → push loop until the queue is empty. Use when reading the recipes
+  corpus's methods into steps (a cron, or "read the steps"). The two tools do all
+  I/O; you do only the reading.
 ---
 
 # Read the recipes corpus's methods into structured steps
@@ -63,7 +63,6 @@ StructuredStep = {
   "text":      string,          // the step as a short imperative ("Finely chop the onions")
   "kind":      "prep" | "cook", // mise en place vs active cooking
   "seconds":   number,          // how long the step takes, in whole seconds — REQUIRED
-  "estimated": boolean,         // true if you estimated `seconds`, false if the source stated it
   "after":     number[]         // ids of the steps that must finish first; [] = start now
 }
 ```
@@ -80,9 +79,8 @@ Reading rules:
 - **`kind`** is `"prep"` for mise en place (chopping, slicing, measuring —
   things done before or off to the side) and `"cook"` for active cooking
   (frying, simmering, baking).
-- **`seconds`** is required on **every** step, and **`estimated`** says where
-  the number came from. This is the part of the reading that matters most — see
-  [Time every step](#time-every-step) below.
+- **`seconds`** is required on **every** step. This is the part of the reading
+  that matters most — see [Time every step](#time-every-step) below.
 - **`after`** encodes the flow (#75): a step that needs an earlier step's result
   lists its id. Independent steps (two things chopped, two pans) share no
   dependency, so they run in parallel — express that by giving them disjoint
@@ -104,19 +102,18 @@ ninety seconds whether or not anyone wrote it down. When the source says
 nothing, **you** put a cook's number on it, the same way a cook reading the
 recipe would.
 
-So there are two kinds of number, and the reading keeps them apart:
+Where the source gives a number, use it: "5 minutes" → 300 · "half an hour" →
+1800 · "1-2 minutes" → 120 (the upper bound) · "overnight" → 28800.
 
-- **The source stated it** → use it, `"estimated": false`. "5 minutes" → 300 ·
-  "half an hour" → 1800 · "1-2 minutes" → 120 (the upper bound) · "overnight"
-  → 28800.
-- **The source said nothing** → estimate it, `"estimated": true`. "chop the
-  onion" → 90 · "fry until golden" → 300 · "bring a pan to the boil" → 480 ·
-  "season and serve" → 30 · "cook the noodles following pack instructions"
-  → 300.
+Where it gives none, supply one: "chop the onion" → 90 · "fry until golden" →
+300 · "bring a pan to the boil" → 480 · "season and serve" → 30 · "cook the
+noodles following pack instructions" → 300.
 
-The flag is not a confession, it is information: it lets the app be exactly as
-confident as the reading deserves. **Never mark an estimate as stated to make it
-look better, and never mark a stated time as an estimate to hedge.**
+**Do not record which is which, and do not think of them as different kinds of
+number.** It is cooking: every duration here is an estimate, the printed ones
+included — "simmer for 20 minutes" estimates somebody else's stove, pan, heat
+and quantity, on a day that is not today. A number you supplied is not a lesser
+reading than one you copied, and nothing downstream wants them told apart.
 
 How to estimate well:
 
@@ -165,7 +162,6 @@ a recipe key plus its steps (no model field; the server stamps that):
         "text": "Finely chop the onions",
         "kind": "prep",
         "seconds": 90,
-        "estimated": true,
         "after": []
       },
       {
@@ -173,7 +169,6 @@ a recipe key plus its steps (no model field; the server stamps that):
         "text": "Fry the onions until soft",
         "kind": "cook",
         "seconds": 300,
-        "estimated": false,
         "after": [0]
       },
       {
@@ -181,7 +176,6 @@ a recipe key plus its steps (no model field; the server stamps that):
         "text": "Add the rice and simmer",
         "kind": "cook",
         "seconds": 1200,
-        "estimated": false,
         "after": [1]
       }
     ]
@@ -190,8 +184,8 @@ a recipe key plus its steps (no model field; the server stamps that):
 ```
 
 The source said "fry the onions for 5 minutes" and "simmer for 20 minutes" but
-nothing about the chopping, so the first step's 90 seconds is yours and is
-marked as such.
+nothing about the chopping, so the first step's 90 seconds is yours. It goes in
+the same field as the other two, because it is the same kind of number.
 
 It returns what happened:
 
@@ -226,7 +220,7 @@ Go back to step 1. Stop when:
 - **Do** express real parallelism with disjoint `after` chains, not a single
   chain.
 - **Do** pass clean JSON as `step_push`'s `readings` argument — no commentary.
-- **Do** put a `seconds` on every single step, and set `estimated` honestly.
+- **Do** put a `seconds` on every single step.
 - **Don't** invent steps the method does not describe. Durations are the
   exception and the point: the method not stating one is why you estimate it.
 - **Don't** send `"seconds": null` or leave the field out. The app rejects the

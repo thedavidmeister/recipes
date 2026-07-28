@@ -121,6 +121,12 @@ export function recipe(over: Partial<Recipe> = {}): Recipe {
  * invented id or image: it renders a recipe that does not exist. Every meal on this
  * walk has been read by the step worker; for the ~10% of the corpus that has not,
  * see [`untimedCard`].
+ *
+ * `fully_timed` is `false` on every one of them, and that is measured rather than
+ * convenient: of 790 recipes in the corpus, **not one** currently carries a duration
+ * on every step (2,072 of 9,152 steps are timed). So each of these totals really is
+ * only a floor, and the badge really does read `23 min+`. [`fullyTimedCard`] is the
+ * other state — what these become as the #158 re-read reaches them.
  */
 export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
   const base: WalkStop[] = [
@@ -135,6 +141,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
         category: "Chicken",
         area: "India",
         total_seconds: 1380,
+        fully_timed: false,
       },
     },
     {
@@ -148,6 +155,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
         category: "Chicken",
         area: "Japanese",
         total_seconds: 1980,
+        fully_timed: false,
       },
     },
     {
@@ -161,6 +169,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
         category: "Chicken",
         area: "Japanese",
         total_seconds: 3360,
+        fully_timed: false,
       },
     },
     {
@@ -174,6 +183,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
         category: "Beef",
         area: "Thai",
         total_seconds: 7500,
+        fully_timed: false,
       },
     },
     {
@@ -187,6 +197,7 @@ export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
         category: "Beef",
         area: "British",
         total_seconds: 9000,
+        fully_timed: false,
       },
     },
   ];
@@ -241,6 +252,37 @@ export function untimedCard(): RecipeCard {
     category: "Seafood",
     area: "Vietnamese",
     total_seconds: null,
+    fully_timed: false,
+  };
+}
+
+/**
+ * A card whose every step carries a duration, so its estimate is an approximation
+ * rather than a floor and the badge reads `~19 min` instead of `19 min+` (#158/#84).
+ *
+ * TheMealDB 53541 — a real record, and the closest thing the live corpus has to this
+ * state: 4 steps, of which 3 already carry durations the source stated (300s, 300s,
+ * 420s) and one does not — "heat olive oil in a pan over medium-high heat", which
+ * takes about 2 minutes whether or not the recipe says so. That is precisely the step
+ * the #158 re-read fills in. The chain is linear (0 → 1 → 2 → 3), so the critical
+ * path is their sum: the corpus stores 1020 today, counting the unread step as 0, and
+ * 1140 once it is read.
+ *
+ * The 1140 is therefore the one number here the corpus does not yet hold — it cannot,
+ * because no recipe in it is fully timed yet. Everything else (id, image, title,
+ * category, the three stored durations, the shape of the graph) is the live record,
+ * and the arithmetic between them is `total_seconds`'s own.
+ */
+export function fullyTimedCard(): RecipeCard {
+  return {
+    source: "themealdb",
+    id: "53541",
+    title: "Gallo pinto",
+    image: "https://www.themealdb.com/images/media/meals/ytogg31784397116.jpg",
+    category: "Vegetarian",
+    area: null,
+    total_seconds: 1140,
+    fully_timed: true,
   };
 }
 

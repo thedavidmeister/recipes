@@ -55,25 +55,13 @@ export interface StructuredStep {
   text: string;
   kind: StepKind;
   /**
-   * How long the step takes, in whole seconds. The backend requires one on every
-   * step it newly accepts (#158) — a step that takes no time does not exist — but
-   * this stays nullable because the readings captured before that rule still sit in
-   * the corpus, and they are what the app serves until a deliberate re-read
-   * replaces them.
+   * How long the step takes, in whole seconds — an estimate, like every duration in
+   * cooking. The backend requires one on every step it newly accepts (#158): a step
+   * that takes no time does not exist. It stays nullable because the readings
+   * captured before that rule still sit in the corpus, and they are what the app
+   * serves until a deliberate re-read replaces them.
    */
   seconds: number | null;
-  /**
-   * Whether `seconds` is the model's estimate rather than a duration the source
-   * stated (#158). Both are real durations and both count identically toward
-   * `total_seconds`; they differ in how much confidence they earn, which is the
-   * only reason to keep them apart.
-   *
-   * Optional because it is absent from every step written before #158 — the wire
-   * format is whatever is in Turso, and the frontend parses nothing. An absent flag
-   * means stated: the prompt that produced those readings forbade inventing a
-   * timer.
-   */
-  estimated?: boolean;
   after: number[];
 }
 
@@ -132,13 +120,25 @@ export interface RecipeCard {
    * The estimated total time in seconds (#79/#84) — the critical path over the
    * recipe's step DAG, stored as `recipes.total_seconds`.
    *
-   * Two things it is *not*. `null` is **unknown** (the step worker has not read
-   * this recipe, or read no timed step), never "instant" — so nothing is shown for
-   * it, never "0 min". And a number is a **lower bound**, not an exact time: an
-   * untimed step ("until golden") contributes nothing to the path, so the real cook
-   * takes at least this long. `formatEstimate` in `steps.ts` marks both.
+   * `null` is **unknown** (the step worker has not read this recipe, or read no
+   * timed step), never "instant" — so nothing is shown for it, never "0 min". A
+   * number is never exact either; how it is inexact depends on `fully_timed`, and
+   * `formatEstimate` in `steps.ts` marks all three cases.
    */
   total_seconds: number | null;
+  /**
+   * Whether every step of this recipe carries a duration (#158/#84), so whether
+   * `total_seconds` is a complete estimate or only a floor. Mirrors
+   * `recipes.fully_timed`, computed by `recipe-core` from the same steps as the
+   * total, so the two can never disagree.
+   *
+   * `false` → an untimed step counted as 0, so the total can only be too low →
+   * `23 min+`. `true` → every step counted, so the error is ordinary estimation
+   * noise in either direction → `~23 min`. The corpus is re-read recipe by recipe,
+   * so this differs *per card* during the pass; the badge follows the row rather
+   * than the deploy.
+   */
+  fully_timed: boolean;
 }
 
 /**

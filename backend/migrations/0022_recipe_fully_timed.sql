@@ -1,0 +1,36 @@
+-- Is the time estimate complete, or only a floor? (#158/#84)
+--
+-- `total_seconds` (0015) is the critical path over the step DAG. Until #158 most of
+-- that DAG was untimed — measured against production, 2,072 of 9,152 steps carried a
+-- duration (22.6%), and not one recipe in 790 was fully timed. Every untimed step
+-- contributes 0 to the path, so every total was understated, which is why #84 renders
+-- `23 min+` rather than `23 min`. That `+` is not decoration: it is the only honest
+-- mark for an error that can run in exactly one direction.
+--
+-- #158 makes the reading put a number on every step, so a re-read recipe's total is
+-- wrong only by ordinary estimation noise, in *either* direction — and `+` becomes
+-- the wrong mark for it, `~` the right one. But the re-read is a deliberate, manual
+-- act that can lag this deploy by days, and it lands recipe by recipe. Hardcoding
+-- either mark would leave the app lying for the whole of whichever window it is not
+-- in.
+--
+-- So the mark is not assumed, it is read off the data: this column says whether every
+-- step of this recipe carries a duration. `1` → the total is complete → `~25 min`.
+-- `0` → at least one step counted as 0 → the total can only be too low → `25 min+`,
+-- exactly as today. The display then self-corrects as the worker re-reads the corpus,
+-- with no follow-up deploy and no window where the badge contradicts the rows.
+--
+-- NOT NULL DEFAULT 0, unlike `total_seconds`'s nullable INTEGER. A boolean here has no
+-- meaningful third state: a recipe with no reading is simply not fully timed, and its
+-- `total_seconds` is NULL anyway so nothing is rendered for it under either mark. The
+-- default is also what makes this migration a backfill on its own — every row already
+-- in the table is pre-#158 and therefore not fully timed, which is exactly `0`.
+--
+-- Computed by `recipe_core::step::fully_timed` over the same `steps` slice that
+-- `total_seconds` sums, in the same `recipes::upsert` write, gated on the same
+-- "incoming steps non-empty" condition — so the two can never drift apart and a
+-- partial browse cannot clobber a full record's answer. The browser reads Turso
+-- directly and cannot run recipe-core (there is no WASM, deliberately), so storing it
+-- keeps one definition of "is this number complete" server-side instead of a second
+-- one in JS.
+ALTER TABLE recipes ADD COLUMN fully_timed INTEGER NOT NULL DEFAULT 0;

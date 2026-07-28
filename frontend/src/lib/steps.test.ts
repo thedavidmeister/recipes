@@ -7,8 +7,9 @@ import type { StructuredStep } from "./types";
  * cannot declare a story for, because they are arithmetic rather than a render.
  *
  * `formatEstimate` carries the whole honesty contract of the pick card's time badge
- * (#84): unknown must not read as instant, and a lower bound must not read as an
- * exact time. Both are one-character mistakes away, so both are pinned here.
+ * (#84/#158): unknown must not read as instant, a floor must not read as exact, and
+ * an approximation must not read as a floor. All three are one-character mistakes
+ * away, so all three are pinned here.
  */
 
 function step(
@@ -32,12 +33,49 @@ describe("formatEstimate", () => {
     expect(formatEstimate(Number.POSITIVE_INFINITY)).toBeNull();
   });
 
-  it("marks every estimate as an at-least, never an exact time", () => {
-    // The stored number omits untimed steps, so every rendering of it must carry
-    // the "+". A format that ever drops it would present a lower bound as fact.
+  it("marks a partly-untimed estimate as an at-least, never an exact time", () => {
+    // Untimed steps count as 0, so the stored number can only be too low and every
+    // rendering of it must carry the "+". A format that ever dropped it would
+    // present a floor as fact.
     for (const seconds of [30, 60, 900, 1380, 3600, 7500, 9000, 604_800]) {
-      expect(formatEstimate(seconds)).toMatch(/\+$/);
+      expect(formatEstimate(seconds, false)).toMatch(/\+$/);
+      expect(formatEstimate(seconds, false)).not.toMatch(/^~/);
     }
+  });
+
+  it("defaults to the at-least mark when nothing says the steps are all timed", () => {
+    // The safe default is the weaker claim. A caller that forgets the flag — or a
+    // row written before `fully_timed` existed — must not be upgraded to "~", which
+    // would assert a completeness we have no evidence for.
+    expect(formatEstimate(1380)).toBe("23 min+");
+    expect(formatEstimate(1380, undefined)).toBe("23 min+");
+  });
+
+  it("marks a fully timed estimate as an approximation, never a floor", () => {
+    // Every step counted, so the error runs both ways: "~" says about, where "+"
+    // would claim the number can only be too low. It is cooking — the durations a
+    // source printed are estimates of somebody else's stove too.
+    for (const seconds of [30, 60, 900, 1380, 3600, 7500, 9000, 604_800]) {
+      expect(formatEstimate(seconds, true)).toMatch(/^~/);
+      expect(formatEstimate(seconds, true)).not.toMatch(/\+$/);
+    }
+  });
+
+  it("changes only the mark, never the words, between the two", () => {
+    // The two readings sit side by side down one deck as the corpus is re-read, so
+    // the number and its units have to stay identical or the deck looks incoherent.
+    for (const seconds of [45, 1380, 7500, 604_800]) {
+      const floor = formatEstimate(seconds, false)!;
+      const approx = formatEstimate(seconds, true)!;
+      expect(approx).toBe(`~${floor.slice(0, -1)}`);
+    }
+  });
+
+  it("shows nothing under either mark when the estimate is unknown", () => {
+    // `fully_timed` is a property of the steps, and a recipe with no timing signal
+    // has no number to qualify. "~" on nothing would be worse than "+" on nothing.
+    expect(formatEstimate(null, true)).toBeNull();
+    expect(formatEstimate(0, true)).toBeNull();
   });
 
   it("reads under an hour as minutes", () => {
@@ -46,6 +84,19 @@ describe("formatEstimate", () => {
     expect(formatEstimate(1380)).toBe("23 min+");
     expect(formatEstimate(3360)).toBe("56 min+");
     expect(formatEstimate(3599)).toBe("59 min+");
+    // 1140 is Gallo pinto once its one untimed step is read — the fully-timed card.
+    expect(formatEstimate(1140, true)).toBe("~19 min");
+    expect(formatEstimate(1380, true)).toBe("~23 min");
+  });
+
+  it("renders the corpus's absurd lower bounds, and why they are the argument", () => {
+    // Real stored values, verified against production: Beef Lo Mein (11 steps) holds
+    // 10 seconds and a 16-step parcel recipe holds 30, because every step but one
+    // counted as nothing. 92 of the 713 timed recipes claim under ten minutes. The
+    // "+" is doing real work on these — and the re-read is what makes it stop being
+    // needed, one recipe at a time.
+    expect(formatEstimate(10)).toBe("10 sec+");
+    expect(formatEstimate(30)).toBe("30 sec+");
   });
 
   it("reads an hour and over as hours, carrying the remainder", () => {
@@ -61,6 +112,10 @@ describe("formatEstimate", () => {
     // A week-long ferment is in the corpus too. It stays in hours rather than
     // inventing a "days" unit nothing else in the app speaks.
     expect(formatEstimate(604_800)).toBe("168 hours+");
+    // The same three shapes under the approximation mark.
+    expect(formatEstimate(3600, true)).toBe("~1 hour");
+    expect(formatEstimate(7500, true)).toBe("~2 hours 5 min");
+    expect(formatEstimate(9000, true)).toBe("~2 hours 30 min");
   });
 
   it("floors rather than rounds, so it never overstates the bound", () => {

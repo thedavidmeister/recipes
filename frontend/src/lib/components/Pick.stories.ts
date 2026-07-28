@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Pick from "./Pick.svelte";
-import { recipeCards, untimedCard } from "$lib/fixtures";
+import { fullyTimedCard, recipeCards, untimedCard } from "$lib/fixtures";
 
 const meta = {
   title: "recipes/Pick",
@@ -14,10 +14,25 @@ const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
 /** A card up to vote on, no consensus yet. The badge beside the category is the
- * recipe's estimated total time (#84): "23 min+", an at-least — untimed steps
- * count as nothing in the estimate, so the real cook takes longer. */
+ * recipe's estimated total time (#84): "23 min+", an at-least — this recipe has
+ * steps the reading left untimed, and they count as nothing in the total, so the
+ * real cook takes longer. */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
+};
+
+/** The same badge for a recipe whose every step carries a duration (#158): "~19 min",
+ * an approximation rather than a floor. Nothing is missing from the total, so it is
+ * no longer only-too-low — it is cooking, and the remaining error runs both ways. The
+ * mark comes from the card's own `fully_timed`, so as the re-read reaches recipes
+ * they cross from the story above to this one, one at a time. */
+export const FullyTimedRecipe: Story = {
+  args: {
+    status: "swiping",
+    card: fullyTimedCard(),
+    participants: 2,
+    shareUrl: share,
+  },
 };
 
 /** A recipe the step worker has genuinely not read (`total_seconds` is null in the

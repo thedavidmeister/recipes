@@ -87,6 +87,11 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     // stored column always matches the `steps` beside it. `None` (→ NULL) when there is
     // no timing signal (un-read, or nothing timed): absence, not a wrong `0`.
     let total_seconds = recipe.total_seconds().map(i64::from);
+    // Whether that estimate is complete or only a floor (#158/#84) — read off the very
+    // same steps, right here, so the two can never describe different graphs. It
+    // decides the mark #84 renders: `~25 min` when every step counted, `25 min+` when
+    // one contributed 0 and the total can therefore only be too low.
+    let fully_timed = i64::from(recipe.fully_timed());
     // The equipment reading (#81) `derive` has just reattached. Migration 0014 added
     // the column and `derive` fills the field, but this — the sole writer of `recipes`
     // — never carried it, so every derived row kept the `'[]'` default and the reading
@@ -97,8 +102,8 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     let equipment = serde_json::to_string(&recipe.equipment)?;
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, equipment, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, fully_timed, equipment, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -117,6 +122,12 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             -- (empty steps) keeps both the stored steps and their stored estimate.
             total_seconds = CASE WHEN json_array_length(excluded.steps) > 0
                                 THEN excluded.total_seconds ELSE recipes.total_seconds END,
+            -- Same lockstep, same reason: it qualifies that estimate, so the two must
+            -- always describe the same `steps`. Listing it here is the whole job — a
+            -- derived column the sole writer never named is exactly how `equipment`
+            -- sat at its `'[]'` default for months across all 790 rows (#161).
+            fully_timed  = CASE WHEN json_array_length(excluded.steps) > 0
+                                THEN excluded.fully_timed ELSE recipes.fully_timed END,
             -- Merge-non-empty like `steps`, and for the sharper reason that `[]` is
             -- not a reading at all here (#81 refuses an empty one on the way in): an
             -- incoming `[]` means unread, so it must never blank a reading we hold.
@@ -141,6 +152,7 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             recipe.video_url.clone(),
             steps,
             total_seconds,
+            fully_timed,
             equipment,
             run_id,
         ],
@@ -160,7 +172,6 @@ mod tests {
             text: format!("step {id}"),
             kind: StepKind::Cook,
             seconds,
-            estimated: false,
             after: after.to_vec(),
         }
     }

@@ -4,12 +4,11 @@
 //! A reading turns a recipe's prose method into a [`StructuredStep`] DAG a GUI can
 //! render as a graph: a duration on **every** step (#74/#158), parallel-vs-sequential
 //! from the dependency edges (#75), and prep pulled out of an ingredient line into
-//! its own step (#76). Where the source states no time the model estimates one and
-//! marks it `estimated`, so no step contributes a silent 0 to the critical path;
-//! [`submit`] refuses a reading with a hole in it. Producing one is an LLM job —
-//! reading messy prose into structure, and putting a cook's number on an action the
-//! source never timed — and, exactly as with the ingredient reading
-//! ([`crate::enrich`]), that job runs
+//! its own step (#76). Where the source states no time the model supplies one, so no
+//! step contributes a silent 0 to the critical path; [`submit`] refuses a reading
+//! with a hole in it. Producing one is an LLM job — reading messy prose into
+//! structure, and putting a cook's number on an action the source never timed — and,
+//! exactly as with the ingredient reading ([`crate::enrich`]), that job runs
 //! **outside this app**: a worker pulls the work, a model reads, the worker pushes
 //! results back through two machine-gated endpoints. The app holds no model code,
 //! no prompt, and no provider credential, and stays the sole DB writer.
@@ -313,25 +312,20 @@ mod tests {
         }
     }
 
-    /// A cook step whose duration the source stated.
+    /// A cook step; `None` seconds builds the pre-#158 shape the corpus still holds.
     fn cook_step(id: u32, seconds: Option<u32>, after: &[u32]) -> StructuredStep {
         StructuredStep {
             id,
             text: format!("step {id}"),
             kind: StepKind::Cook,
             seconds,
-            estimated: false,
             after: after.to_vec(),
         }
     }
 
-    /// A cook step whose duration the model estimated — what the reading now produces
-    /// wherever the source is silent (#158).
-    fn guessed_step(id: u32, seconds: u32, after: &[u32]) -> StructuredStep {
-        StructuredStep {
-            estimated: true,
-            ..cook_step(id, Some(seconds), after)
-        }
+    /// A cook step with a duration on it — what every reading now produces (#158).
+    fn timed_step(id: u32, seconds: u32, after: &[u32]) -> StructuredStep {
+        cook_step(id, Some(seconds), after)
     }
 
     async fn conn() -> Connection {
@@ -403,6 +397,21 @@ mod tests {
             .unwrap()
     }
 
+    /// Read `recipes.fully_timed` — the #158/#84 companion `upsert` stores beside the
+    /// estimate. A test that only checked the Rust value would not catch the failure
+    /// mode that actually happened to `equipment` (#161): a column the sole writer
+    /// never named, defaulting forever.
+    async fn read_recipe_fully_timed(conn: &Connection, id: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                "SELECT fully_timed FROM recipes WHERE id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
     async fn last_run_id(conn: &Connection, kind: &str) -> i64 {
         let mut rows = conn
             .query(
@@ -427,16 +436,9 @@ mod tests {
         )
         .await;
         insert_recipe(&conn, "2", "Boil.", &[ing("Egg", Some("2"))]).await;
-        store(
-            &conn,
-            "themealdb",
-            "2",
-            &[guessed_step(0, 240, &[])],
-            "m",
-            1,
-        )
-        .await
-        .unwrap();
+        store(&conn, "themealdb", "2", &[timed_step(0, 240, &[])], "m", 1)
+            .await
+            .unwrap();
 
         let p = pending(&conn, 25).await.unwrap();
         assert_eq!(p.len(), 1, "only the unread recipe is pending");
@@ -466,24 +468,23 @@ mod tests {
         insert_recipe(&conn, "1", "Chop then fry.", &[ing("Onion", Some("1"))]).await;
 
         let items = vec![
-            // A well-formed, fully timed DAG → accepted. The chop was estimated
-            // (the source states no time for it); the fry the source stated.
+            // A well-formed, fully timed DAG → accepted.
             SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 90, &[]), cook_step(1, Some(120), &[0])],
+                steps: vec![timed_step(0, 90, &[]), timed_step(1, 120, &[0])],
             },
             // A forward dependency → invalid graph → rejected.
             SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 60, &[1]), guessed_step(1, 60, &[])],
+                steps: vec![timed_step(0, 60, &[1]), timed_step(1, 60, &[])],
             },
             // No such recipe → rejected.
             SubmittedSteps {
                 source: "themealdb".into(),
                 id: "9".into(),
-                steps: vec![guessed_step(0, 60, &[])],
+                steps: vec![timed_step(0, 60, &[])],
             },
         ];
 
@@ -499,8 +500,6 @@ mod tests {
         let s1 = loaded.get(&("themealdb".into(), "1".into())).unwrap();
         assert_eq!(s1.len(), 2);
         assert_eq!(s1[1].seconds, Some(120));
-        assert!(s1[0].estimated, "the estimate flag survives the round trip");
-        assert!(!s1[1].estimated, "and so does its absence");
     }
 
     /// A reading with an untimed step is refused whole (#158): the source stating no
@@ -523,7 +522,7 @@ mod tests {
             vec![SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 90, &[]), cook_step(1, None, &[0])],
+                steps: vec![timed_step(0, 90, &[]), cook_step(1, None, &[0])],
             }],
             "m",
         )
@@ -545,11 +544,11 @@ mod tests {
         );
     }
 
-    /// A reading in which the source stated nothing at all is accepted on its
-    /// estimates alone, and yields a real total — the 77 recipes that had no number
-    /// are exactly this shape.
+    /// A reading of a source that states no time anywhere ("Make and enjoy") is
+    /// accepted on the numbers the model supplied, and yields a real total — the 77
+    /// recipes that had no number at all are exactly this shape.
     #[tokio::test]
-    async fn submit_accepts_a_wholly_estimated_reading_and_totals_it() {
+    async fn submit_accepts_a_reading_the_source_stated_no_times_for() {
         let conn = conn().await;
         insert_raw(
             &conn,
@@ -565,7 +564,7 @@ mod tests {
             vec![SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 120, &[]), guessed_step(1, 300, &[0])],
+                steps: vec![timed_step(0, 120, &[]), timed_step(1, 300, &[0])],
             }],
             "m",
         )
@@ -617,7 +616,7 @@ mod tests {
             vec![SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 60, &[])],
+                steps: vec![timed_step(0, 60, &[])],
             }],
             "claude-opus-4-8",
         )
@@ -651,7 +650,7 @@ mod tests {
             vec![SubmittedSteps {
                 source: "themealdb".into(),
                 id: "1".into(),
-                steps: vec![guessed_step(0, 30, &[]), cook_step(1, Some(60), &[0])],
+                steps: vec![timed_step(0, 30, &[]), timed_step(1, 60, &[0])],
             }],
             "m",
         )
@@ -661,17 +660,16 @@ mod tests {
         let steps = read_recipe_steps(&conn, "1").await;
         assert_eq!(steps.len(), 2, "the reading attached onto recipes.steps");
         assert_eq!(steps[1].seconds, Some(60));
-        assert!(
-            steps[0].estimated && !steps[1].estimated,
-            "provenance survives the derive into recipes.steps, which is what the \
-             browser reads directly"
-        );
         // The #79 estimate rides through the same derive: critical path 0 -> 1 = 90s.
         assert_eq!(
             read_recipe_total_seconds(&conn, "1").await,
             Some(90),
-            "the total-time estimate is stored alongside the steps it summarises, and \
-             counts the estimated step exactly as it counts the stated one"
+            "the total-time estimate is stored alongside the steps it summarises"
+        );
+        assert_eq!(
+            read_recipe_fully_timed(&conn, "1").await,
+            1,
+            "and so is whether every step in it carries a duration (#158/#84)"
         );
 
         let store = last_run_id(&conn, "enrich_steps").await;
@@ -744,11 +742,12 @@ mod tests {
         .unwrap();
     }
 
-    /// The 790 readings already in the corpus have no `estimated` key and often a null
-    /// `seconds`. They must keep loading and attaching untouched: `validate` gates the
-    /// push, not the load, so tightening what we accept must not retro-invalidate a
-    /// single stored reading. Until the deliberate re-read runs, these are what the
-    /// app serves.
+    /// The 790 readings already in the corpus carry a null `seconds` wherever the
+    /// source stated nothing. They must keep loading and attaching untouched:
+    /// `validate` gates the push, not the load, so tightening what we accept must not
+    /// retro-invalidate a single stored reading. Until the deliberate re-read runs,
+    /// these are what the app serves — and the `+` hedge is what tells the truth
+    /// about them.
     #[tokio::test]
     async fn a_reading_stored_before_this_change_still_loads_and_totals() {
         let conn = conn().await;
@@ -773,11 +772,6 @@ mod tests {
             steps[0].seconds, None,
             "its hole is preserved, not invented"
         );
-        assert!(
-            !steps[0].estimated && !steps[1].estimated,
-            "an absent flag reads as stated — the prompt that produced these forbade \
-             inventing a timer"
-        );
 
         let run = runs::begin(&conn, "ingest").await.unwrap();
         derive::derive(&conn, None, run).await.unwrap();
@@ -787,65 +781,11 @@ mod tests {
             "the untimed step still costs 0, so the total is the lower bound it \
              always was — the re-read is what closes that, not this deploy"
         );
-    }
-
-    /// Migration 0022 makes the readings already stored say `estimated: false` out
-    /// loud instead of leaning on serde's default. Re-applying it is a no-op, and the
-    /// rewritten JSON must still deserialize to the same steps — the `json()` wrapper
-    /// inside `json_group_array` is what stops the rebuilt elements being stored as
-    /// quoted strings, which would blank every reading in the corpus.
-    #[tokio::test]
-    async fn migration_0022_stamps_stored_readings_without_changing_them() {
-        const M: &str = include_str!("../migrations/0022_step_estimated_durations.sql");
-        let conn = conn().await;
-        insert_raw(
-            &conn,
-            "1",
-            r#"{"meals":[{"idMeal":"1","strMeal":"T","strInstructions":"Chop then simmer.","strIngredient1":"Onion","strMeasure1":"1"}]}"#,
-        )
-        .await;
-        store_raw(
-            &conn,
-            "1",
-            r#"[{"id":0,"text":"chop","kind":"prep","seconds":null,"after":[]},
-                {"id":1,"text":"heat the oil","kind":"cook","seconds":180,"after":[]},
-                {"id":2,"text":"fry","kind":"cook","seconds":null,"after":[0,1]},
-                {"id":3,"text":"simmer","kind":"cook","seconds":1200,"after":[2]}]"#,
-        )
-        .await;
-        // A recipe whose steps are still `[]` — json_each over an empty array yields
-        // no rows, so an ungated UPDATE would blank the column to NULL.
-        insert_recipe(&conn, "2", "Boil.", &[ing("Egg", Some("2"))]).await;
-
-        let before = load(&conn).await.unwrap();
-        for _ in 0..2 {
-            conn.execute_batch(M).await.unwrap();
-        }
-
-        let mut rows = conn
-            .query("SELECT structured FROM step_structures WHERE id = '1'", ())
-            .await
-            .unwrap();
-        let json: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(
-            json.matches(r#""estimated":false"#).count(),
-            4,
-            "every step stamped, once each after two applications: {json}"
+            read_recipe_fully_timed(&conn, "1").await,
+            0,
+            "and the recipe is marked not-fully-timed, so #84 keeps rendering the \
+             `+` that says so"
         );
-        // A full ordered comparison, so it also pins the rebuild's element order: a
-        // step's `id` is its position, and `after` edges point at positions, so an
-        // array reassembled out of order would silently rewire the graph.
-        assert_eq!(
-            load(&conn).await.unwrap(),
-            before,
-            "the reading itself is unchanged — only its provenance is now explicit"
-        );
-
-        let mut rows = conn
-            .query("SELECT steps FROM recipes WHERE id = '2'", ())
-            .await
-            .unwrap();
-        let steps: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(steps, "[]", "an unread recipe is left alone, not nulled");
     }
 }
