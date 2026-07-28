@@ -1,5 +1,5 @@
+import sample from "./corpus-sample.json";
 import type {
-  Amount,
   BuyRecipe,
   CookRecipe,
   HealthStats,
@@ -12,207 +12,211 @@ import type {
   WalkStop,
 } from "$lib/types";
 
-// Real TheMealDB records (verified against the live API), shaped the way
-// recipe-core normalizes them. Real data keeps stories honest: invented ids and
-// image URLs render as unrelated meals.
+/**
+ * Story fixtures, built out of **real corpus rows** (#157).
+ *
+ * CLAUDE.md already required stories to mirror real source records — invented ids
+ * and images render the wrong meal. The same applies to every *value* on the row,
+ * and hand-typing them failed twice on #84 alone: an `UntimedRecipe` story used a
+ * recipe that has a time in production, and every invented round `total_seconds`
+ * made an hours-formatting rule look right while it rendered a real 9000s as
+ * "150 min+". Invented fixtures don't only misrepresent the corpus; they let code be
+ * *fitted to the misrepresentation*.
+ *
+ * So the corpus half of these fixtures is not typed here at all. It is read out of
+ * [`corpus-sample.json`](./corpus-sample.json) — rows dumped verbatim from Turso by
+ * `scripts/sample-corpus.mjs`. Refreshing the sample is a deliberate act, like
+ * `visual:update`, and the diff is the drift.
+ *
+ * What is still hand-written is what the *corpus has no record of*: which recipes a
+ * story walks, which ingredient a walk crosses, a kitchen's name and members, and an
+ * aggregate snapshot that moves every few hours. Each carries a comment naming its
+ * source and whether the corpus holds it, and `fixtures.test.ts` pins the ones the
+ * corpus can check.
+ */
 
-/** An exact quantity with an optional unit — the common `Amount` in a reading (#11). */
-function exact(value: number, unit: string | null = null): Amount {
-  return { kind: "quantified", quantity: { kind: "exact", value }, unit, size: null };
-}
+/** A `recipes` row as the sample holds it — `Recipe` plus the columns off it. */
+type CorpusRow = Recipe & {
+  /** Why this row is in the sample; written by the sampling script. */
+  why: string;
+  /** `recipes.total_seconds` — the critical path over `steps` (#79/#84). */
+  total_seconds: number | null;
+  /** `recipes.equipment` — the equipment reading (#81); no surface renders it yet. */
+  equipment: { item: string }[];
+};
 
 /**
- * The Chicken Handi method read into a step DAG (#74/#75/#76): three prep roots, a
- * parallel cook stage (fry the onions **while** blending the tomatoes), then the
- * sequential finish. Three steps are timed (fry 5:00, bloom 1:00, simmer 30:00).
+ * The sampled rows. One cast, here and nowhere else: the JSON is a verbatim dump of
+ * `recipes`, so its shape is the backend's to guarantee, and `fixtures.test.ts`
+ * checks at runtime what the cast asserts at compile time.
+ */
+const CORPUS = sample.recipes as unknown as CorpusRow[];
+
+/** The sampled row for a TheMealDB id, or a loud failure — never a silent `undefined`. */
+function row(id: string): CorpusRow {
+  const found = CORPUS.find((r) => r.source === "themealdb" && r.id === id);
+  if (!found) {
+    throw new Error(
+      `fixtures: themealdb/${id} is not in corpus-sample.json — add it to WANTED in scripts/sample-corpus.mjs and re-run it`,
+    );
+  }
+  return found;
+}
+
+/** The card fields of a sampled row — what the walk and the pick deck render. */
+function card(id: string): RecipeCard {
+  const r = row(id);
+  return {
+    source: r.source,
+    id: r.id,
+    title: r.title,
+    image: r.image,
+    category: r.category,
+    area: r.area,
+    total_seconds: r.total_seconds,
+  };
+}
+
+/** TheMealDB 52795, Chicken Handi — the recipe `buy` and `cook` are about. */
+export const BASE_ID = "52795";
+
+/**
+ * The Chicken Handi method as the corpus stores it (#74/#75/#76): `recipes.steps`
+ * for TheMealDB 52795, verbatim — five prep roots, a parallel first stage (fry the
+ * onion **while** the garlic and tomatoes are chopped), then the long sequential
+ * cook. Four steps are timed (60s, 300s, 120s, 900s), and that chain is the whole
+ * critical path: 1380s, which is exactly what `recipes.total_seconds` holds.
+ *
+ * It used to be a hand-authored nine-step DAG whose critical path was 2160s — a
+ * number the corpus has never held for this recipe (#157). The cook stories drew
+ * their baselines from it, so the whole `cook` surface was a picture of a recipe
+ * that does not exist.
  */
 export function recipeSteps(): StructuredStep[] {
-  return [
-    { id: 0, text: "Thinly slice the onions", kind: "prep", seconds: null, after: [] },
-    { id: 1, text: "Chop the garlic and ginger", kind: "prep", seconds: null, after: [] },
-    { id: 2, text: "Finely chop the tomatoes", kind: "prep", seconds: null, after: [] },
-    { id: 3, text: "Fry the onions until golden", kind: "cook", seconds: 300, after: [0] },
-    { id: 4, text: "Meanwhile, blend the tomatoes into a purée", kind: "cook", seconds: null, after: [2] },
-    { id: 5, text: "Stir the garlic, ginger, and tomato purée into the onions", kind: "cook", seconds: 60, after: [3, 4, 1] },
-    { id: 6, text: "Add the chicken and brown it all over", kind: "cook", seconds: null, after: [5] },
-    { id: 7, text: "Pour in a cup of water, cover, and simmer", kind: "cook", seconds: 1800, after: [6] },
-    { id: 8, text: "Finish with fresh coriander and serve", kind: "cook", seconds: null, after: [7] },
-  ];
+  return row(BASE_ID).steps;
 }
 
 /** TheMealDB 52795 — the base fixture; override fields per story. */
 export function recipe(over: Partial<Recipe> = {}): Recipe {
+  const r = row(BASE_ID);
   return {
-    id: "52795",
-    source: "themealdb",
-    title: "Chicken Handi",
-    image: "https://www.themealdb.com/images/media/meals/wyxwsp1486979827.jpg",
-    category: "Chicken",
-    area: "India",
-    tags: [],
+    id: r.id,
+    source: r.source,
+    title: r.title,
+    image: r.image,
+    category: r.category,
+    area: r.area,
+    tags: r.tags,
     // Raw name/measure as the source gave them, each with the enrich worker's
     // structured reading (#11) — what the GUI actually renders. "5 thinly sliced"
     // reads as amount 5 + preparation "thinly sliced": a quantity and a process,
-    // never one measure string.
-    ingredients: [
-      {
-        name: "Chicken",
-        measure: "1.2 kg",
-        structured: { item: "Chicken", amount: exact(1.2, "kg"), preparation: null, note: null },
-      },
-      {
-        name: "Onion",
-        measure: "5 thinly sliced",
-        structured: { item: "Onion", amount: exact(5), preparation: "thinly sliced", note: null },
-      },
-      {
-        name: "Tomatoes",
-        measure: "2 finely chopped",
-        structured: { item: "Tomatoes", amount: exact(2), preparation: "finely chopped", note: null },
-      },
-      {
-        name: "Garlic",
-        measure: "8 cloves chopped",
-        structured: { item: "Garlic", amount: exact(8, "cloves"), preparation: "chopped", note: null },
-      },
-      {
-        name: "Ginger paste",
-        measure: "1 tbsp",
-        structured: { item: "Ginger paste", amount: exact(1, "tbsp"), preparation: null, note: null },
-      },
-      {
-        name: "Vegetable oil",
-        measure: "¼ cup",
-        structured: { item: "Vegetable oil", amount: exact(0.25, "cup"), preparation: null, note: null },
-      },
-      {
-        name: "Salt",
-        measure: "To taste",
-        structured: {
-          item: "Salt",
-          amount: { kind: "qualitative", text: "to taste" },
-          preparation: null,
-          note: null,
-        },
-      },
-      {
-        name: "Coriander Leaves",
-        measure: "Garnish",
-        structured: { item: "Coriander Leaves", amount: null, preparation: null, note: "to garnish" },
-      },
-    ],
-    instructions:
-      "Take a large pot or wok, big enough to cook all the chicken, and heat the oil in it. Once the oil is hot, add sliced onions.",
-    steps: recipeSteps(),
-    source_url: null,
-    video_url: "https://www.youtube.com/watch?v=IO0issT0Rmc",
+    // never one measure string. All sixteen lines, spelled as the reading spells
+    // them (lower-case items): the fixture used to carry eight of them re-cased,
+    // plus a "Coriander Leaves / Garnish" line the record does not have.
+    ingredients: r.ingredients,
+    instructions: r.instructions,
+    steps: r.steps,
+    source_url: r.source_url,
+    video_url: r.video_url,
     ...over,
   };
 }
 
 /**
- * A walk, as `/api/walk` returns it: real TheMealDB meals (ids/images verified
- * against the live corpus), threaded by an ingredient each pair shares. The first
- * stop has no `via` — it is where the wander began. Override for a specific story.
+ * TheMealDB 53287 — the **longest title in the corpus** at 81 characters, for the
+ * wrapping story. Its own record rather than a long string pasted onto Chicken
+ * Handi: a card carrying one meal's title over another's photo is the invented-id
+ * failure wearing different clothes.
+ */
+export function longTitleRecipe(): Recipe {
+  const r = row("53287");
+  return {
+    id: r.id,
+    source: r.source,
+    title: r.title,
+    image: r.image,
+    category: r.category,
+    area: r.area,
+    tags: r.tags,
+    ingredients: r.ingredients,
+    instructions: r.instructions,
+    steps: r.steps,
+    source_url: r.source_url,
+    video_url: r.video_url,
+  };
+}
+
+/**
+ * The walk as `/api/walk` returns it (#47): sampled corpus rows, threaded by an
+ * ingredient each consecutive pair shares. The first stop has no `via` — it is where
+ * the wander began. Override for a specific story.
  *
- * `total_seconds` is the estimate the card shows (#84), and each one is the value
- * the live corpus actually holds for that recipe — read out of Turso, not picked to
- * make a story tidy. A number that merely *looks* right is the same mistake as an
- * invented id or image: it renders a recipe that does not exist. Every meal on this
- * walk has been read by the step worker; for the ~10% of the corpus that has not,
- * see [`untimedCard`].
+ * Every card field — id, image, category, area, and the `total_seconds` the badge
+ * shows (#84) — comes off the sampled row, so none of it can be picked to make a
+ * story tidy. The **`via` is the one editorial choice**, because the corpus holds no
+ * record of which thread a wander took: it is a hand-picked ingredient, spelled the
+ * way the recipe we *left* spells it, and `fixtures.test.ts` pins that it belongs to
+ * both adjacent recipes. That is the backend's own invariant
+ * (`every_stop_is_reachable_by_its_via` in `walk.rs`), and this fixture used to
+ * break it — the Massaman hop claimed "coconut milk", which is in neither the
+ * casserole we left (soy sauce, water, brown sugar, ground ginger, …) nor the curry
+ * we reached (which has coconut *cream*). A walk the backend is tested never to
+ * produce is exactly as false as an invented id.
+ *
+ * The live app interns one spelling per ingredient corpus-wide and shows the first
+ * one it saw, so the case on screen may differ from the case here; membership is the
+ * part that is a fact about the record, and membership is what the test holds.
  */
 export function walkStops(over: Partial<WalkStop>[] = []): WalkStop[] {
   const base: WalkStop[] = [
-    {
-      via: null,
-      recipe: {
-        source: "themealdb",
-        id: "52795",
-        title: "Chicken Handi",
-        image:
-          "https://www.themealdb.com/images/media/meals/wyxwsp1486979827.jpg",
-        category: "Chicken",
-        area: "India",
-        total_seconds: 1380,
-      },
-    },
-    {
-      via: "garam masala",
-      recipe: {
-        source: "themealdb",
-        id: "52820",
-        title: "Katsu Chicken curry",
-        image:
-          "https://www.themealdb.com/images/media/meals/vwrpps1503068729.jpg",
-        category: "Chicken",
-        area: "Japanese",
-        total_seconds: 1980,
-      },
-    },
-    {
-      via: "soy sauce",
-      recipe: {
-        source: "themealdb",
-        id: "52772",
-        title: "Teriyaki Chicken Casserole",
-        image:
-          "https://www.themealdb.com/images/media/meals/wvpsxx1468256321.jpg",
-        category: "Chicken",
-        area: "Japanese",
-        total_seconds: 3360,
-      },
-    },
-    {
-      via: "coconut milk",
-      recipe: {
-        source: "themealdb",
-        id: "52827",
-        title: "Massaman Beef curry",
-        image:
-          "https://www.themealdb.com/images/media/meals/tvttqv1504640475.jpg",
-        category: "Beef",
-        area: "Thai",
-        total_seconds: 7500,
-      },
-    },
-    {
-      via: "onion",
-      recipe: {
-        source: "themealdb",
-        id: "52874",
-        title: "Beef and Mustard Pie",
-        image:
-          "https://www.themealdb.com/images/media/meals/sytuqu1511553755.jpg",
-        category: "Beef",
-        area: "British",
-        total_seconds: 9000,
-      },
-    },
+    { via: null, recipe: card(BASE_ID) },
+    // Chicken Handi spells it "Garam masala"; Katsu Chicken curry has it too.
+    { via: "Garam masala", recipe: card("52820") },
+    // Both the katsu and the casserole list "soy sauce".
+    { via: "soy sauce", recipe: card("52772") },
+    // The casserole's "brown sugar" is the Massaman's "Brown sugar".
+    { via: "brown sugar", recipe: card("52827") },
+    // "Onion" is on both the Massaman and the pie.
+    { via: "Onion", recipe: card("52874") },
   ];
   return base.map((stop, i) => ({ ...stop, ...over[i] }));
 }
 
 /**
- * A realistic mid-enrichment snapshot — the real corpus size (745), part-read.
- * Fixed unix timestamps so the runs table renders identically in every capture.
- * Override per story (empty corpus, a stuck run, etc.).
+ * The corpus's own health reading, taken **2026-07-28** with
+ * `scripts/sample-corpus.mjs` (which prints exactly these numbers alongside the
+ * sample it writes).
+ *
+ * Hand-written rather than derived, deliberately: this is an aggregate, not a
+ * record. It moves every few hours as the ingest schedule and the enrich crons run,
+ * so pinning it into the committed sample would redraw the health baselines every
+ * time an unrelated recipe row was refreshed. The date above is the contract — it
+ * says *when* this was true, so a stale number reads as stale instead of as a claim.
+ *
+ * The reading it replaces (745 recipes / 512 enriched) was real when it was written
+ * and had simply drifted. What is worth noticing in today's: **22 runs are still
+ * `running`**, two of them the most recent rows. `runs.rs` says a run still running
+ * long after `started_at` is one that died mid-flight, and the dashboard's red
+ * "in flight" tile is reporting that, not a busy pipeline.
  */
 export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
   return {
-    recipes: 745,
-    raw: 745,
-    enriched: 512,
-    enriched_pct: (512 / 745) * 100,
-    by_model: [{ model: "claude-sonnet-5", count: 512 }],
+    recipes: 790,
+    raw: 790,
+    enriched: 790,
+    enriched_pct: 100,
+    by_model: [{ model: "claude-sonnet-5", count: 790 }],
+    // The five most recent `runs` rows, verbatim. The kind vocabulary is the real
+    // one — `enrich_steps` and `enrich_equipment` are pipeline stages the old
+    // fixture had never heard of.
     recent_runs: [
-      { id: 27, kind: "enrich", status: "completed", started_at: 1_752_849_600, finished_at: 1_752_849_642 },
-      { id: 26, kind: "derive", status: "completed", started_at: 1_752_849_598, finished_at: 1_752_849_600 },
-      { id: 25, kind: "ingest", status: "completed", started_at: 1_752_846_000, finished_at: 1_752_846_071 },
-      { id: 24, kind: "enrich", status: "failed", started_at: 1_752_838_800, finished_at: 1_752_838_815 },
-      { id: 23, kind: "ingest", status: "completed", started_at: 1_752_760_800, finished_at: 1_752_760_863 },
+      { id: 245, kind: "ingest", status: "running", started_at: 1_785_214_894, finished_at: null },
+      { id: 244, kind: "ingest", status: "running", started_at: 1_785_129_309, finished_at: null },
+      { id: 243, kind: "derive", status: "completed", started_at: 1_785_046_724, finished_at: 1_785_046_726 },
+      { id: 242, kind: "enrich_equipment", status: "completed", started_at: 1_785_046_721, finished_at: 1_785_046_724 },
+      { id: 241, kind: "derive", status: "completed", started_at: 1_785_046_620, finished_at: 1_785_046_623 },
     ],
-    running: 0,
+    running: 22,
     ...over,
   };
 }
@@ -223,25 +227,23 @@ export function recipeCards(): RecipeCard[] {
 }
 
 /**
- * A card the step worker has genuinely not read: `total_seconds` is `null` in the
- * live corpus, not blanked here to make a story (#84).
+ * A card with no time estimate: TheMealDB 53239, whose `total_seconds` is `null` in
+ * the live corpus rather than blanked here to make a story (#84).
  *
  * That distinction is the point. Handing a *timed* recipe a `null` would render a
- * meal the app does not have — the same failure as an invented id or image, and it
- * misrepresents the state as rarer or commoner than it is. Roughly a tenth of the
- * corpus is unread at any time (77 of 790 when this was written), so the state is
- * real and permanent enough to deserve a real record: TheMealDB 53239.
+ * meal the app does not have — the same failure as an invented id or image — and it
+ * misrepresents the state as rarer or commoner than it is. 77 of the 790 recipes
+ * carry no estimate, so the state is real and permanent enough to deserve a real
+ * record.
+ *
+ * Note what the record actually says, because the fixture used to say otherwise: the
+ * step worker **has** read this recipe — the sample holds all seven of its steps —
+ * and *none of them is timed* ("cook the noodles following pack instructions"). An
+ * unread recipe and a read one with no timer both surface as `null`, and this one is
+ * the second.
  */
 export function untimedCard(): RecipeCard {
-  return {
-    source: "themealdb",
-    id: "53239",
-    title: "Bang bang prawn salad",
-    image: "https://www.themealdb.com/images/media/meals/4xcfai1763765676.jpg",
-    category: "Seafood",
-    area: "Vietnamese",
-    total_seconds: null,
-  };
+  return card("53239");
 }
 
 /** The structured readings the base fixture carries — what `buy`/`cook` render (#11). */
@@ -268,7 +270,14 @@ export function cookRecipe(): CookRecipe {
   };
 }
 
-/** The kitchens a user belongs to (#72), for the kitchens view. */
+/**
+ * The kitchens a user belongs to (#72), for the kitchens view.
+ *
+ * Invented, and it has to be: a kitchen is a person's room, written by them — the
+ * corpus holds no record of one, so there is nothing real to prefer. Only the
+ * *contents* of a kitchen answer to the corpus, and those are handled in
+ * [`kitchenDetail`].
+ */
 export function kitchenList(): KitchenSummary[] {
   return [
     { id: "k1", name: "dave's kitchen", is_primary: true },
@@ -277,7 +286,20 @@ export function kitchenList(): KitchenSummary[] {
   ];
 }
 
-/** One kitchen in full — owner + a guest, stocked with equipment and a pantry (#72). */
+/**
+ * One kitchen in full — owner + a guest, stocked with equipment and a pantry (#72).
+ *
+ * The room and its members are invented (see [`kitchenList`]), but what it *holds*
+ * is not free to be. Equipment is a picker over what recipes actually ask for (#81),
+ * so an item no recipe names could never be added to a real kitchen: every item here
+ * is one `equipment_structures` records, with the count of recipes asking for it.
+ * "cast-iron pan" was not — no recipe in the corpus asks for one — so a fixture
+ * kitchen owned a tool the app would refuse to let anyone own. "wok" replaces it,
+ * and is what Chicken Handi itself needs.
+ *
+ * The pantry comes from the ingredient readings the same way, and every item here
+ * already had one.
+ */
 export function kitchenDetail(): KitchenDetail {
   return {
     id: "k1",
@@ -287,7 +309,9 @@ export function kitchenDetail(): KitchenDetail {
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: null },
     ],
-    equipment: ["blender", "cast-iron pan", "oven", "stand mixer"],
+    // blender 28 · oven 285 · stand mixer 9 · wok 31 (recipes asking for each).
+    equipment: ["blender", "oven", "stand mixer", "wok"],
+    // basmati rice 10 · eggs 82 · olive oil 153 · soy sauce 53 (readings naming each).
     pantry: ["basmati rice", "eggs", "olive oil", "soy sauce"],
   };
 }
