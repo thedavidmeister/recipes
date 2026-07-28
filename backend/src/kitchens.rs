@@ -315,6 +315,52 @@ pub async fn remove_equipment(
     .await
 }
 
+/// How many things to put on the "add these next" list (#83).
+///
+/// Five is a list somebody could act on, and the ceiling is the point rather than the
+/// number: recipes in this corpus name a median of six items, so a list long enough to
+/// make a bare kitchen capable would not be advice, it would be an inventory. What
+/// five buys is measured rather than assumed — against production today, five items
+/// takes a kitchen holding nothing from 0 recipes to 30, and the page says so instead
+/// of implying more.
+const ADVICE_LIMIT: usize = 5;
+
+/// `GET /api/kitchens/{id}/equipment/advice` — what this kitchen should add next (#83).
+///
+/// The inverse of the walk's can-make bound (#82) and deliberately the same arithmetic:
+/// both read `recipes.equipment` and both judge it with
+/// [`recipe_core::equipment::capability`], so what this promises is what the deck would
+/// actually deal.
+///
+/// A live read, like every other kitchen match — what a kitchen owns is a fact about
+/// the world, so an item added a moment ago changes the next answer.
+pub async fn equipment_advice(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<recipe_core::equipment::Advice>, AppError> {
+    let id = id.as_str();
+    let user = &user;
+    require_member(&state, id, &user.telegram_user_id).await?;
+
+    let owned: std::collections::BTreeSet<String> = state
+        .with_db(move |conn| async move { equipment_of(&conn, id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .into_iter()
+        .collect();
+    let readings = state
+        .with_db(move |conn| async move { crate::equipment::derived_readings(&conn).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok(Json(recipe_core::equipment::recommend(
+        &readings,
+        &owned,
+        ADVICE_LIMIT,
+    )))
+}
+
 /// `POST /api/kitchens/{id}/pantry` — add an ingredient on hand.
 /// A kitchen's pantry holds only ingredients some recipe cooks with (#72). Same
 /// reasoning as equipment: stock nothing uses could never change what you can make.
@@ -1277,6 +1323,77 @@ mod tests {
         let detail = load_detail(&conn, &id, "u1").await.unwrap();
         assert_eq!(detail.equipment, vec!["blender".to_string()]);
         assert_eq!(detail.pantry, vec!["rice".to_string()], "pantry untouched");
+    }
+
+    /// The two halves the advice handler joins — what the kitchen holds and what the
+    /// corpus asks for — line up, and the answer moves as the kitchen is stocked.
+    ///
+    /// The ranking itself is tested without a database in `recipe_core::equipment`;
+    /// what is worth pinning here is that the sets handed to it are the right ones, and
+    /// that adding a recommended item is followed by the next answer, not the same one.
+    #[tokio::test]
+    async fn the_advice_follows_what_the_kitchen_actually_holds() {
+        let conn = conn().await;
+        let id = create_kitchen(&conn, "Home", "u1").await.unwrap();
+        // Readings on the derived column, the way a `derive` run leaves them — the
+        // column the advice counts off and the walk limits by (#82).
+        for (recipe, equipment) in [
+            ("1", r#"[{"item":"knife"},{"item":"bowl"}]"#),
+            ("2", r#"[{"item":"knife"},{"item":"bowl"}]"#),
+            ("3", r#"[{"item":"knife"},{"item":"wok"}]"#),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, ingredients, instructions, equipment)
+                 VALUES ('themealdb', ?1, 'T', '[]', 'Cook.', ?2)",
+                libsql::params![recipe, equipment],
+            )
+            .await
+            .unwrap();
+        }
+
+        // Exactly what the handler composes, minus the membership gate and the
+        // retry wrapper.
+        async fn advise(conn: &Connection, id: &str) -> recipe_core::equipment::Advice {
+            let owned: std::collections::BTreeSet<String> =
+                equipment_of(conn, id).await.unwrap().into_iter().collect();
+            let readings = crate::equipment::derived_readings(conn).await.unwrap();
+            recipe_core::equipment::recommend(&readings, &owned, ADVICE_LIMIT)
+        }
+        fn items(advice: &recipe_core::equipment::Advice) -> Vec<&str> {
+            advice.additions.iter().map(|a| a.item.as_str()).collect()
+        }
+        fn unlocks(advice: &recipe_core::equipment::Advice) -> Vec<usize> {
+            advice.additions.iter().map(|a| a.unlocks).collect()
+        }
+
+        // Holding nothing, every recipe is two items away, so nothing is one purchase
+        // from being makeable — and the list is still a list.
+        let advice = advise(&conn, &id).await;
+        assert_eq!(advice.makeable, 0);
+        assert_eq!(advice.read, 3);
+        assert_eq!(items(&advice), vec!["knife", "bowl", "wok"]);
+        assert_eq!(unlocks(&advice), vec![0, 2, 3]);
+
+        // Take the first line of that advice, and the next answer has moved.
+        add_item(&conn, "kitchen_equipment", &id, "knife")
+            .await
+            .unwrap();
+        let advice = advise(&conn, &id).await;
+        assert_eq!(advice.makeable, 0, "a knife alone still cooks nothing here");
+        assert_eq!(advice.additions[0].item, "bowl");
+        assert_eq!(
+            advice.additions[0].unlocks, 2,
+            "now one purchase away from two recipes"
+        );
+
+        add_item(&conn, "kitchen_equipment", &id, "bowl")
+            .await
+            .unwrap();
+        let advice = advise(&conn, &id).await;
+        assert_eq!(advice.makeable, 2);
+        assert_eq!(advice.additions.len(), 1, "one recipe, one thing short");
+        assert_eq!(advice.additions[0].item, "wok");
+        assert_eq!(advice.additions[0].unlocks, 1);
     }
 
     /// A user sees only the kitchens they belong to.

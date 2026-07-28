@@ -310,5 +310,37 @@ export interface KitchenDetail {
   pantry: string[];
 }
 
+/**
+ * One line of a kitchen's "add these next" list (#83). Mirrors
+ * `recipe_core::equipment::Addition`.
+ */
+export interface EquipmentAddition {
+  item: string;
+  /**
+   * Recipes the kitchen could make holding this item **and every item above it**, over
+   * and above what it can make today. A running total, not this item's own doing — the
+   * page has to say so, because read as a per-item figure it would be an overclaim on
+   * every line but the first.
+   */
+  unlocks: number;
+}
+
+/**
+ * What a kitchen should add next, and what it would get for it (#83). Mirrors
+ * `recipe_core::equipment::Advice`.
+ */
+export interface EquipmentAdvice {
+  /** Empty when there is nothing to say — `read` tells the two reasons apart. */
+  additions: EquipmentAddition[];
+  /** Recipes the kitchen can make today. */
+  makeable: number;
+  /**
+   * Recipes carrying an equipment reading at all — the denominator every other number
+   * here is measured over. Zero means nothing has been read, which is a different
+   * silence from a kitchen that can already make everything.
+   */
+  read: number;
+}
+
 /** Render state of the kitchens view. */
 export type KitchensStatus = "pending" | "error" | "ready";

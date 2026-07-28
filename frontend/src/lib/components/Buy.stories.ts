@@ -65,7 +65,26 @@ export const Complete: Story = {
     status: "ready",
     recipe: buyRecipe(),
     shared: true,
-    ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo, 6: ada, 7: dave },
+    // All sixteen of the recipe's lines — the corpus record has sixteen, not the
+    // eight the fixture used to carry (#157), and "every line" has to mean every one.
+    ticks: {
+      0: dave,
+      1: ada,
+      2: mel,
+      3: kit,
+      4: sam,
+      5: jo,
+      6: ada,
+      7: dave,
+      8: mel,
+      9: kit,
+      10: sam,
+      11: jo,
+      12: dave,
+      13: ada,
+      14: mel,
+      15: kit,
+    },
   },
 };
 
@@ -89,6 +108,14 @@ export const CompleteOnThisDevice: Story = {
       5: null,
       6: null,
       7: null,
+      8: null,
+      9: null,
+      10: null,
+      11: null,
+      12: null,
+      13: null,
+      14: null,
+      15: null,
     },
   },
 };
@@ -128,7 +155,9 @@ export const NoPick: Story = {
   args: { status: "ready", recipe: null },
 };
 
-/** The picked recipe has no ingredients listed. */
+/** The picked recipe has no ingredients listed. Constructed, not sampled: no row in
+ * the corpus has an empty ingredient list (checked — 0 of 790), so there is no real
+ * record to point this at, and the source/id here key nothing real either. */
 export const NoIngredients: Story = {
   args: {
     status: "ready",
