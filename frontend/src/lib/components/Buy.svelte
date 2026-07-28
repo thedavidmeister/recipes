@@ -1,5 +1,6 @@
 <script lang="ts">
   import Alert from "./Alert.svelte";
+  import Button from "./Button.svelte";
   import Notice from "./Notice.svelte";
   import UserName from "./UserName.svelte";
   import type { Voter } from "$lib/pick";
@@ -12,9 +13,8 @@
    *
    * The step after `pick` — what the group agreed on, and what it needs. Each line
    * ticks off as you shop, and a ticked line is *somebody's*: it wears the colour
-   * of whoever got it and says their name (#131/#145), so a group in a supermarket
-   * can see at a glance what is already in a basket and whose. Every state is a
-   * story.
+   * of whoever got it and says their name (#131/#145), so a group shopping apart
+   * can see at a glance what is already got and whose. Every state is a story.
    *
    * Each line is the structured reading (#11): the `item` to get, and how much —
    * the measured `amount`, or the `note` when a line states no quantity ("for
@@ -25,6 +25,20 @@
    * accent say whose on top of that. That is what lets every one of the six slots
    * be used unconditionally, including the two too pale to be a boundary on their
    * own (see `$lib/colour`).
+   *
+   * A finished list says so and offers the next leg of the arc (#132). It is said
+   * as *everything's in the kitchen* rather than in a basket: a tick means you have
+   * the thing, and plenty of them were never bought — the salt was in the cupboard,
+   * and once the pantry pre-ticks what a kitchen already holds (#156) a list can be
+   * finished without anyone shopping at all. The way onward sits *after* the list,
+   * the same place the kitchen and the lobby put theirs, and the direction the page
+   * is read in. The arc in the `Nav` is left exactly as it was: it draws where you
+   * have *been*, and a stocked kitchen is not a cook you have done. It never blocked
+   * `cook` either, so lighting
+   * that stop would remove no obstacle — it would only restate this invitation
+   * further from the tick that earned it. The button carries `cook`'s paprika dot
+   * instead, so the tie to the arc is said in the palette rather than by moving a
+   * stop.
    */
   interface Props {
     status: BuyStatus;
@@ -60,6 +74,30 @@
 
   const ticked = $derived(
     recipe ? recipe.ingredients.filter((_, i) => isTicked(i)).length : 0,
+  );
+
+  /**
+   * Everything is bought (#132) — **every line of the recipe on screen is ticked,
+   * and there is at least one line**.
+   *
+   * Both halves are load-bearing. `ticked` counts across the *current* ingredient
+   * list, so a tick stranded at an index the recipe no longer has cannot finish the
+   * shop, and a line the recipe has gained is simply unticked: a re-read recipe
+   * reopens the list rather than inheriting a finish. And an empty list is not a
+   * finished shop — a recipe with nothing to buy has its own state above and never
+   * reaches here, but the `> 0` is stated anyway so nothing can ever arrive at
+   * "0 of 0, done".
+   *
+   * It is read off exactly the same `ticks` the rows are, so it is whatever the
+   * list is: the group's, live, when there is a session behind it (a peer's last
+   * tick lands here through the room and finishes the shop for everyone), and this
+   * device's when there is not. An in-flight tap counts, like the row it drew — if
+   * the write is refused the row goes back and this goes with it, beside the reason.
+   */
+  const complete = $derived(
+    !!recipe &&
+      recipe.ingredients.length > 0 &&
+      ticked === recipe.ingredients.length,
   );
 
   /** How much to get: the measured amount, or the note when there's no quantity. */
@@ -139,7 +177,7 @@
       </div>
     {/if}
     <p class="mb-3 text-sm text-stone-500">
-      {ticked} of {recipe.ingredients.length} in the basket
+      {ticked} of {recipe.ingredients.length} in the kitchen
       {#if !shared}
         <!-- Said plainly rather than implied: a private list that looks shared is
              how two people both come home with the coriander. -->
@@ -186,5 +224,20 @@
         </li>
       {/each}
     </ul>
+
+    {#if complete}
+      <!-- The shop is over, so the page says so and points at the next leg.
+           `role="status"` because the last tick is not always yours: in a shared
+           meal it can arrive over the room, and a screen reader should hear the
+           list finish rather than only find it on the next sweep. -->
+      <div class="mt-6" role="status">
+        <Notice>
+          <p class="font-display text-stone-900">Everything's in the kitchen.</p>
+          <div class="mt-6">
+            <Button href="/cook" dot="paprika">Let's cook!</Button>
+          </div>
+        </Notice>
+      </div>
+    {/if}
   {/if}
 </div>

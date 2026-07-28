@@ -23,7 +23,7 @@ const kit = { telegram_user_id: "3141", username: "kit" }; // honey
 const sam = { telegram_user_id: "8080", username: "sam" }; // sea
 const jo = { telegram_user_id: "9317", username: null }; // berry
 
-/** The shopping checklist for the picked recipe — two lines already in a basket,
+/** The shopping checklist for the picked recipe — two lines already got,
  * each wearing the colour of whoever got it (#131). */
 export const Ready: Story = {
   args: {
@@ -49,6 +49,47 @@ export const SixShoppers: Story = {
     recipe: buyRecipe(),
     shared: true,
     ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo },
+  },
+};
+
+/**
+ * The shop is over (#132): every line of the recipe is ticked, so the list says so
+ * and offers the next leg of the arc.
+ *
+ * A shared meal, so it is the *group's* finish — the six of them between them have
+ * everything, and whoever is ready walks on to `cook`. The invitation sits after the
+ * list, where the shop ends, and wears `cook`'s paprika dot.
+ */
+export const Complete: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo, 6: ada, 7: dave },
+  },
+};
+
+/**
+ * The same finish with no meal session behind it: the list is this device's, so the
+ * completion is this device's too and says exactly that. Nothing here claims a group
+ * — the solo path cannot know about one, and pretending otherwise is how somebody
+ * walks off to cook while a flatmate is still in the shop.
+ */
+export const CompleteOnThisDevice: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: false,
+    ticks: {
+      0: null,
+      1: null,
+      2: null,
+      3: null,
+      4: null,
+      5: null,
+      6: null,
+      7: null,
+    },
   },
 };
 

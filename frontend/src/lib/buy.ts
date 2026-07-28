@@ -125,7 +125,7 @@ function checksFailed(status: number, action: string): ApiError {
  *
  * The recipe travels with the request because the checklist is keyed by it: a meal
  * decides on one recipe, but the list is that recipe's list, so a re-decided plan
- * cannot inherit a stale basket.
+ * cannot inherit a stale list.
  */
 export async function getChecks(
   channel: string,
