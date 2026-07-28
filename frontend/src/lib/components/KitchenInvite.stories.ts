@@ -33,5 +33,5 @@ export const Expired: Story = {
 export const Pending: Story = { args: { status: "pending" } };
 
 export const Error: Story = {
-  args: { status: "error", error: "could not open this kitchen (403)" },
+  args: { status: "error", error: "Couldn't open this kitchen (403)." },
 };

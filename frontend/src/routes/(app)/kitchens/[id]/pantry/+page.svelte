@@ -46,9 +46,9 @@
   }
 
   const onAdd = (item: string) =>
-    run(() => addPantry(id, item), "could not add that");
+    run(() => addPantry(id, item), "Couldn't add that.");
   const onRemove = (item: string) =>
-    run(() => removePantry(id, item), "could not remove that");
+    run(() => removePantry(id, item), "Couldn't remove that.");
 </script>
 
 <KitchenItems

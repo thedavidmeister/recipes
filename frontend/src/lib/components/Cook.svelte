@@ -64,7 +64,7 @@
     <Alert>
       <p class="font-display text-stone-900">Couldn't load the recipe.</p>
       <p class="mt-1 text-sm text-stone-600">
-        {error ?? "Something went wrong reaching the corpus."}
+        {error ?? "Try again in a moment."}
       </p>
     </Alert>
   {:else if status === "pending"}
@@ -104,7 +104,7 @@
     {/if}
 
     {#if recipe.steps.length === 0}
-      <p class="mt-8 text-stone-500">This recipe's method hasn't been read yet.</p>
+      <p class="mt-8 text-stone-500">No method for this one yet — just the ingredients.</p>
     {:else}
       {#if prep.length}
         <!-- Prep — mise en place, done ahead and in parallel. -->

@@ -173,7 +173,7 @@
     <Alert>
       <p class="font-display text-stone-900">Couldn't load the list.</p>
       <p class="mt-1 text-sm text-stone-600">
-        {error ?? "Something went wrong reaching the corpus."}
+        {error ?? "Try again in a moment."}
       </p>
     </Alert>
   {:else if status === "pending"}

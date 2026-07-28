@@ -143,9 +143,8 @@
 
       {#if options !== undefined && options.length === 0}
         <p class="mt-6 text-sm text-stone-600">
-          Nothing to choose from yet — no recipe has been read for the equipment
-          it needs. Once the corpus has been read, what you can own appears
-          here.
+          Nothing to choose from yet — no recipe here says what equipment it
+          needs. Once one does, the things you can add show up here.
         </p>
       {:else}
         <form class="mt-6 flex gap-2" onsubmit={add}>

@@ -169,7 +169,7 @@ export const Guest: Story = {
 export const Pending: Story = { args: { status: "pending" } };
 
 export const Error: Story = {
-  args: { status: "error", error: "could not open this meal plan (404)" },
+  args: { status: "error", error: "Couldn't open this meal plan (404)." },
 };
 
 /**

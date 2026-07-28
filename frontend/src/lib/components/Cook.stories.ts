@@ -74,5 +74,5 @@ export const NoPick: Story = {
 
 /** The recipe could not be loaded. */
 export const Error: Story = {
-  args: { status: "error", error: "could not reach the corpus (502)" },
+  args: { status: "error", error: "The server didn't answer (502). Try again in a moment." },
 };

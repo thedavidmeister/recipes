@@ -121,10 +121,10 @@ function checksFailed(status: number, action: string): ApiError {
   return new ApiError(
     status,
     status === 401
-      ? "Your session has expired."
+      ? "You've been signed out. Sign in again to carry on."
       : status === 403
         ? "Only the people having this meal can tick things off its list."
-        : `could not ${action} (${status})`,
+        : `Couldn't ${action} (${status}).`,
   );
 }
 

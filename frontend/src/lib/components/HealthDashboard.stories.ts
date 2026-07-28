@@ -96,5 +96,5 @@ export const Forbidden: Story = {
 
 /** The endpoint could not be reached. */
 export const Error: Story = {
-  args: { status: "error", error: "could not load health (502)" },
+  args: { status: "error", error: "Couldn't load health (502)." },
 };

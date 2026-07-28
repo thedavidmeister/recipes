@@ -32,7 +32,9 @@
         queryClient.invalidateQueries({ queryKey: ["session"] });
         return;
       }
-      error = e instanceof Error ? e.message : "Could not start a pick.";
+      // The heading already says a pick would not start; this line is the reason,
+      // so a fallback that repeated it would fill the card with one sentence twice.
+      error = e instanceof Error ? e.message : "Try again in a moment.";
     }
   }
 </script>
@@ -40,7 +42,7 @@
 <div class="pt-6">
   {#if error}
     <div class="rounded-card border border-paprika-500/30 bg-paprika-100 p-6">
-      <p class="font-display text-stone-900">Could not start a pick.</p>
+      <p class="font-display text-stone-900">Couldn't start a pick.</p>
       <p class="mt-1 text-sm text-stone-600">{error}</p>
       <button
         onclick={start}

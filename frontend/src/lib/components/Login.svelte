@@ -30,11 +30,13 @@
   </h1>
 
   {#if status === "checking"}
-    <p class="mt-6 text-stone-500">Checking your session…</p>
+    <p class="mt-6 text-stone-500">Checking if you're signed in…</p>
   {:else if status === "error"}
-    <p class="text-paprika-500 mt-6">{error ?? "Something went wrong."}</p>
+    <p class="text-paprika-500 mt-6">
+      {error ?? "Couldn't check whether you're signed in."}
+    </p>
     <p class="mt-2 text-sm text-stone-500">
-      The site can't reach its backend. Try again in a moment.
+      The site can't be reached right now. Try again in a moment.
     </p>
   {:else}
     <p class="mt-2 text-stone-500">Sign in with Telegram to continue.</p>

@@ -17,6 +17,6 @@ export const Default: Story = { args: { current: "dave's kitchen" } };
 export const Failed: Story = {
   args: {
     current: "dave's kitchen",
-    error: "only the owner can rename this kitchen (403)",
+    error: "Couldn't rename the kitchen (403).",
   },
 };

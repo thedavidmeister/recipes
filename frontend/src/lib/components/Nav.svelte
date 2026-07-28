@@ -53,8 +53,10 @@
   const travelled = $derived((index / (stops.length - 1)) * TRACK_WIDTH);
 </script>
 
+<!-- The accessible name is what the four stops are to whoever is walking them, not
+     the `Section` type they are in the code. -->
 <nav
-  aria-label="Sections"
+  aria-label="Your meal"
   class="bg-cream-50/95 font-display sticky top-0 z-10 border-b border-stone-200 pt-4 pb-3 backdrop-blur"
 >
   <ol class="relative mx-auto flex max-w-md">
