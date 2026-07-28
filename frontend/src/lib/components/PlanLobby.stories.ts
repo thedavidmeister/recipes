@@ -150,9 +150,10 @@ export const Error: Story = {
  *
  * Worth its own story because it is the one that would break a design leaning on
  * the colour to say "chosen": `honey-500` measures 2.0:1 on cream, well under the
- * 3:1 a control's boundary needs. Here the cocoa outline and `aria-pressed` carry
- * chosen-ness and the tint only carries *whose*, so the pale host reads exactly as
- * well as a dark one.
+ * 3:1 a control's boundary needs. Chosen-ness is the achromatic `stone-200` fill,
+ * the cocoa outline and `aria-pressed`; the dot alone carries *whose*, which is the
+ * same job it does on `Start`. So a pale host reads exactly as well as a dark one,
+ * and this story is where that stays true.
  */
 export const HostWearsThePalestColour: Story = {
   args: {

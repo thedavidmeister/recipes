@@ -11,7 +11,7 @@
   } from "$lib/types";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
-  import { userColour, userEdge, userTint } from "$lib/colour";
+  import { userColour } from "$lib/colour";
 
   /**
    * The lobby a meal plan starts in (#20, #72): the people who will decide gather,
@@ -30,12 +30,20 @@
    * the kitchen — so "who is here" is a glance rather than a read.
    *
    * So does every choice on the plan. What the meal is, what comes with it and how
-   * long there is are all the host's calls, so the chosen pill is washed in the
-   * host's tint and carries their dot (#131): a guest reads "someone decided this,
-   * and it was them" off the shape instead of a flat fill that could have come from
-   * anywhere. Selected-ness itself stays on the cocoa outline and `aria-pressed`,
-   * never on the colour — the tints are far too pale to be a control's boundary,
-   * and that is exactly why they are safe to use for all six people.
+   * long there is are all the host's calls, and a chosen pill says so with the
+   * host's dot (#131) — the app's one device for whose a thing is, the same one
+   * `Start` and `Let's cook!` wear. A guest reads "someone decided this, and it was
+   * them" off the mark rather than off a flat fill that could have come from
+   * anywhere.
+   *
+   * These are buttons, so they are in the app's button language and nothing else
+   * (#164): one device per meaning, and colour says its one thing once. Whose it
+   * is, the dot; that it is chosen, a quiet achromatic fill and `aria-pressed`, so
+   * chosen-ness never leans on colour perception; that it is a button, the same
+   * cocoa outline every button wears. Nothing here is filled with a person — a
+   * tinted control makes the shared cocoa ring look like an argument, and then the
+   * ring has to be recoloured too, and the pill is a different species of button
+   * from the rest of the app.
    */
   interface Props {
     status: "pending" | "error" | "ready";
@@ -131,16 +139,20 @@
     );
 
   /**
-   * The classes for a pill the host has chosen — their tint, and the cocoa outline
-   * that says "chosen" at full contrast whatever their colour is. Without a host
-   * to attribute it to (the lobby is still loading) it falls back to the plain
-   * cocoa outline: an unattributed choice, not a wrong one.
+   * The classes for a pill the host has chosen: the cocoa outline every button in
+   * the app wears, a `stone-200` fill, and ink at full strength.
+   *
+   * The fill is achromatic on purpose — "chosen" is the one thing every viewer has
+   * to be able to see, so it may not ride on a hue (the same call #155 made for the
+   * buy rows). It is a step down in weight from the `cream-50` paper a bare pill
+   * sits on, not a step sideways in colour, so it survives greyscale and reads the
+   * same behind a pale host as behind a dark one.
+   *
+   * It does not depend on the host, so it is a constant: whose the choice is lives
+   * on the dot beside the label, and a lobby still loading simply has no dot yet —
+   * an unattributed choice, not a wrong one.
    */
-  const chosenPill = $derived(
-    hostId
-      ? `border ${userEdge(hostId)} text-stone-900 ${userTint(hostId)}`
-      : "border-cocoa-500 border text-stone-900",
-  );
+  const CHOSEN_PILL = "border-cocoa-500 bg-stone-200 border text-stone-900";
 
   let copied = $state(false);
 
@@ -198,7 +210,7 @@
               onclick={() => onMealType?.(t)}
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {t ===
               mealType
-                ? chosenPill
+                ? CHOSEN_PILL
                 : 'border-cocoa-500 text-cocoa-500 border'}"
             >
               {#if t === mealType && hostId}
@@ -226,7 +238,7 @@
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {additions.includes(
                 a,
               )
-                ? chosenPill
+                ? CHOSEN_PILL
                 : 'border-stone-300 text-stone-600 border'}"
             >
               {#if additions.includes(a) && hostId}
@@ -252,7 +264,7 @@
               onclick={() => onCap?.(b.seconds)}
               class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {cap ===
               b.seconds
-                ? chosenPill
+                ? CHOSEN_PILL
                 : 'border-stone-300 text-stone-600 border'}"
             >
               {#if cap === b.seconds && hostId}
@@ -276,7 +288,7 @@
              settable: the cap is the host's call (#80). -->
         <p class="mt-6 text-sm text-stone-600">
           <span
-            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill}"
+            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {CHOSEN_PILL}"
           >
             {#if hostId}
               <span
