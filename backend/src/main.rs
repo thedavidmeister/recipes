@@ -427,14 +427,18 @@ async fn main() -> anyhow::Result<()> {
         // Open a run so this derive's writes are ordered against any concurrent
         // ingest, and close it with the outcome so a failed run is visible.
         let run_id = runs::begin(&conn, "derive").await?;
-        let outcome = derive::derive(&conn, source.as_deref(), run_id).await;
-        let status = if outcome.is_ok() {
-            runs::COMPLETED
+        let result = derive::derive(&conn, source.as_deref(), run_id).await;
+        // A derive either rebuilt `recipes` or did not; there is no half of it to
+        // report, so the middle outcome (`partial`) does not arise here. `skipped`
+        // payloads are a standing property of the corpus, not this run's doing — see
+        // [`runs::Outcome`].
+        let outcome = if result.is_ok() {
+            runs::Outcome::Completed
         } else {
-            runs::FAILED
+            runs::Outcome::Failed
         };
-        runs::finish(&conn, run_id, status).await?;
-        let report = outcome?;
+        runs::finish(&conn, run_id, outcome).await?;
+        let report = result?;
         tracing::info!(
             run_id,
             read = report.read,
