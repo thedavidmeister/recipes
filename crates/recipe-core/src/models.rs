@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::equipment::RequiredEquipment;
 use crate::measure::StructuredMeasure;
+use crate::nutrition::{self, FoodEnergy, RecipeEnergy};
 use crate::step::StructuredStep;
 
 /// A single ingredient line. `measure` is the quantity/unit when the source
@@ -70,6 +71,32 @@ pub struct Recipe {
     /// vocabulary rather than contributing a guess.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equipment: Vec<RequiredEquipment>,
+    /// The model's reading of each ingredient's food (#162), attached at derive from
+    /// the `nutrition_structures` capture — one entry per ingredient, in ingredient
+    /// order, carrying energy density and (where a unit table cannot say) the mass of
+    /// one of the line's unit.
+    ///
+    /// Stored beside the recipe rather than only in its capture table for the same
+    /// reason `steps` and `equipment` are: [`Self::energy`] is computed from this
+    /// field in the same write that stores it, so the total can never describe a
+    /// different reading from the one alongside it.
+    ///
+    /// Empty until the nutrition worker has read the recipe — degrade-not-die, and
+    /// `skip_serializing_if` so an un-read recipe stores exactly as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nutrition: Vec<FoodEnergy>,
+    /// How many people this recipe feeds, as the model read it (#162).
+    ///
+    /// **Not a source field** — no source in the corpus carries a yield, so this is a
+    /// reading like every other. It is captured because a bare calorie total is
+    /// ambiguous in the way that matters most: 2,400 kcal is a reasonable tray of
+    /// lasagne and an absurd plate of it. Per the #158 ruling, a recipe whose servings
+    /// nobody has written down still feeds a definite number of people, so an absent
+    /// count is a gap in our reading rather than a property of the dish.
+    ///
+    /// `None` only until the worker has read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub servings: Option<u32>,
     /// Canonical URL of the recipe on its origin site, when known.
     pub source_url: Option<String>,
     pub video_url: Option<String>,
@@ -96,6 +123,22 @@ impl Recipe {
     /// total, in the same place, so they cannot disagree.
     pub fn fully_timed(&self) -> bool {
         crate::step::fully_timed(&self.steps)
+    }
+
+    /// This recipe's energy (#162) — the sum over its ingredients of quantity ×
+    /// gram weight × energy density — or `None` when nothing could be counted.
+    ///
+    /// The exact peer of [`Self::total_seconds`], and for the same reasons: the
+    /// arithmetic lives in `recipe-core` beside the data it reads, `derive` computes
+    /// it here and the `recipes` view stores the result, and the browser (which reads
+    /// Turso directly and cannot run this crate — no WASM, deliberately) gets a
+    /// number rather than a second implementation.
+    ///
+    /// It needs **both** readings: the ingredient reading (#11) for the quantities and
+    /// the nutrition reading for the food. A recipe with one and not the other has no
+    /// total, which is why the nutrition queue only offers recipes already enriched.
+    pub fn energy(&self) -> Option<RecipeEnergy> {
+        nutrition::recipe_energy(&self.ingredients, &self.nutrition)
     }
 }
 
@@ -164,6 +207,8 @@ mod tests {
             instructions: "go".into(),
             steps,
             equipment: vec![],
+            nutrition: vec![],
+            servings: None,
             source_url: None,
             video_url: None,
         }
@@ -193,5 +238,68 @@ mod tests {
 
         // An un-read recipe carries no steps, so there is no estimate.
         assert_eq!(recipe_with_steps(vec![]).total_seconds(), None);
+    }
+
+    /// `Recipe::energy` sums off the recipe's own two readings (#162) — the arithmetic
+    /// `derive` stores on the `recipes` view. It needs **both**: an un-read recipe has
+    /// no total, and neither does one whose nutrition reading has drifted out of
+    /// alignment with its ingredient list.
+    #[test]
+    fn recipe_energy_needs_both_readings_and_sums_off_them() {
+        let line = |grams: f64| Ingredient {
+            name: "x".into(),
+            measure: None,
+            structured: Some(StructuredMeasure {
+                item: "x".into(),
+                amount: Some(Amount::Quantified {
+                    quantity: Quantity::Exact { value: grams },
+                    unit: Some("g".into()),
+                    size: None,
+                }),
+                preparation: None,
+                note: None,
+            }),
+        };
+        let mut recipe = recipe_with_steps(vec![]);
+        recipe.ingredients = vec![line(100.0), line(200.0)];
+
+        // No nutrition reading yet: degrade-not-die, no number rather than a zero.
+        assert_eq!(recipe.energy(), None);
+
+        recipe.nutrition = vec![
+            FoodEnergy {
+                kcal_per_100g: 364.0,
+                grams_per_unit: None,
+            },
+            FoodEnergy {
+                kcal_per_100g: 209.0,
+                grams_per_unit: None,
+            },
+        ];
+        let energy = recipe.energy().expect("both readings present");
+        assert!((energy.kcal - (364.0 + 418.0)).abs() < 1e-6);
+        assert_eq!(energy.counted, 2);
+        assert!(energy.complete());
+
+        // A reading that no longer lines up with the ingredients is refused, not
+        // summed over a prefix.
+        recipe.ingredients.push(line(50.0));
+        assert_eq!(recipe.energy(), None);
+    }
+
+    /// The two new fields are omitted from an un-read recipe's JSON, so the 790 rows
+    /// already in Turso do not churn, and a row stored before they existed still reads
+    /// back — the same contract `steps` and `equipment` hold.
+    #[test]
+    fn an_unread_nutrition_reading_is_omitted_and_absent_deserializes() {
+        let recipe = recipe_with_steps(vec![]);
+        let json = serde_json::to_string(&recipe).unwrap();
+        assert!(
+            !json.contains("nutrition") && !json.contains("servings"),
+            "an un-read recipe must write neither key: {json}"
+        );
+        let back: Recipe = serde_json::from_str(&json).unwrap();
+        assert!(back.nutrition.is_empty());
+        assert_eq!(back.servings, None);
     }
 }

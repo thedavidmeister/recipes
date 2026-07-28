@@ -114,7 +114,9 @@ claims nothing until a domain is deliberately allowlisted into it.
   (written by **sync**).
 - **`ingredient_structures`** — a model's structured reading of a recipe's
   ingredient lines, one row per recipe (written by the **enrich** worker,
-  #11/#59).
+  #11/#59). Its peers, one table per enrichment, are `step_structures`
+  (#74/#75/#76), `equipment_structures` (#81) and `nutrition_structures` (#162)
+  — never a generic `(kind, json)` blob.
 - **`recipes`** — the **derived** view that search and browse read (written by
   **derive**).
 
@@ -209,6 +211,13 @@ nix develop
   (the `recipes-enrich` plugin), never the binary's. Install the plugin with
   `/plugin marketplace add thedavidmeister/recipes` then
   `/plugin install recipes-enrich@recipes`
+- **Nutrition (#162):** the fourth queue, same shape —
+  `… -- nutrition pull|push`, or the `nutrition_pull`/`nutrition_push` MCP tools
+  driven by the `enrich-nutrition` skill. The model supplies per-ingredient food
+  facts (kcal per 100 g, and the weight of one of the line's unit where the app
+  cannot compute it); `recipe-core` multiplies by the quantity the ingredient
+  reading captured and sums. It is offered only for recipes whose measures have
+  already been read, since there is otherwise no quantity to multiply.
 - **Enrich on a schedule (#59):** `scripts/enrich-cron.sh` drains the queue by
   running the skill headless (Claude Code with `--plugin-dir`), looping
   `enrich_pull → read → enrich_push` until empty. Copy

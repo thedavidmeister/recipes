@@ -62,6 +62,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         22,
         include_str!("../migrations/0022_recipe_fully_timed.sql"),
     ),
+    // 23, not the free 20 above it: 21 and 22 have already run on production, so
+    // anything numbered 20 can never apply again — filling a hole below the floor is
+    // the exact failure the comment above warns about. The next number above
+    // *everything*, including what is unmerged on other branches, is the only choice
+    // that is safe whichever deploys first.
+    (
+        23,
+        include_str!("../migrations/0023_nutrition_structures.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -259,6 +268,7 @@ mod tests {
             "recipes",
             "raw_imports",
             "ingredient_structures",
+            "nutrition_structures",
             "runs",
             "users",
             "login_completions",

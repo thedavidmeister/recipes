@@ -23,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::enrich_api::client;
 use crate::equipment_api::client as equipment_client;
+use crate::nutrition_api::client as nutrition_client;
 use crate::step_api::client as step_client;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -76,6 +77,26 @@ struct EquipmentPushParams {
     /// be normalised — lowercase, trimmed, single-spaced — because a kitchen selects
     /// from this vocabulary and "Wok" would be a second, unmatchable entry beside
     /// "wok". The app refuses an unnormalised reading rather than repairing it.
+    readings: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NutritionPullParams {
+    /// Maximum recipes to return. Omit for the server's default page size; the
+    /// worker loops until the queue is empty regardless.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NutritionPushParams {
+    /// The nutrition readings: a JSON array with one entry per recipe, each
+    /// `{ "source", "id", "servings", "foods": [{ "kcal_per_100g", "grams_per_unit" },
+    /// ...] }`, the foods in ingredient order. Every figure is a fact about the
+    /// **food**, never about this recipe's quantity — the app multiplies by the
+    /// quantity it already holds and sums. `grams_per_unit` is omitted for any line the
+    /// pull marked `weighable`. Pass a native JSON array; a JSON-encoded string of one
+    /// is also accepted.
     readings: serde_json::Value,
 }
 
@@ -185,6 +206,49 @@ impl Enricher {
     }
 
     #[tool(
+        name = "nutrition_pull",
+        description = "Get the recipes that still need a nutrition reading. Returns a \
+                       JSON array of {source, id, title, instructions, ingredients:\
+                       [{name, measure, item, unit, weighable}]}; a line marked \
+                       weighable already has a gram weight the app can compute, so only \
+                       its energy density is needed. Only recipes whose ingredient \
+                       measures have already been read are offered. An empty array means \
+                       the queue is drained."
+    )]
+    async fn nutrition_pull(
+        &self,
+        Parameters(NutritionPullParams { limit }): Parameters<NutritionPullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match nutrition_client::pull_pending(limit).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "nutrition_pull failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "nutrition_push",
+        description = "Submit nutrition readings: each recipe's servings, plus one \
+                       {kcal_per_100g, grams_per_unit} per ingredient in order. Never \
+                       submit a recipe total or a per-serving figure — the app does all \
+                       arithmetic. The app validates each (recipe exists, one reading \
+                       per current ingredient, every figure possible for a food), stores \
+                       them, and re-derives. Returns {accepted, derived, rejected}."
+    )]
+    async fn nutrition_push(
+        &self,
+        Parameters(NutritionPushParams { readings }): Parameters<NutritionPushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match nutrition_client::push_readings(readings).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "nutrition_push failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
         name = "step_pull",
         description = "Get the recipes that still need a structured reading of their \
                        method. Returns a JSON array of {source, id, instructions, \
@@ -229,10 +293,11 @@ impl ServerHandler for Enricher {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Recipe corpus enrichment (#59): three queues — ingredient lines, \
-                 methods, and required equipment. Pull the recipes that still need a \
-                 reading, read them, push the readings back. The app validates and \
-                 writes; these tools never touch the database."
+                "Recipe corpus enrichment (#59): four queues — ingredient lines, \
+                 methods, required equipment, and nutrition. Pull the recipes that still \
+                 need a reading, read them, push the readings back. The app validates \
+                 and writes; these tools never touch the database. The model reads and \
+                 estimates; the app does every piece of arithmetic."
                     .to_string(),
             )
     }

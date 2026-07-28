@@ -12,10 +12,11 @@
 use std::collections::HashMap;
 
 use libsql::Connection;
-use recipe_core::{adapters, StructuredMeasure, StructuredStep};
+use recipe_core::{adapters, FoodEnergy, StructuredMeasure, StructuredStep};
 
 use crate::enrich;
 use crate::equipment as equipment_readings;
+use crate::nutrition as nutrition_readings;
 use crate::recipes::upsert;
 use crate::steps;
 
@@ -50,6 +51,9 @@ pub async fn derive(
     // empty when nothing has been step-read (recipes then keep `steps: []`).
     let step_readings = steps::load(conn).await?;
     let equipment_readings = equipment_readings::load(conn).await?;
+    // And the nutrition readings (#162) — same shape, same reason: one load, then an
+    // in-memory join per recipe.
+    let nutrition_readings = nutrition_readings::load(conn).await?;
 
     let mut rows = match source {
         Some(source) => {
@@ -80,6 +84,7 @@ pub async fn derive(
             &readings,
             &step_readings,
             &equipment_readings,
+            &nutrition_readings,
             run_id,
             &mut report,
         )
@@ -104,6 +109,7 @@ pub async fn derive_recipes(
     let readings = enrich::load(conn).await?;
     let step_readings = steps::load(conn).await?;
     let equipment_readings = equipment_readings::load(conn).await?;
+    let nutrition_readings = nutrition_readings::load(conn).await?;
 
     for (source, id) in recipes {
         let mut rows = conn
@@ -128,6 +134,7 @@ pub async fn derive_recipes(
             &readings,
             &step_readings,
             &equipment_readings,
+            &nutrition_readings,
             run_id,
             &mut report,
         )
@@ -151,6 +158,7 @@ async fn normalize_and_upsert(
     readings: &HashMap<(String, String), Vec<StructuredMeasure>>,
     step_readings: &HashMap<(String, String), Vec<StructuredStep>>,
     equipment_reads: &HashMap<(String, String), Vec<recipe_core::equipment::RequiredEquipment>>,
+    nutrition_reads: &HashMap<(String, String), (Vec<FoodEnergy>, u32)>,
     run_id: i64,
     report: &mut Report,
 ) -> anyhow::Result<()> {
@@ -196,6 +204,17 @@ async fn normalize_and_upsert(
             &item.recipe.source,
             &item.recipe.id,
             &mut item.recipe.equipment,
+        );
+        // And the nutrition reading (#162), which carries two halves — the per-
+        // ingredient foods and the serving count — because a calorie total is
+        // uninterpretable without knowing how many people it is for. `upsert` sums
+        // them into `kcal` in the same write.
+        nutrition_readings::attach(
+            nutrition_reads,
+            &item.recipe.source,
+            &item.recipe.id,
+            &mut item.recipe.nutrition,
+            &mut item.recipe.servings,
         );
         upsert(conn, &item.recipe, run_id).await?;
         report.derived += 1;

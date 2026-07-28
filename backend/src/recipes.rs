@@ -100,10 +100,27 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     // rows of `recipes` read `'[]'`. Matching a kitchen against a recipe (#82, #83)
     // reads this column, so it has to actually hold the reading.
     let equipment = serde_json::to_string(&recipe.equipment)?;
+    // The nutrition reading (#162) `derive` has just reattached, and the total computed
+    // from it right here — off the very field being written, exactly as `total_seconds`
+    // is computed off the `steps` beside it. All four columns are named in the INSERT
+    // *and* in the ON CONFLICT SET below, because the #161 lesson is that a derived
+    // column the sole writer of this table never lists is recomputed and thrown away on
+    // every run, invisibly, for as long as nothing needs it.
+    let nutrition = serde_json::to_string(&recipe.nutrition)?;
+    let energy = recipe.energy();
+    // Whole kcal — the estimate is nowhere near accurate to a calorie, and storing a
+    // float would invite a display that renders one. `None` (→ NULL) when nothing could
+    // be counted: absence, not a `0` that would read as a dish with no calories.
+    let kcal = energy.map(|e| e.kcal.round() as i64);
+    // Whether that total counted every line that stated a number, or is only a floor.
+    // Read off the same reading in the same place, so the two can never describe
+    // different data — the `fully_timed` precedent exactly.
+    let kcal_complete = i64::from(energy.is_some_and(|e| e.complete()));
+    let servings = recipe.servings.map(i64::from);
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, fully_timed, equipment, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, fully_timed, equipment, nutrition, servings, kcal, kcal_complete, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -133,6 +150,22 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             -- incoming `[]` means unread, so it must never blank a reading we hold.
             equipment    = CASE WHEN json_array_length(excluded.equipment) > 0
                                 THEN excluded.equipment ELSE recipes.equipment END,
+            -- Merge-non-empty like `equipment`, same reason: `[]` is not a reading,
+            -- it is the absence of one, so a partial browse must not blank a stored
+            -- reading with it.
+            nutrition    = CASE WHEN json_array_length(excluded.nutrition) > 0
+                                THEN excluded.nutrition ELSE recipes.nutrition END,
+            -- The three that follow from that reading move in lockstep with it, the
+            -- way `total_seconds`/`fully_timed` move with `steps`. Gating them on the
+            -- incoming `nutrition` rather than on their own NULL-ness is what keeps
+            -- the four consistent: whichever reading wins the row, its total,
+            -- completeness and serving count win with it.
+            servings     = CASE WHEN json_array_length(excluded.nutrition) > 0
+                                THEN excluded.servings ELSE recipes.servings END,
+            kcal         = CASE WHEN json_array_length(excluded.nutrition) > 0
+                                THEN excluded.kcal ELSE recipes.kcal END,
+            kcal_complete = CASE WHEN json_array_length(excluded.nutrition) > 0
+                                THEN excluded.kcal_complete ELSE recipes.kcal_complete END,
             source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
             video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch(),
@@ -154,6 +187,10 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             total_seconds,
             fully_timed,
             equipment,
+            nutrition,
+            servings,
+            kcal,
+            kcal_complete,
             run_id,
         ],
     )
@@ -209,6 +246,8 @@ mod tests {
             instructions: "Boil.".into(),
             steps: Vec::new(),
             equipment: Vec::new(),
+            nutrition: Vec::new(),
+            servings: None,
             source_url: None,
             video_url: None,
         }
@@ -228,6 +267,8 @@ mod tests {
             instructions: String::new(),
             steps: Vec::new(),
             equipment: Vec::new(),
+            nutrition: Vec::new(),
+            servings: None,
             source_url: None,
             video_url: None,
         }
@@ -600,5 +641,152 @@ mod tests {
             r#"[{"item":"wok"}]"#,
             "an unread partial must not blank the stored reading"
         );
+    }
+
+    // --- The nutrition reading (#162) ------------------------------------------
+
+    /// Everything the derived view claims about a recipe's calories, in one read:
+    /// the reading, the serving count, the total, and whether that total is complete.
+    async fn read_nutrition(
+        conn: &Connection,
+        id: &str,
+    ) -> (String, Option<i64>, Option<i64>, i64) {
+        let mut rows = conn
+            .query(
+                "SELECT nutrition, servings, kcal, kcal_complete FROM recipes
+                 WHERE source = 'themealdb' AND id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        (
+            row.get::<String>(0).unwrap(),
+            row.get::<Option<i64>>(1).unwrap(),
+            row.get::<Option<i64>>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        )
+    }
+
+    /// A recipe carrying both readings: `grams` of a food at `kcal_per_100g`, with the
+    /// ingredient reading that gives the quantity. Built from a mass unit so the
+    /// arithmetic here needs nothing from the nutrition reading but the density.
+    fn weighed(grams: f64, kcal_per_100g: f64, servings: u32) -> Recipe {
+        let mut r = sample();
+        r.ingredients = vec![Ingredient {
+            name: "chicken".into(),
+            measure: Some(format!("{grams} g")),
+            structured: Some(recipe_core::StructuredMeasure {
+                item: "chicken".into(),
+                amount: Some(recipe_core::Amount::Quantified {
+                    quantity: recipe_core::Quantity::Exact { value: grams },
+                    unit: Some("g".into()),
+                    size: None,
+                }),
+                preparation: None,
+                note: None,
+            }),
+        }];
+        r.nutrition = vec![recipe_core::FoodEnergy {
+            kcal_per_100g,
+            grams_per_unit: None,
+        }];
+        r.servings = Some(servings);
+        r
+    }
+
+    /// **The #161 round-trip, written with the migration rather than after it.** The
+    /// equipment reading was correctly produced and reattached for months while
+    /// `upsert` never listed the column, so all 790 rows read `[]` and nobody could
+    /// tell. Every column this migration adds is pinned here on the way in: the
+    /// reading itself, the serving count, the computed total, and its completeness.
+    #[tokio::test]
+    async fn upsert_stores_the_nutrition_reading_and_everything_derived_from_it() {
+        let conn = conn().await;
+        // 500 g at 209 kcal/100 g = 1045 kcal, serving 4.
+        upsert(&conn, &weighed(500.0, 209.0, 4), 1).await.unwrap();
+
+        let (nutrition, servings, kcal, complete) = read_nutrition(&conn, "1").await;
+        assert_eq!(nutrition, r#"[{"kcal_per_100g":209.0}]"#);
+        assert_eq!(servings, Some(4));
+        assert_eq!(kcal, Some(1045), "the total is computed, not carried");
+        assert_eq!(complete, 1, "every line that stated a number was counted");
+    }
+
+    /// A recipe nobody has read stores `[]` and NULLs — degrade-not-die, and never a
+    /// `0` kcal, which would render as a dish with no calories.
+    #[tokio::test]
+    async fn an_unread_recipe_stores_no_calories_rather_than_zero() {
+        let conn = conn().await;
+        upsert(&conn, &sample(), 1).await.unwrap();
+        assert_eq!(
+            read_nutrition(&conn, "1").await,
+            ("[]".into(), None, None, 0)
+        );
+    }
+
+    /// A line with a number we could not weigh makes the total a floor, and the column
+    /// says so — the `fully_timed` bargain, applied to calories. The `cup` line has no
+    /// `grams_per_unit`, so nothing can turn it into grams.
+    #[tokio::test]
+    async fn a_line_that_cannot_be_weighed_marks_the_total_incomplete() {
+        let conn = conn().await;
+        let mut r = weighed(500.0, 209.0, 4);
+        r.ingredients.push(Ingredient {
+            name: "flour".into(),
+            measure: Some("1 cup".into()),
+            structured: Some(recipe_core::StructuredMeasure {
+                item: "flour".into(),
+                amount: Some(recipe_core::Amount::Quantified {
+                    quantity: recipe_core::Quantity::Exact { value: 1.0 },
+                    unit: Some("cup".into()),
+                    size: None,
+                }),
+                preparation: None,
+                note: None,
+            }),
+        });
+        r.nutrition.push(recipe_core::FoodEnergy {
+            kcal_per_100g: 364.0,
+            grams_per_unit: None,
+        });
+
+        upsert(&conn, &r, 1).await.unwrap();
+        let (_, _, kcal, complete) = read_nutrition(&conn, "1").await;
+        assert_eq!(kcal, Some(1045), "only the weighable line is summed");
+        assert_eq!(complete, 0, "and the total is marked a floor");
+    }
+
+    /// The reading and the three columns derived from it move in lockstep, so a
+    /// category browse — which carries no reading — cannot blank a stored total while
+    /// leaving the reading, or the reverse. Both halves matter: a stored `kcal` with no
+    /// `nutrition` beside it is a number nothing can re-derive or audit.
+    #[tokio::test]
+    async fn a_partial_does_not_clobber_the_stored_calories() {
+        let conn = conn().await;
+        upsert(&conn, &weighed(500.0, 209.0, 4), 1).await.unwrap();
+        upsert(&conn, &partial(), 1).await.unwrap();
+
+        let (nutrition, servings, kcal, complete) = read_nutrition(&conn, "1").await;
+        assert_eq!(nutrition, r#"[{"kcal_per_100g":209.0}]"#);
+        assert_eq!(servings, Some(4));
+        assert_eq!(kcal, Some(1045));
+        assert_eq!(complete, 1);
+    }
+
+    /// Lockstep when the news is bad, too: a fresh reading replaces the stored one, so
+    /// its total replaces the stored total even when the new one is worse. Keeping the
+    /// old number would leave it describing a reading that is gone — the same trap
+    /// `a_fresh_untimed_reading_nulls_the_stored_estimate` pins for time.
+    #[tokio::test]
+    async fn a_fresh_reading_replaces_the_stored_total() {
+        let conn = conn().await;
+        upsert(&conn, &weighed(500.0, 209.0, 4), 1).await.unwrap();
+        // A re-read that says the same food is far less dense, and feeds two.
+        upsert(&conn, &weighed(500.0, 100.0, 2), 2).await.unwrap();
+
+        let (_, servings, kcal, _) = read_nutrition(&conn, "1").await;
+        assert_eq!(kcal, Some(500));
+        assert_eq!(servings, Some(2));
     }
 }
