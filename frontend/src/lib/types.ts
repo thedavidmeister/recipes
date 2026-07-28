@@ -48,14 +48,32 @@ export type StepKind = "prep" | "cook";
  * One node in a recipe's method DAG (#74/#75/#76), the model's reading of the
  * instructions. Mirrors `recipe_core::StructuredStep`. `id` is 0-based; `after`
  * holds the ids of the steps that must finish first (`[]` = can start now), so
- * parallel-vs-sequential is derived from the edges. `seconds` is a timer's duration
- * when the step is timed.
+ * parallel-vs-sequential is derived from the edges.
  */
 export interface StructuredStep {
   id: number;
   text: string;
   kind: StepKind;
+  /**
+   * How long the step takes, in whole seconds. The backend requires one on every
+   * step it newly accepts (#158) — a step that takes no time does not exist — but
+   * this stays nullable because the readings captured before that rule still sit in
+   * the corpus, and they are what the app serves until a deliberate re-read
+   * replaces them.
+   */
   seconds: number | null;
+  /**
+   * Whether `seconds` is the model's estimate rather than a duration the source
+   * stated (#158). Both are real durations and both count identically toward
+   * `total_seconds`; they differ in how much confidence they earn, which is the
+   * only reason to keep them apart.
+   *
+   * Optional because it is absent from every step written before #158 — the wire
+   * format is whatever is in Turso, and the frontend parses nothing. An absent flag
+   * means stated: the prompt that produced those readings forbade inventing a
+   * timer.
+   */
+  estimated?: boolean;
   after: number[];
 }
 

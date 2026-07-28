@@ -167,6 +167,7 @@ mod tests {
             text: format!("step {id}"),
             kind: StepKind::Cook,
             seconds,
+            estimated: false,
             after: after.to_vec(),
         };
 

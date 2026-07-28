@@ -2,10 +2,11 @@
 name: enrich-steps
 description: >-
   Run the recipes step-reading worker. Pull recipes whose method has not been read
-  into structured steps, read each method into a DAG of steps (with timers and
-  dependencies), and push the results back — a fixed pull → read → push loop until
-  the queue is empty. Use when reading the recipes corpus's methods into steps (a
-  cron, or "read the steps"). The two tools do all I/O; you do only the reading.
+  into structured steps, read each method into a DAG of steps (every step timed —
+  stated durations captured, unstated ones estimated — with dependencies), and push
+  the results back — a fixed pull → read → push loop until the queue is empty. Use
+  when reading the recipes corpus's methods into steps (a cron, or "read the
+  steps"). The two tools do all I/O; you do only the reading.
 ---
 
 # Read the recipes corpus's methods into structured steps
@@ -14,8 +15,8 @@ You are the step-reading worker. Your whole job is a loop:
 
 1. **pull** the recipes whose method still needs reading (the `step_pull` tool),
 2. **read** each method into a DAG of structured steps (this is the model work —
-   segment the prose, time the timed steps, map the dependencies, pull hidden
-   prep out of the ingredients),
+   segment the prose, put a duration on **every** step, map the dependencies,
+   pull hidden prep out of the ingredients),
 3. **push** the readings back (the `step_push` tool),
 4. repeat until nothing is pending.
 
@@ -58,11 +59,12 @@ contract — match it exactly):
 
 ```
 StructuredStep = {
-  "id":      number,          // 0-based, its position in the array
-  "text":    string,          // the step as a short imperative ("Finely chop the onions")
-  "kind":    "prep" | "cook", // mise en place vs active cooking
-  "seconds": number | null,   // a timer's duration in whole seconds, else null
-  "after":   number[]         // ids of the steps that must finish first; [] = start now
+  "id":        number,          // 0-based, its position in the array
+  "text":      string,          // the step as a short imperative ("Finely chop the onions")
+  "kind":      "prep" | "cook", // mise en place vs active cooking
+  "seconds":   number,          // how long the step takes, in whole seconds — REQUIRED
+  "estimated": boolean,         // true if you estimated `seconds`, false if the source stated it
+  "after":     number[]         // ids of the steps that must finish first; [] = start now
 }
 ```
 
@@ -78,9 +80,9 @@ Reading rules:
 - **`kind`** is `"prep"` for mise en place (chopping, slicing, measuring —
   things done before or off to the side) and `"cook"` for active cooking
   (frying, simmering, baking).
-- **`seconds`** is the step's timer in whole seconds when it states a duration
-  ("5 minutes" → 300, "half an hour" → 1800, "1-2 minutes" → 120 — the upper
-  bound). `null` when there is no clear time ("until golden", "to taste").
+- **`seconds`** is required on **every** step, and **`estimated`** says where
+  the number came from. This is the part of the reading that matters most — see
+  [Time every step](#time-every-step) below.
 - **`after`** encodes the flow (#75): a step that needs an earlier step's result
   lists its id. Independent steps (two things chopped, two pans) share no
   dependency, so they run in parallel — express that by giving them disjoint
@@ -90,6 +92,62 @@ Reading rules:
   step for it ("Finely chop the onions") with `after: []` — it can be done
   ahead, in parallel — and have the cook step that uses it depend on that prep
   step.
+
+#### Time every step
+
+**Every step gets a number. A step that takes no time does not exist.**
+
+Most sources are silent about most of their steps: across this corpus only 23%
+of steps have a duration stated in the source, and one recipe in ten states none
+at all. That silence is not a fact about the food. "Chop the onion" takes about
+ninety seconds whether or not anyone wrote it down. When the source says
+nothing, **you** put a cook's number on it, the same way a cook reading the
+recipe would.
+
+So there are two kinds of number, and the reading keeps them apart:
+
+- **The source stated it** → use it, `"estimated": false`. "5 minutes" → 300 ·
+  "half an hour" → 1800 · "1-2 minutes" → 120 (the upper bound) · "overnight"
+  → 28800.
+- **The source said nothing** → estimate it, `"estimated": true`. "chop the
+  onion" → 90 · "fry until golden" → 300 · "bring a pan to the boil" → 480 ·
+  "season and serve" → 30 · "cook the noodles following pack instructions"
+  → 300.
+
+The flag is not a confession, it is information: it lets the app be exactly as
+confident as the reading deserves. **Never mark an estimate as stated to make it
+look better, and never mark a stated time as an estimate to hedge.**
+
+How to estimate well:
+
+- **Answer "how long would this take me?"** — elapsed time for the step itself,
+  from starting it to being able to move on. Not how long it takes to _say_.
+- **Be ordinary, not careful.** A plausible middle number beats a defensive one.
+  A round guess in the right order of magnitude is the whole win; 90 versus 120
+  seconds for a chop changes nothing, 90 versus 0 changes everything.
+- **A wait is a duration.** "Until golden", "until the meat is tender", "until
+  thickened", "let it rest", "chill", "prove", "marinate" all describe real
+  elapsed time. Read the food, not the phrasing: a simmer until tender on
+  stewing beef is hours, on a fillet it is minutes.
+- **Unattended time counts, and the graph makes it free.** A step that runs
+  while you do something else — an oven preheating, a pot coming to the boil, a
+  dough proving — gets its true duration and `after: []` or an early dependency,
+  and the critical path overlaps it with whatever runs alongside. Shortening it
+  to "because the cook isn't standing there" is the one way to get this wrong.
+- **Range → take the upper bound**, as with a stated one.
+
+Sanity: a whole recipe usually lands between 10 minutes and 3 hours. If your
+steps sum to under five minutes for anything with more than a couple of actions,
+you have under-timed it — go back.
+
+Times the method mentions that are **not** step durations, and must not become
+one:
+
+- **Storage and shelf life** — "will keep for 3 days", "can be refrigerated for
+  2 days before baking". Not a step; ignore it.
+- **Optional afterthoughts** — "you can reheat it in 30-second bursts", "(or
+  bake it for 10-15 minutes instead)". Not on the path the reading describes;
+  ignore the alternative and time the primary method.
 
 ### 3. Push
 
@@ -106,7 +164,8 @@ a recipe key plus its steps (no model field; the server stamps that):
         "id": 0,
         "text": "Finely chop the onions",
         "kind": "prep",
-        "seconds": null,
+        "seconds": 90,
+        "estimated": true,
         "after": []
       },
       {
@@ -114,6 +173,7 @@ a recipe key plus its steps (no model field; the server stamps that):
         "text": "Fry the onions until soft",
         "kind": "cook",
         "seconds": 300,
+        "estimated": false,
         "after": [0]
       },
       {
@@ -121,12 +181,17 @@ a recipe key plus its steps (no model field; the server stamps that):
         "text": "Add the rice and simmer",
         "kind": "cook",
         "seconds": 1200,
+        "estimated": false,
         "after": [1]
       }
     ]
   }
 ]
 ```
+
+The source said "fry the onions for 5 minutes" and "simmer for 20 minutes" but
+nothing about the chopping, so the first step's 90 seconds is yours and is
+marked as such.
 
 It returns what happened:
 
@@ -136,8 +201,14 @@ It returns what happened:
 
 - `accepted` — step readings stored.
 - `derived` — recipes rebuilt so the steps show immediately.
-- `rejected` — submissions dropped, each with a reason (an invalid graph, or a
-  recipe that no longer exists). A rejected recipe comes back in the next pull.
+- `rejected` — submissions dropped, each with a reason. A rejected recipe comes
+  back in the next pull. The reasons:
+  - _"step N has no duration"_ — you left `seconds` off or null. Estimate it and
+    resubmit; there is no step this does not apply to.
+  - _"invalid step graph"_ — ids are not 0-based sequential, or a step depends
+    on a later one.
+  - _"empty step reading"_ — you pushed no steps at all.
+  - _"no such recipe"_ — it left the corpus; skip it.
 
 ### 4. Loop
 
@@ -155,8 +226,11 @@ Go back to step 1. Stop when:
 - **Do** express real parallelism with disjoint `after` chains, not a single
   chain.
 - **Do** pass clean JSON as `step_push`'s `readings` argument — no commentary.
-- **Don't** invent steps the method does not describe, or timers it does not
-  state.
+- **Do** put a `seconds` on every single step, and set `estimated` honestly.
+- **Don't** invent steps the method does not describe. Durations are the
+  exception and the point: the method not stating one is why you estimate it.
+- **Don't** send `"seconds": null` or leave the field out. The app rejects the
+  whole reading, and the recipe comes straight back to you.
 - **Don't** push an empty `steps` array for a recipe — every pending recipe has
   a method, so it must yield at least one step (the app rejects an empty
   reading).

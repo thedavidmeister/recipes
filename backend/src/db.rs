@@ -51,6 +51,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (16, include_str!("../migrations/0016_meal_type.sql")),
     (17, include_str!("../migrations/0017_pick_time_cap.sql")),
     (18, include_str!("../migrations/0018_buy_checks.sql")),
+    // 19/20/21 are reserved by branches in flight; this one took the next free number
+    // rather than a lower one, because `highest_applied` skips anything at or below
+    // the max already recorded — a smaller version merged later would never run.
+    (
+        22,
+        include_str!("../migrations/0022_step_estimated_durations.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
