@@ -10,12 +10,22 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** A live snapshot: a part-read corpus, a failed run in the history. */
+/**
+ * The corpus's real reading, taken 2026-07-28 (#157): 790 recipes, all of them read,
+ * and the five most recent runs.
+ *
+ * The red "Running" tile is the dashboard doing its job, not a busy pipeline — 22
+ * runs are still `running`, including the two most recent ingests, which `runs.rs`
+ * calls the died-mid-flight signal. The fixture it replaces claimed a part-read
+ * corpus of 745 and a failed run; the first had simply gone stale, and the second is
+ * below.
+ */
 export const Ready: Story = {
   args: { status: "ready", stats: healthStats() },
 };
 
-/** Fresh corpus — ingested but nothing enriched, no runs yet (today's real state). */
+/** Fresh corpus — ingested but nothing enriched, no runs yet. What a new deployment
+ * shows on its first morning; the live corpus was last in it long ago. */
 export const Empty: Story = {
   args: {
     status: "ready",
@@ -29,21 +39,48 @@ export const Empty: Story = {
   },
 };
 
-/** A run is in flight — the "Running" tile turns red and the run reads in-progress. */
-export const RunInFlight: Story = {
+/**
+ * The gap between an ingest and the enrich cron: new recipes are in, unread. Every
+ * ingest opens this window, so the part-read bar is a state the corpus really passes
+ * through.
+ *
+ * The numbers are chosen rather than read, and there is no reading to take — every
+ * enrichment stage is at 790 of 790 today. 745 of 790 is the shape the gap takes,
+ * and both ends of it are real: 745 is what the corpus held before the growth that
+ * left the old fixture stale, 790 is what it holds now.
+ */
+export const PartlyRead: Story = {
   args: {
     status: "ready",
     stats: healthStats({
-      running: 1,
+      enriched: 745,
+      enriched_pct: (745 / 790) * 100,
+      by_model: [{ model: "claude-sonnet-5", count: 745 }],
+    }),
+  },
+};
+
+/**
+ * A run that failed — the pill goes paprika.
+ *
+ * Depicted, and worth flagging as such: `runs::FAILED` exists in the backend but no
+ * caller passes it (`finish` is only ever called with `COMPLETED`), so no row in the
+ * corpus has ever carried this status. A run that dies leaves itself `running`
+ * instead, which is what the `Ready` snapshot above shows 22 of.
+ */
+export const RunFailed: Story = {
+  args: {
+    status: "ready",
+    stats: healthStats({
       recent_runs: [
         {
-          id: 28,
-          kind: "enrich",
-          status: "running",
-          started_at: 1_752_849_700,
-          finished_at: null,
+          id: 246,
+          kind: "enrich_steps",
+          status: "failed",
+          started_at: 1_785_214_900,
+          finished_at: 1_785_214_915,
         },
-        ...healthStats().recent_runs,
+        ...healthStats().recent_runs.slice(0, 4),
       ],
     }),
   },
