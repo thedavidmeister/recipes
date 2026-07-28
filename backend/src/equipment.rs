@@ -227,6 +227,42 @@ pub async fn load(conn: &Connection) -> anyhow::Result<HashMap<RecipeKey, Vec<Re
     Ok(map)
 }
 
+/// Every recipe's equipment as the **app** believes it: the `recipes.equipment` column,
+/// one entry per recipe, unread ones included as an empty reading.
+///
+/// Deliberately the derived view rather than `equipment_structures`, even though the
+/// readings table is the fuller answer. The walk limits a plan by this column (#82), so
+/// a recommendation counted off the readings could promise recipes the deck would then
+/// refuse to deal — "add a blender and you can make 47 more", followed by a pick that
+/// shows none of them. One column, one claim.
+///
+/// The cost of that is real and temporary: `recipes.equipment` carries a reading only
+/// once a derive has run since #161 fixed the upsert that was dropping it, so until
+/// then this reads the corpus as unread and there is nothing to recommend. That is the
+/// same trade #82 took, and ingest closes it on its own schedule.
+///
+/// A row that will not parse degrades to unread rather than failing the request, and
+/// says so — matching the walk's handling of the same column, since one corrupt recipe
+/// must not take the advice down with it.
+pub async fn derived_readings(conn: &Connection) -> anyhow::Result<Vec<Vec<RequiredEquipment>>> {
+    let mut rows = conn
+        .query("SELECT source, id, equipment FROM recipes", ())
+        .await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let source: String = row.get(0)?;
+        let id: String = row.get(1)?;
+        let json: String = row.get(2)?;
+        out.push(serde_json::from_str(&json).unwrap_or_else(|e| {
+            tracing::warn!(
+                "recipe {source}/{id} has unparseable equipment JSON, treating as unread: {e}"
+            );
+            Vec::new()
+        }));
+    }
+    Ok(out)
+}
+
 /// Reattach a recipe's reading onto `recipe.equipment` in place. A recipe with no row
 /// keeps `[]` — which reads as "not known yet", the degrade-not-die state.
 pub fn attach(
@@ -399,6 +435,59 @@ mod tests {
         let conn = conn().await;
         insert_recipe(&conn, "1", "Fry.").await;
         assert!(vocabulary(&conn).await.unwrap().is_empty());
+    }
+
+    /// Write a reading straight onto the derived column, the way a `derive` run leaves
+    /// it — which is what [`derived_readings`] reads and what the walk (#82) limits by.
+    async fn set_derived(conn: &Connection, id: &str, json: &str) {
+        conn.execute(
+            "UPDATE recipes SET equipment = ?2 WHERE source = 'themealdb' AND id = ?1",
+            libsql::params![id, json],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The advice (#83) counts off `recipes.equipment` — the column the walk limits by
+    /// — so the two can never disagree about what a recipe needs. Every recipe is
+    /// represented, an unread one as an empty reading rather than as an absence, since
+    /// `read` is counted from what comes back.
+    #[tokio::test]
+    async fn derived_readings_follow_the_column_the_walk_reads() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", "Fry.").await;
+        insert_recipe(&conn, "2", "Chop.").await;
+
+        assert_eq!(
+            derived_readings(&conn).await.unwrap(),
+            vec![Vec::new(), Vec::new()],
+            "a corpus nothing has been derived onto is unread, both rows present"
+        );
+
+        set_derived(&conn, "1", r#"[{"item":"wok"},{"item":"knife"}]"#).await;
+        assert_eq!(
+            derived_readings(&conn).await.unwrap(),
+            vec![vec![eq("wok"), eq("knife")], Vec::new()],
+            "the read recipe carries its reading; the unread one is still an empty list"
+        );
+    }
+
+    /// One corrupt row degrades to unread rather than taking the whole answer down —
+    /// and unread is the safe direction, since a recipe we cannot read is one we must
+    /// not claim anything about. The same handling the walk gives the same column.
+    #[tokio::test]
+    async fn an_unparseable_row_degrades_to_unread() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", "Fry.").await;
+        insert_recipe(&conn, "2", "Chop.").await;
+        set_derived(&conn, "1", "{oops").await;
+        set_derived(&conn, "2", r#"[{"item":"wok"}]"#).await;
+
+        assert_eq!(
+            derived_readings(&conn).await.unwrap(),
+            vec![Vec::new(), vec![eq("wok")]],
+            "the broken row is unread, the good one is untouched"
+        );
     }
 
     /// A reading for a recipe we do not have is dropped rather than stored against
