@@ -57,10 +57,16 @@
   /**
    * "How long does this take" as a badge, so it factors into the yes/no at a glance
    * instead of surfacing after the pick (#84). Null for a recipe nobody has timed:
-   * that is unknown, not instant, so the badge simply is not there — the same
-   * lower-bound honesty the plan lobby states for its cap (#80).
+   * that is unknown, not instant, so the badge simply is not there.
+   *
+   * The card's own `fully_timed` picks the mark (#158): `~23 min` when every step of
+   * it carries a duration, `23 min+` when one does not and the total can therefore
+   * only be too low. Per card, not per deploy — the corpus is re-read a recipe at a
+   * time, so two cards in one deck can honestly wear different marks.
    */
-  const estimate = $derived(card ? formatEstimate(card.total_seconds) : null);
+  const estimate = $derived(
+    card ? formatEstimate(card.total_seconds, card.fully_timed) : null,
+  );
 </script>
 
 <div class="pt-32 pb-16">

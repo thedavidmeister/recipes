@@ -25,3 +25,11 @@ export const AnotherPerson: Story = {
 export const NoUsername: Story = {
   args: { user: { telegram_user_id: "9317", username: null } },
 };
+
+/** Named inside a sentence rather than as a line of a list (#96) — the plan lobby
+ * says who leaving would hand the plan to. The list form is a block, so mid-prose it
+ * would take the whole line and strand the rest of the sentence underneath; this one
+ * sits on the baseline and the words carry on around it. */
+export const InSentence: Story = {
+  args: { user: { telegram_user_id: "5150", username: "mel" }, inline: true },
+};

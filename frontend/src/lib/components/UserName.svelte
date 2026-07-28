@@ -17,12 +17,26 @@
   interface Props {
     /** The person — a kitchen member or a plan's voter; both are this shape. */
     user: { telegram_user_id: string; username: string | null };
+    /**
+     * Name them **inside a sentence** rather than as a line of a list.
+     *
+     * The list form is a `flex` row, which is a block: dropped mid-prose it takes
+     * the whole line and leaves the rest of the sentence — a trailing full stop,
+     * say — stranded underneath. The alternative was to spell the dot and the
+     * fallback-to-id out again at the call site, which is the duplication this
+     * component exists to prevent, so the flow is a mode here instead.
+     */
+    inline?: boolean;
   }
 
-  let { user }: Props = $props();
+  let { user, inline = false }: Props = $props();
 </script>
 
-<span class="font-display flex items-center gap-2 text-stone-900">
+<span
+  class="font-display items-center gap-2 text-stone-900 {inline
+    ? 'inline-flex align-baseline'
+    : 'flex'}"
+>
   <span
     class="size-2.5 shrink-0 rounded-full {userColour(user.telegram_user_id)}"
     aria-hidden="true"

@@ -11,6 +11,7 @@ const meta = {
     onMealType: () => {},
     onAdditions: () => {},
     onCap: () => {},
+    onLeave: () => {},
     // Every plan is born capped at half an hour (#163), so that is the shared
     // starting state and the stories below vary from it, rather than each one
     // having to restate what a lobby looks like when you make one. A story about
@@ -22,10 +23,16 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
-/** Alone, which is a complete meal plan: start whenever, or invite someone first.
+/**
+ * Alone, which is a complete meal plan: start whenever, or invite someone first.
  * A plan is born for dinner (#114) and capped at half an hour (#163) — this is the
  * lobby exactly as making one hands it to you, with both pickers already saying
- * something and there for the host to say otherwise. */
+ * something and there for the host to say otherwise.
+ *
+ * Also the last-person-out case for leaving (#96): with nobody else here, walking
+ * away ends the plan rather than shrinking it, so the button says so before it is
+ * tapped instead of a modal asking afterwards.
+ */
 export const Solo: Story = {
   args: {
     status: "ready",
@@ -37,7 +44,14 @@ export const Solo: Story = {
   },
 };
 
-/** Three deciding — the number a recipe now has to win over. */
+/**
+ * Three deciding — the number a recipe now has to win over.
+ *
+ * And the host-leaving case (#96): the plan passes to the next person in the room
+ * rather than being taken down, so the note under Leave names who would get it. A
+ * host who could not leave would be trapped in their own plan, and one who took it
+ * down with them would cancel a meal other people are having.
+ */
 export const Gathered: Story = {
   args: {
     status: "ready",
@@ -156,6 +170,27 @@ export const Pending: Story = { args: { status: "pending" } };
 
 export const Error: Story = {
   args: { status: "error", error: "could not open this meal plan (404)" },
+};
+
+/**
+ * The last person left, so the plan is over (#96).
+ *
+ * This lives on the lobby and nowhere else, because a plan can only be emptied
+ * *before* it starts — the roster closes at the start in both directions — so the
+ * swipe view can never be the screen looking at one. Reached by a client still in
+ * the room when the last decider walks out: a second tab of the leaver's own, or
+ * somebody watching a lobby they never got seated into.
+ *
+ * Said plainly rather than as an alert: nothing failed, there is simply nothing
+ * left to decide — and no Start and no Leave, because there is no plan to start
+ * and nothing left to leave.
+ *
+ * The meal is named because it is always known here: a client only learns a plan
+ * ended by being in its room, which means it had already read the lobby. (`Error`
+ * leaves it out for the opposite reason — there, the read is what failed.)
+ */
+export const PlanEnded: Story = {
+  args: { status: "ended", mealType: "dinner" },
 };
 
 /**

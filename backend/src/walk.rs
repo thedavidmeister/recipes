@@ -78,8 +78,20 @@ pub struct RecipeCard {
     /// recipe, or it read no timed step — never "instant"; the client shows nothing
     /// for it. A `Some` is a **lower bound**: untimed steps ("until golden")
     /// contribute nothing, so the real cook takes at least this long, and the client
-    /// renders it as an at-least, never an exact time.
+    /// renders it as an at-least, never an exact time — unless [`Self::fully_timed`]
+    /// says otherwise.
     pub total_seconds: Option<i64>,
+    /// Whether every step of this recipe carries a duration (#158/#84), so whether
+    /// `total_seconds` is a complete estimate or only a floor.
+    ///
+    /// It rides on the card because the card is where the number is rendered and the
+    /// client cannot work it out: it holds no steps here, and it could not run
+    /// `recipe-core` over them if it did (no WASM). `true` → the error is ordinary
+    /// estimation noise in either direction, so the mark is `~`; `false` → at least
+    /// one step counted as 0, so the total can only be too low and the mark is `+`.
+    /// Both are honest, and which is honest *now* is a property of the rows, not of
+    /// the deploy — so the badge self-corrects as the corpus is re-read.
+    pub fully_timed: bool,
 }
 
 /// One stop on the walk: the recipe landed on, and the ingredient crossed to reach
@@ -335,7 +347,7 @@ struct Bounds {
 async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Result<Corpus> {
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, total_seconds, ingredients, equipment
+            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment
              FROM recipes
              WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
             libsql::params![bounds.max_total_seconds],
@@ -355,6 +367,9 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
             // card (#84): the walk already holds it, so showing the estimate costs
             // one more column, not a second read.
             total_seconds: row.get::<Option<i64>>(6)?,
+            // NOT NULL DEFAULT 0, so this is a plain read with no absent case: a row
+            // the step worker has not reached is `0`, which is the truth about it.
+            fully_timed: row.get::<i64>(7)? != 0,
         };
         // The ingredients column is our own serialization — NOT NULL DEFAULT '[]',
         // written only by ingest — so the two ways to fail here are not the same.
@@ -365,7 +380,7 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
         // that works over the other recipes, so that recipe degrades to an
         // edgeless node — but it is warned, not dropped silently, so corruption is
         // still visible.
-        let json = row.get::<String>(7)?;
+        let json = row.get::<String>(8)?;
         let ingredients: Vec<Ingredient> = serde_json::from_str(&json).unwrap_or_else(|e| {
             tracing::warn!(
                 "recipe {}/{} has unparseable ingredients JSON, treating as none: {e}",
@@ -380,7 +395,7 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
         // cannot act on — so a corrupt row is left out of a can-make walk rather than
         // waved through as makeable.
         if let Some(owned) = &bounds.owned_equipment {
-            let json = row.get::<String>(8)?;
+            let json = row.get::<String>(9)?;
             let required: Vec<RequiredEquipment> =
                 serde_json::from_str(&json).unwrap_or_else(|e| {
                     tracing::warn!(
@@ -495,6 +510,7 @@ mod tests {
             category: None,
             area: None,
             total_seconds: None,
+            fully_timed: false,
         }
     }
 

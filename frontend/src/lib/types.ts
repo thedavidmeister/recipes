@@ -48,13 +48,19 @@ export type StepKind = "prep" | "cook";
  * One node in a recipe's method DAG (#74/#75/#76), the model's reading of the
  * instructions. Mirrors `recipe_core::StructuredStep`. `id` is 0-based; `after`
  * holds the ids of the steps that must finish first (`[]` = can start now), so
- * parallel-vs-sequential is derived from the edges. `seconds` is a timer's duration
- * when the step is timed.
+ * parallel-vs-sequential is derived from the edges.
  */
 export interface StructuredStep {
   id: number;
   text: string;
   kind: StepKind;
+  /**
+   * How long the step takes, in whole seconds — an estimate, like every duration in
+   * cooking. The backend requires one on every step it newly accepts (#158): a step
+   * that takes no time does not exist. It stays nullable because the readings
+   * captured before that rule still sit in the corpus, and they are what the app
+   * serves until a deliberate re-read replaces them.
+   */
   seconds: number | null;
   after: number[];
 }
@@ -114,13 +120,25 @@ export interface RecipeCard {
    * The estimated total time in seconds (#79/#84) — the critical path over the
    * recipe's step DAG, stored as `recipes.total_seconds`.
    *
-   * Two things it is *not*. `null` is **unknown** (the step worker has not read
-   * this recipe, or read no timed step), never "instant" — so nothing is shown for
-   * it, never "0 min". And a number is a **lower bound**, not an exact time: an
-   * untimed step ("until golden") contributes nothing to the path, so the real cook
-   * takes at least this long. `formatEstimate` in `steps.ts` marks both.
+   * `null` is **unknown** (the step worker has not read this recipe, or read no
+   * timed step), never "instant" — so nothing is shown for it, never "0 min". A
+   * number is never exact either; how it is inexact depends on `fully_timed`, and
+   * `formatEstimate` in `steps.ts` marks all three cases.
    */
   total_seconds: number | null;
+  /**
+   * Whether every step of this recipe carries a duration (#158/#84), so whether
+   * `total_seconds` is a complete estimate or only a floor. Mirrors
+   * `recipes.fully_timed`, computed by `recipe-core` from the same steps as the
+   * total, so the two can never disagree.
+   *
+   * `false` → an untimed step counted as 0, so the total can only be too low →
+   * `23 min+`. `true` → every step counted, so the error is ordinary estimation
+   * noise in either direction → `~23 min`. The corpus is re-read recipe by recipe,
+   * so this differs *per card* during the pass; the badge follows the row rather
+   * than the deploy.
+   */
+  fully_timed: boolean;
 }
 
 /**
@@ -162,6 +180,12 @@ export type MealAddition = (typeof MEAL_ADDITIONS)[number];
  * - `loading` — the deck ran low; fetching more from the walk. A pick is **endless**
  *   until you decide (there is no "caught up"), so this is a brief bridge, not a stop.
  * - `error` — the room could not be reached.
+ *
+ * There is deliberately no "the plan ended" state here. A plan can only be emptied
+ * before it starts (#96 — the roster closes at the start in both directions), and
+ * this view only exists after it has started, so a swipe view can never be looking
+ * at a plan that everyone walked out of. That state lives on `PlanLobby`, which is
+ * the only screen it can reach.
  */
 export type PickStatus =
   | "connecting"

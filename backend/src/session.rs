@@ -116,6 +116,23 @@ enum ServerMsg {
         id: String,
         checks: Vec<BuyCheck>,
     },
+    /// Someone left the plan (#96): who, and whether that emptied it.
+    ///
+    /// Always from a lobby — the roster closes at the start in both directions —
+    /// so the [`ServerMsg::Lobby`] frame beside it already carries the smaller
+    /// roster. This is the event behind it, named rather than merely counted.
+    Left {
+        /// Who went. The whole person, like [`BuyCheck::by`] — the room says a
+        /// name out loud, and by the time this arrives the roster no longer holds
+        /// them to look one up from.
+        voter: Voter,
+        /// Whether they were the last, so the plan itself is gone. This is the
+        /// half no other frame can carry: with the roster empty there is no
+        /// smaller lobby to announce, and anyone still holding the channel — the
+        /// leaver's own second tab, someone watching a lobby they were never
+        /// seated into — would otherwise sit on a plan that no longer exists.
+        ended: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -484,6 +501,102 @@ pub async fn join_lobby(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let view = reload_and_announce(&state, channel).await?;
     Ok(Json(view))
+}
+
+/// What a departure left behind (#96) — enough for the leaver's own screen to know
+/// where it stands, without a second read of a plan they are no longer in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Departure {
+    pub channel_id: String,
+    /// The kitchen the plan was for, so leaving puts you back where you came from.
+    /// `None` for a plan started outside one — the client falls back to your own.
+    pub kitchen_id: Option<String>,
+    /// Whether that was the last person, so the plan is gone rather than smaller.
+    pub plan_ended: bool,
+    /// Who holds the plan now; `None` when it ended. Differs from the caller
+    /// exactly when the host left and it passed on.
+    pub host: Option<String>,
+}
+
+/// `DELETE /api/session/{channel}/join` — leave a meal plan (#96).
+///
+/// The inverse of [`join_lobby`], and deliberately the same path: joining and
+/// leaving are one thing said in two directions, so they are one resource with two
+/// verbs rather than a `/join` and a `/leave` that could drift apart.
+///
+/// **Leaving is a lobby act, like joining.** The roster closes at the start in
+/// *both* directions (#93): the people swiping agreed to decide together, and the
+/// number they have to agree on may no more fall out from under them than a late
+/// joiner may raise it. A departure landing after the start is refused with the same
+/// 400 every other lobby write gives, and the guard lives in the delete's own
+/// predicate (see [`remove_voter`]) rather than in a preceding read, so a start
+/// arriving between the two wins.
+///
+/// So nothing but the roster moves. There are no votes to retract and no shopping
+/// claims to release, because neither exists before the swiping begins — the room is
+/// told the smaller roster and then who left it (see [`ServerMsg::Left`]), in that
+/// order, so a client reading them in sequence never renders "someone left" against
+/// a roster that still contains them.
+///
+/// Guards in the house style: an unknown channel is a client bug (400), and someone
+/// who was never in the plan is refused (403) rather than quietly answered, exactly
+/// as [`set_buy_check`] refuses a stranger holding the channel id.
+pub async fn leave_lobby(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+) -> Result<Json<Departure>, AppError> {
+    let channel = channel.as_str();
+    let user = &user;
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+    let Some(who) = view
+        .voters
+        .iter()
+        .find(|v| v.telegram_user_id == user.telegram_user_id)
+        .cloned()
+    else {
+        return Err(AppError::Forbidden("you are not in this meal plan".into()));
+    };
+
+    let departed = state
+        .with_db(move |db| async move { remove_voter(&db, channel, &user.telegram_user_id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let (plan_ended, host) = match departed {
+        Removed::Left { host } => (false, Some(host)),
+        Removed::Ended => (true, None),
+        // The roster closed while this was in flight. The same answer every other
+        // lobby write gives, because it is the same fact.
+        Removed::Started => {
+            return Err(AppError::BadRequest(
+                "this meal plan has already started".into(),
+            ));
+        }
+    };
+
+    // Tell the room before answering the leaver, so the people still in the plan and
+    // the person walking out of it learn the same thing from the same act. The roster
+    // frame goes first and the event that explains it last: a client that reads them in
+    // order never renders "someone left" against a roster that still contains them.
+    //
+    // Only the roster moves. Leaving is a lobby act, so there are no votes to retract
+    // and no shopping claims to release — nothing else about the meal is decided yet.
+    if !plan_ended {
+        reload_and_announce(&state, channel).await?;
+    }
+    announce_departure(&state, channel, who, plan_ended);
+
+    Ok(Json(Departure {
+        channel_id: channel.to_owned(),
+        kitchen_id: view.kitchen_id,
+        plan_ended,
+        host,
+    }))
 }
 
 /// `POST /api/session/{channel}/start` — close the lobby and begin the pick. Host only.
@@ -918,6 +1031,17 @@ async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyVie
     Ok(view)
 }
 
+/// Name whoever just left to the room (#96) — the event behind the roster frame that
+/// went before it. Infallible on purpose: the durable state is already
+/// written, so a room nobody is listening to must not turn a completed departure
+/// into an error.
+fn announce_departure(state: &AppState, channel: &str, voter: Voter, ended: bool) {
+    let tx = room(&state.rooms, channel);
+    if let Ok(txt) = serde_json::to_string(&ServerMsg::Left { voter, ended }) {
+        let _ = tx.send(txt);
+    }
+}
+
 /// `GET /api/session/{channel}/ws` — join a session's live room.
 ///
 /// Session-gated like every person-facing route (#25); the upgrade carries the
@@ -1055,6 +1179,147 @@ async fn seat_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::Res
     )
     .await?;
     Ok(())
+}
+
+/// What became of the plan when somebody left it.
+///
+/// Three outcomes rather than "who holds it now", because that cannot express the one
+/// that matters most: a departure the plan **refused**. The roster is fixed once
+/// swiping starts, so a leave arriving late changes nothing and has to say so rather
+/// than reporting a plan with no host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Removed {
+    /// They are out and the plan carries on, now held by this telegram id.
+    Left { host: String },
+    /// They were the last one, so the plan went with them.
+    Ended,
+    /// Swiping had already begun, so the roster is closed and nothing was written.
+    Started,
+}
+
+/// Take someone out of a plan's lobby (#96).
+///
+/// Idempotent from end to end — every statement is a delete or a conditional update,
+/// so a retry after a lost response finishes the same departure rather than starting
+/// a second one. Membership is judged by the caller's read, not by this function's
+/// row counts, so two taps of the same button both succeed instead of the loser
+/// being told it was never in the plan.
+///
+/// **Only from the lobby.** The seat delete carries `started_at IS NULL` in its own
+/// predicate, so the roster is closed in both directions the instant the swiping
+/// begins and a start landing mid-request wins rather than losing to a read taken a
+/// moment earlier. A delete that writes nothing is then classified rather than
+/// assumed: [`Removed::Started`] only when the plan really has started, because the
+/// other reason to write nothing is a seat that was already gone — the same
+/// departure arriving twice.
+///
+/// **Nothing else is theirs to take.** Votes and shopping claims only exist after
+/// the start, and the predicate above is the proof this plan had not started, so
+/// there is deliberately no vote sweep and no claim sweep here. Cleanup written for
+/// a state the guard makes unreachable is an invitation to relax the guard later,
+/// believing it is handled.
+///
+/// **The host passes it on rather than taking the plan down.** Forbidding the host
+/// to leave traps the one person who cannot escape their own plan — the hostage
+/// problem again, pointed at them. Ending it means one tap destroys everyone else's
+/// plan and roster, and a meal is not the host's to cancel once other people are
+/// gathering for it. Leaving it hostless leaves a lobby nobody can
+/// start. So it passes to the longest-standing remaining decider — the same order
+/// the lobby lists people in, so "the next person in the room" is what everybody
+/// already sees. Chosen *inside* the UPDATE, and only while the leaver still holds
+/// it, so there is no read-then-write gap for a second departure to slip through.
+///
+/// **The last person out closes the plan.** An empty plan is nobody's meal, and a
+/// stale link that could still seat someone into it would seat them alone into a
+/// lobby whose meal, additions and time cap were chosen by people who all walked
+/// out. The delete carries its own `NOT EXISTS` condition rather than trusting a
+/// count read a moment earlier — the same shape as the `started_at IS NULL` above —
+/// so a join landing in that gap wins and the plan survives.
+async fn remove_voter(conn: &Connection, channel: &str, user: &str) -> anyhow::Result<Removed> {
+    // The roster is fixed once swiping starts, in **both** directions, so this carries
+    // `started_at IS NULL` in its own predicate rather than trusting a preceding read.
+    // Those are two round trips and a start landing between them must win: the people
+    // swiping agreed to decide together, and the number they have to agree on cannot
+    // fall out from under them any more than a late joiner may raise it.
+    let seat = conn
+        .execute(
+            "DELETE FROM pick_voters
+             WHERE channel_id = ?1 AND user_id = ?2
+               AND EXISTS (SELECT 1 FROM pick_sessions
+                           WHERE channel_id = ?1 AND started_at IS NULL)",
+            libsql::params![channel, user],
+        )
+        .await?;
+    if seat == 0 {
+        // Nothing written has two causes and they are not the same answer, so ask
+        // which. A started plan refuses the departure. A seat that was simply already
+        // gone is the *same* departure arriving twice — a retry after a lost response,
+        // or a second tap racing the first past the handler's membership read — and it
+        // has to finish like the first one rather than be told the plan started, which
+        // would be a plain falsehood and would send someone hunting a start that never
+        // happened. So only the started case returns here; the other falls through to
+        // steps that are each conditional, and therefore already idempotent.
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM pick_sessions
+                  WHERE channel_id = ?1 AND started_at IS NOT NULL",
+                libsql::params![channel],
+            )
+            .await?;
+        if rows.next().await?.is_some() {
+            return Ok(Removed::Started);
+        }
+    }
+
+    // Nothing of theirs needs sweeping, and deliberately no code pretends otherwise.
+    // Votes and shopping claims only exist after the start, and the predicate above
+    // proves this plan had not started — cleanup for a state the guard makes
+    // unreachable is an invitation to relax the guard later, believing it is handled.
+
+    // The last one out. This delete is the serialization point: once the plan row is
+    // gone, `load_lobby` answers `None`, so every seating path (join, seat) refuses
+    // before it can write another voter.
+    let ended = conn
+        .execute(
+            "DELETE FROM pick_sessions
+             WHERE channel_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM pick_voters WHERE channel_id = ?1)",
+            libsql::params![channel],
+        )
+        .await?;
+    if ended > 0 {
+        // Nothing to sweep after it: a plan can only be emptied before it starts, so it
+        // never accumulated a vote or a shopping claim, and the `NOT EXISTS` above is
+        // exactly the proof that no seat is left either. A path that one day deletes a
+        // *started* plan owns that cleanup; it should not be written here on spec.
+        return Ok(Removed::Ended);
+    }
+
+    // Hand the plan on, but only if the person leaving is the one holding it.
+    conn.execute(
+        "UPDATE pick_sessions
+            SET created_by = (SELECT user_id FROM pick_voters
+                              WHERE channel_id = ?1
+                              ORDER BY joined_at, user_id LIMIT 1)
+          WHERE channel_id = ?1 AND created_by = ?2",
+        libsql::params![channel, user],
+    )
+    .await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT created_by FROM pick_sessions WHERE channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    // No row means a concurrent departure emptied it between the two statements —
+    // the plan is gone either way, which is what `Ended` says.
+    Ok(match rows.next().await? {
+        Some(r) => Removed::Left {
+            host: r.get::<String>(0)?,
+        },
+        None => Removed::Ended,
+    })
 }
 
 /// Close the lobby and begin the pick. Idempotent, and deliberately keeps the first
@@ -2840,5 +3105,373 @@ mod tests {
             .unwrap();
         let (_, rows) = load_tally(&conn, "c").await.unwrap();
         assert_eq!(row(&rows, "a").yes_voters, vec!["alice".to_owned()]);
+    }
+
+    // ---- leaving a plan (#96) ----------------------------------------------
+
+    /// The plumbing behind a departure: who is left, in the order the lobby lists.
+    async fn roster(conn: &Connection, channel: &str) -> Vec<String> {
+        match load_lobby(conn, channel).await.unwrap() {
+            Some(v) => v.voters.into_iter().map(|v| v.telegram_user_id).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Leaving the lobby: the roster shrinks by exactly the person who left, and the
+    /// plan carries on under the host it already had.
+    #[tokio::test]
+    async fn leaving_the_lobby_shrinks_the_roster() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob", "carol"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+
+        assert_eq!(
+            remove_voter(&conn, "c", "bob").await.unwrap(),
+            Removed::Left {
+                host: "alice".to_owned()
+            },
+            "the host is untouched by a guest leaving"
+        );
+        assert_eq!(roster(&conn, "c").await, vec!["alice", "carol"]);
+    }
+
+    /// The ruling (#96): people are added to and removed from a plan **in its lobby**.
+    /// Once the swiping starts the set of deciders is fixed, so a departure arriving
+    /// late is refused and writes nothing at all.
+    ///
+    /// The guard is inside the delete's own predicate rather than a preceding read,
+    /// which is what makes this hold under the race it exists for: a start landing
+    /// between a handler's membership read and its write still wins.
+    #[tokio::test]
+    async fn leaving_after_the_start_is_refused_and_writes_nothing() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob", "carol"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+        begin_session(&conn, "c").await.unwrap();
+
+        assert_eq!(
+            remove_voter(&conn, "c", "carol").await.unwrap(),
+            Removed::Started
+        );
+        assert_eq!(
+            roster(&conn, "c").await,
+            vec!["alice", "bob", "carol"],
+            "the roster is what must be unchanged, not merely the answer"
+        );
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.host, "alice", "and nothing was handed on");
+        assert!(view.started);
+    }
+
+    /// The refusal covers the host, and it covers the last person in the plan: a
+    /// started plan cannot be ended by walking out of it.
+    ///
+    /// Worth its own test because these are the two cases where a leave *does*
+    /// something beyond shrinking a list — hand the plan on, or delete it — so a
+    /// guard that only covered the ordinary guest would let one tap destroy a plan
+    /// people are already swiping in.
+    #[tokio::test]
+    async fn a_started_plan_cannot_be_ended_or_handed_on_by_leaving() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+        begin_session(&conn, "c").await.unwrap();
+
+        // The host, who would otherwise hand it on.
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Started
+        );
+        assert_eq!(load_lobby(&conn, "c").await.unwrap().unwrap().host, "alice");
+        assert_eq!(roster(&conn, "c").await, vec!["alice", "bob"]);
+
+        // And the only person in a started solo plan, who would otherwise close it.
+        create_session(
+            &conn,
+            "solo",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        seat_voter(&conn, "solo", "alice").await.unwrap();
+        begin_session(&conn, "solo").await.unwrap();
+        assert_eq!(
+            remove_voter(&conn, "solo", "alice").await.unwrap(),
+            Removed::Started
+        );
+        assert!(session_exists(&conn, "solo").await.unwrap());
+        assert_eq!(roster(&conn, "solo").await, vec!["alice"]);
+    }
+
+    /// A started plan's tally can never outlive its roster.
+    ///
+    /// This is the invariant the client reads consensus off (`yes == deciders`), and
+    /// the thing that would break it is a seat being given up after the vote cast
+    /// from it — a departed yes winning a recipe "unanimously" for a group one of its
+    /// voters has left, or a departed no vetoing one forever. Both are impossible
+    /// now, and impossible for a structural reason rather than a swept table: votes
+    /// exist only once the swiping has begun, and by then no seat can be given up.
+    #[tokio::test]
+    async fn a_started_tally_can_never_outlive_its_roster() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob", "carol"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+        begin_session(&conn, "c").await.unwrap();
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+        // Carol's veto — the one a departure used to be able to release.
+        record_vote(&conn, "c", "t", "r1", "carol", false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remove_voter(&conn, "c", "carol").await.unwrap(),
+            Removed::Started
+        );
+
+        let (participants, rows) = load_tally(&conn, "c").await.unwrap();
+        let deciders = roster(&conn, "c").await.len();
+        assert_eq!(
+            participants as usize, deciders,
+            "everyone who voted is still deciding"
+        );
+        let r1 = row(&rows, "r1");
+        assert_eq!(
+            (r1.yes, r1.no),
+            (2, 1),
+            "the veto stays with the seat behind it"
+        );
+        assert!(
+            (r1.yes as usize) <= deciders,
+            "a tally never carries more yeses than there are deciders"
+        );
+    }
+
+    /// Leaving one plan is nobody else's business. The same person is in two lobbies;
+    /// walking out of one leaves the other exactly as it was.
+    #[tokio::test]
+    async fn leaving_one_plan_leaves_the_other_alone() {
+        let conn = conn().await;
+        for channel in ["c1", "c2"] {
+            create_session(
+                &conn,
+                channel,
+                "alice",
+                None,
+                None,
+                MealType::Dinner,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+            for who in ["alice", "carol"] {
+                seat_voter(&conn, channel, who).await.unwrap();
+            }
+        }
+
+        remove_voter(&conn, "c1", "carol").await.unwrap();
+
+        assert_eq!(roster(&conn, "c1").await, vec!["alice"]);
+        assert_eq!(roster(&conn, "c2").await, vec!["alice", "carol"]);
+    }
+
+    /// The host hands the plan on rather than taking it down: it passes to the
+    /// longest-standing remaining decider — the same order the lobby lists people in.
+    /// Everything else about the plan survives, because a meal is not the host's to
+    /// cancel once other people are gathering for it.
+    #[tokio::test]
+    async fn a_departing_host_hands_the_plan_on() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Breakfast,
+            &[MealAddition::Drink],
+            Some(1800),
+        )
+        .await
+        .unwrap();
+        for who in ["alice", "bob", "carol"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Left {
+                host: "bob".to_owned()
+            },
+            "the next person in the room, not an arbitrary one"
+        );
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.host, "bob");
+        assert_eq!(view.voters.len(), 2);
+        assert_eq!(view.meal_type, MealType::Breakfast, "the plan is unchanged");
+        assert_eq!(view.additions, vec![MealAddition::Drink]);
+        assert_eq!(view.max_total_seconds, Some(1800));
+
+        // And it keeps handing on, so a plan can never be left hostless.
+        assert_eq!(
+            remove_voter(&conn, "c", "bob").await.unwrap(),
+            Removed::Left {
+                host: "carol".to_owned()
+            }
+        );
+        assert_eq!(load_lobby(&conn, "c").await.unwrap().unwrap().host, "carol");
+    }
+
+    /// A guest leaving never moves the plan's host — the UPDATE is conditional on the
+    /// leaver actually holding it.
+    #[tokio::test]
+    async fn a_guest_leaving_does_not_move_the_host() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+        assert_eq!(
+            remove_voter(&conn, "c", "bob").await.unwrap(),
+            Removed::Left {
+                host: "alice".to_owned()
+            }
+        );
+        assert_eq!(load_lobby(&conn, "c").await.unwrap().unwrap().host, "alice");
+    }
+
+    /// The last person out closes the plan. An empty lobby is nobody's meal, and a
+    /// stale link that could still seat someone would seat them alone into a plan
+    /// whose meal, additions and cap were chosen by people who all walked out.
+    ///
+    /// Closing it is the whole cleanup: the session row is the thing every read and
+    /// every seating path gates on, so once it is gone there is nothing left to reach.
+    #[tokio::test]
+    async fn the_last_person_out_closes_the_plan() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Ended,
+            "no host, because there is no plan"
+        );
+
+        assert!(!session_exists(&conn, "c").await.unwrap());
+        assert!(load_lobby(&conn, "c").await.unwrap().is_none());
+        assert!(roster(&conn, "c").await.is_empty());
+    }
+
+    /// A join landing in the gap between "am I the last?" and the delete must win, so
+    /// the delete carries its own `NOT EXISTS` rather than trusting a count read a
+    /// moment earlier: with somebody else seated, the plan survives and simply shrinks.
+    #[tokio::test]
+    async fn a_plan_someone_else_joined_is_not_closed() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+        // The race, played out: the newcomer is seated before the delete runs.
+        seat_voter(&conn, "c", "newcomer").await.unwrap();
+
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Left {
+                host: "newcomer".to_owned()
+            }
+        );
+        assert!(session_exists(&conn, "c").await.unwrap());
+        assert_eq!(roster(&conn, "c").await, vec!["newcomer"]);
+    }
+
+    /// Leaving is idempotent, so a retry after a lost response — or a second tap
+    /// racing the first past the handler's membership read — finishes the same
+    /// departure rather than starting another one.
+    ///
+    /// And it must not *mis-report* it. A repeat writes no seat row, exactly as a
+    /// departure arriving after the start does, so the two have to be told apart:
+    /// answering "this meal plan has already started" to somebody leaving a lobby
+    /// that never started is a plain falsehood, and it is the answer a client sees
+    /// when two taps race.
+    #[tokio::test]
+    async fn leaving_twice_is_the_same_departure() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        for who in ["alice", "bob"] {
+            seat_voter(&conn, "c", who).await.unwrap();
+        }
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Left {
+                host: "bob".to_owned()
+            }
+        );
+        assert_eq!(
+            remove_voter(&conn, "c", "alice").await.unwrap(),
+            Removed::Left {
+                host: "bob".to_owned()
+            },
+            "a repeat does not hand the plan on a second time, and does not claim \
+             the plan started"
+        );
+        assert_eq!(roster(&conn, "c").await, vec!["bob"]);
+
+        // The same again for the departure that closed the plan: the second attempt
+        // still reports the plan gone, not a plan that started.
+        create_session(
+            &conn,
+            "solo",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        seat_voter(&conn, "solo", "alice").await.unwrap();
+        assert_eq!(
+            remove_voter(&conn, "solo", "alice").await.unwrap(),
+            Removed::Ended
+        );
+        assert_eq!(
+            remove_voter(&conn, "solo", "alice").await.unwrap(),
+            Removed::Ended
+        );
     }
 }

@@ -58,6 +58,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // all. Whichever deploys first sets the floor, so anything behind it must be
     // renumbered above it before it merges.
     (21, include_str!("../migrations/0021_pantry_pretick.sql")),
+    (
+        22,
+        include_str!("../migrations/0022_recipe_fully_timed.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
