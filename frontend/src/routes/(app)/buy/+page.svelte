@@ -4,11 +4,13 @@
     getBuyList,
     getChecks,
     loadChecks,
+    NOBODY,
     saveChecks,
     setCheck,
     type BuyCheck,
+    type Tick,
   } from "$lib/buy";
-  import { PickClient, type Voter } from "$lib/pick";
+  import { PickClient } from "$lib/pick";
   import Buy from "$lib/components/Buy.svelte";
 
   /**
@@ -30,6 +32,14 @@
    * nobody to attribute to, so the list falls back to this device's own
    * (`loadChecks`/`saveChecks`) and says so on screen. Ticking is never refused over
    * the lack of a group — a shopping list you cannot tick is not a shopping list.
+   *
+   * Nothing here asks for the **pantry pre-ticks** (#156) and nothing here computes
+   * them. A list arrives already carrying whatever the plan's kitchen had, because
+   * the server seeds it the first time anyone asks for it — the browser could not do
+   * this anyway (it holds no roster, no kitchen and no write token), and a second
+   * implementation of the matching rule in TypeScript would be a second chance to
+   * disagree with `recipe_core::pantry`. The same absence is why the device-local
+   * path has none: no session, no plan, no kitchen, no pantry.
    */
   const list = resource(() => ({
     queryKey: ["buy"],
@@ -52,20 +62,30 @@
   let tickError = $state<string | undefined>();
 
   /**
-   * What the screen shows: who has each ticked line.
+   * What the screen shows: where each ticked line's tick came from.
    *
-   * `null` is a tick with nobody behind it — either a tap still in flight (the
+   * `NOBODY` is a tick with nothing behind it — either a tap still in flight (the
    * server has not said whose it is yet) or the device-local list, which has no
-   * whose at all. Both read the same way on purpose: got, unattributed.
+   * whose at all. Both read the same way on purpose: got, unattributed. A pantry
+   * pre-tick (#156) is also nobody's, but it is *not* the same thing and does not
+   * collapse into this: it carries the entry that answered for the line, so the row
+   * can say why it is ticked. The server sends it that way and it is passed through
+   * unchanged.
    */
-  const ticks = $derived.by<Record<number, Voter | null>>(() => {
+  const ticks = $derived.by<Record<number, Tick>>(() => {
     if (!shared) {
-      return Object.fromEntries(Object.keys(localChecked).map((i) => [i, null]));
+      return Object.fromEntries(
+        Object.keys(localChecked).map((i) => [i, NOBODY]),
+      );
     }
-    const out: Record<number, Voter | null> = {};
-    for (const c of checks) out[c.index] = c.by;
+    const out: Record<number, Tick> = {};
+    for (const c of checks) out[c.index] = { by: c.by, pantry: c.pantry };
     for (const [i, want] of Object.entries(inFlight)) {
-      if (want) out[Number(i)] ??= null;
+      // A tick in flight shows as ticked-but-unattributed unless the server has
+      // already named an owner for that line — this client does not hold an
+      // identity to put there, and inventing one is how a row claims the wrong
+      // person for a moment.
+      if (want) out[Number(i)] ??= NOBODY;
       else delete out[Number(i)];
     }
     return out;
