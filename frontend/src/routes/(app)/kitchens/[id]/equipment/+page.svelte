@@ -5,7 +5,8 @@
   import { getKitchen, addEquipment, removeEquipment } from "$lib/kitchens";
   import type { KitchenDetail, KitchensStatus } from "$lib/types";
   import KitchenItems from "$lib/components/KitchenItems.svelte";
-  import { equipmentVocabulary } from "$lib/kitchens";
+  import EquipmentAdvice from "$lib/components/EquipmentAdvice.svelte";
+  import { equipmentVocabulary, equipmentAdvice } from "$lib/kitchens";
 
   /** A kitchen's equipment (#72) — its own page, so it is one idea. */
   const id = $derived(page.params.id ?? "");
@@ -26,6 +27,17 @@
     queryFn: equipmentVocabulary,
   }));
 
+  /**
+   * What to add next (#83). A query of its own rather than a field on the kitchen: it
+   * is counted over the whole corpus, so it costs more than reading a list of items and
+   * the list should not wait on it. Every change to the equipment invalidates it,
+   * because the advice is about the gap and stocking the kitchen is what closes it.
+   */
+  const advice = resource(() => ({
+    queryKey: ["equipment-advice", id],
+    queryFn: () => equipmentAdvice(id),
+  }));
+
   let actionError = $state<string | null>(null);
 
   function cache(k: KitchenDetail) {
@@ -36,6 +48,7 @@
     actionError = null;
     try {
       cache(await fn());
+      void qc.invalidateQueries({ queryKey: ["equipment-advice", id] });
     } catch (e) {
       actionError = e instanceof Error ? e.message : fallback;
       throw e;
@@ -59,4 +72,12 @@
   actionError={actionError ?? undefined}
   {onAdd}
   {onRemove}
-/>
+>
+  {#snippet footer()}
+    <EquipmentAdvice
+      status={advice.status}
+      advice={advice.data}
+      error={advice.error}
+    />
+  {/snippet}
+</KitchenItems>

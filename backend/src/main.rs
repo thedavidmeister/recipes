@@ -293,6 +293,12 @@ pub fn app(state: AppState) -> Router {
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),
         )
+        // What to add next (#83) — the inverse of the can-make bound (#82), and it
+        // hangs off the equipment path because adding is what you would do about it.
+        .route(
+            "/kitchens/{id}/equipment/advice",
+            get(kitchens::equipment_advice),
+        )
         .route(
             "/kitchens/{id}/pantry",
             post(kitchens::add_pantry).delete(kitchens::remove_pantry),
@@ -1555,7 +1561,8 @@ mod tests {
     }
 
     /// A plan created with a time cap (#80) shows it in the lobby view, so everyone
-    /// sees the bound they will be swiping within; one created without is "Any".
+    /// sees the bound they will be swiping within — whatever number was asked for,
+    /// not just the buckets the lobby offers.
     #[tokio::test]
     async fn a_plan_created_with_a_cap_shows_it_in_the_lobby() {
         let (app, conn) = test_app().await;
@@ -1585,10 +1592,15 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_json(res).await["max_total_seconds"], 1800);
 
-        // Created without a cap → "Any", read back as null.
+        // A cap the buckets do not offer is still a cap: the API takes seconds, not
+        // the UI's vocabulary (#80).
         let res = app
             .clone()
-            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"max_total_seconds":5400}"#,
+            ))
             .await
             .unwrap();
         let channel = body_json(res).await["channel_id"]
@@ -1599,7 +1611,113 @@ mod tests {
             .oneshot(get_req(&format!("/api/session/{channel}"), &cookie))
             .await
             .unwrap();
-        assert!(body_json(res).await["max_total_seconds"].is_null());
+        assert_eq!(body_json(res).await["max_total_seconds"], 5400);
+    }
+
+    /// A plan is born capped at half an hour (#163), and a caller can still say
+    /// otherwise.
+    ///
+    /// The two halves are one test because they are one decision. A body that names
+    /// no cap gets 1800: the lobby's time row then starts on a setting that filters
+    /// something, instead of sitting inert on the one option that filters nothing.
+    /// A body that says `null` gets "Any": the default is where a plan starts, not a
+    /// floor, and `null` is the same word that lifts the cap in the lobby — so
+    /// absent and `null` must not collapse into each other, which is the one way
+    /// this could quietly become unliftable.
+    #[tokio::test]
+    async fn a_plan_is_born_capped_at_thirty_minutes() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let cap_of = |app: axum::Router, body: &'static str, cookie: String| async move {
+            let res = app
+                .clone()
+                .oneshot(json_post("/api/session", Some(&cookie), body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{body} must create a plan");
+            let channel = body_json(res).await["channel_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let res = app
+                .oneshot(get_req(&format!("/api/session/{channel}"), &cookie))
+                .await
+                .unwrap();
+            body_json(res).await["max_total_seconds"].clone()
+        };
+
+        // Nothing said at all, and everything-but-the-cap said: both are "a plan,
+        // please", and both are born at 30 minutes.
+        assert_eq!(cap_of(app.clone(), "{}", cookie.clone()).await, 1800);
+        assert_eq!(
+            cap_of(app.clone(), r#"{"meal_type":"lunch"}"#, cookie.clone()).await,
+            1800
+        );
+
+        // "Any", said out loud, is still unbounded.
+        assert!(
+            cap_of(app.clone(), r#"{"max_total_seconds":null}"#, cookie.clone())
+                .await
+                .is_null()
+        );
+    }
+
+    /// The walk a born-capped plan deals is bounded by that default, without anyone
+    /// touching the control (#163) — the point of the default is that it does
+    /// something before it is looked at. The lower-bound policy still holds inside
+    /// it: an un-estimated recipe stays (#80, #158).
+    #[tokio::test]
+    async fn a_born_capped_plan_walks_within_its_default() {
+        let (app, conn) = test_app().await;
+        for (id, secs) in [
+            ("quick", Some(900i64)),
+            ("slow", Some(3600i64)),
+            ("unknown", None),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, total_seconds)
+                 VALUES ('t', ?1, ?1, ?2)",
+                libsql::params![id, secs],
+            )
+            .await
+            .unwrap();
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stops = body_json(res).await["stops"].clone();
+        let ids: std::collections::HashSet<String> = stops
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains("quick"), "under the default stays: {ids:?}");
+        assert!(ids.contains("unknown"), "no estimate stays: {ids:?}");
+        assert!(
+            !ids.contains("slow"),
+            "an hour is over the default and goes: {ids:?}"
+        );
     }
 
     /// A nonsense cap — zero, negative, longer than a day — is refused at create.
@@ -1660,18 +1778,19 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-        // The host, lobby open → the cap moves and the new lobby comes back.
+        // The host, lobby open → the cap moves off the default it was born with
+        // (#163) and the new lobby comes back.
         let res = app
             .clone()
             .oneshot(json_post(
                 &cap_uri,
                 Some(&hcookie),
-                r#"{"max_total_seconds":1800}"#,
+                r#"{"max_total_seconds":3600}"#,
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(body_json(res).await["max_total_seconds"], 1800);
+        assert_eq!(body_json(res).await["max_total_seconds"], 3600);
 
         // A nonsense cap is refused here too.
         let res = app
@@ -1700,7 +1819,7 @@ mod tests {
             .oneshot(json_post(
                 &cap_uri,
                 Some(&hcookie),
-                r#"{"max_total_seconds":3600}"#,
+                r#"{"max_total_seconds":7200}"#,
             ))
             .await
             .unwrap();

@@ -51,6 +51,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (16, include_str!("../migrations/0016_meal_type.sql")),
     (17, include_str!("../migrations/0017_pick_time_cap.sql")),
     (18, include_str!("../migrations/0018_buy_checks.sql")),
+    (19, include_str!("../migrations/0019_time_cap_default.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -265,5 +266,115 @@ mod tests {
         // literal, so adding one does not fail a test about idempotence.
         let latest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
         assert_eq!(highest_applied(&conn).await.unwrap(), latest);
+    }
+
+    /// One plan's cap, read back.
+    async fn cap_of(conn: &Connection, channel: &str) -> Option<i64> {
+        let mut rows = conn
+            .query(
+                "SELECT max_total_seconds FROM pick_sessions WHERE channel_id = ?1",
+                libsql::params![channel],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .expect("the plan is there")
+            .get::<Option<i64>>(0)
+            .unwrap()
+    }
+
+    /// The schema states what a plan is born as (#163): an insert that names no cap
+    /// gets half an hour, the same number the create handler applies, so a row
+    /// written around the handler cannot mean something different from one written
+    /// through it.
+    ///
+    /// And the default is a *starting point*, not a floor — an insert that names
+    /// `NULL` still gets "Any". A DEFAULT only fills a column the INSERT left out,
+    /// which is exactly what lets the lobby lift a cap and what leaves plans made
+    /// before #163 alone.
+    #[tokio::test]
+    async fn the_time_cap_column_defaults_to_thirty_minutes() {
+        let db = Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        migrate(&conn).await.unwrap();
+
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by) VALUES ('unstated', 'alice')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cap_of(&conn, "unstated").await, Some(1800));
+
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by, max_total_seconds)
+             VALUES ('any', 'alice', NULL)",
+            (),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cap_of(&conn, "any").await, None);
+    }
+
+    /// #163's default is what a plan is *born* as, never a rule applied backwards.
+    ///
+    /// The migration rebuilds `pick_sessions` (SQLite cannot ALTER a default), and a
+    /// rebuild is exactly where a backfill would slip in unnoticed — a copy that
+    /// omitted the column would hand every uncapped plan a 30-minute bound, and a
+    /// started plan's bound is frozen for the roster swiping within it. So the SQL
+    /// that ships is re-run over seeded rows here: every cap must come out the way
+    /// it went in, including the NULLs. Re-running it is also how a migration that
+    /// died mid-flight is retried, so this pins that too.
+    #[tokio::test]
+    async fn the_time_cap_rebuild_backfills_nothing_and_survives_a_rerun() {
+        let db = Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        migrate(&conn).await.unwrap();
+
+        for (channel, cap, started) in [
+            ("open-any", None, None),
+            ("open-capped", Some(7200i64), None),
+            ("started-any", None, Some(1_700_000_000i64)),
+        ] {
+            conn.execute(
+                "INSERT INTO pick_sessions
+                    (channel_id, created_by, max_total_seconds, started_at)
+                 VALUES (?1, 'alice', ?2, ?3)",
+                libsql::params![channel, cap, started],
+            )
+            .await
+            .unwrap();
+        }
+
+        let rebuild = MIGRATIONS
+            .iter()
+            .find(|(v, _)| *v == 19)
+            .expect("migration 19 is the time-cap default")
+            .1;
+        conn.execute_batch(rebuild).await.unwrap();
+
+        assert_eq!(cap_of(&conn, "open-any").await, None);
+        assert_eq!(cap_of(&conn, "open-capped").await, Some(7200));
+        assert_eq!(cap_of(&conn, "started-any").await, None);
+
+        // Nothing was duplicated or dropped on the way through.
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM pick_sessions", ())
+            .await
+            .unwrap();
+        let count = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(count, 3);
+
+        // …and the rebuilt table still carries the default, so a retry does not
+        // quietly leave the schema one migration short of what it claims.
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by) VALUES ('after', 'alice')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cap_of(&conn, "after").await, Some(1800));
     }
 }

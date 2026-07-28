@@ -47,7 +47,9 @@
     mealType?: MealType;
     /** What comes with the meal (#114) — shown to everyone under the heading. */
     additions?: MealAddition[];
-    /** The plan's total-time cap in seconds (#80); null = "Any". */
+    /** The plan's total-time cap in seconds (#80); null = "Any". A plan is born at
+     * 1800 (#163), so a null here is a host who widened it, never a plan nobody has
+     * got to yet. */
     cap?: number | null;
     /** Whether this plan is for a kitchen (#72). The deck is always limited to what
      * that kitchen can make (#82), so this decides whether there is anything to say. */
@@ -117,12 +119,17 @@
    * The presented time buckets (#80). A UI vocabulary, deliberately not a schema:
    * the backend stores plain seconds, so changing these is an edit here, not a
    * migration there.
+   *
+   * Shortest first, and "Any" last (#163). It is no cap at all — longer than two
+   * hours, not shorter than thirty minutes — so at the head of the row it sat
+   * where the eye scanning left-to-right expects the smallest. At the tail the row
+   * is monotonic and reads as the scale it is, ending at "as long as it takes".
    */
   const BUCKETS: { label: string; seconds: number | null }[] = [
-    { label: "Any", seconds: null },
     { label: "30 min", seconds: 1800 },
     { label: "1 hour", seconds: 3600 },
     { label: "2 hours", seconds: 7200 },
+    { label: "Any", seconds: null },
   ];
 
   /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */

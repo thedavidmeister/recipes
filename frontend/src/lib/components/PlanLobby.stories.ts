@@ -12,6 +12,11 @@ const meta = {
     onAdditions: () => {},
     onCap: () => {},
     onLeave: () => {},
+    // Every plan is born capped at half an hour (#163), so that is the shared
+    // starting state and the stories below vary from it, rather than each one
+    // having to restate what a lobby looks like when you make one. A story about
+    // some other cap says so; `Uncapped` is the host having widened it.
+    cap: 1800,
   },
 } satisfies Meta<typeof PlanLobby>;
 export default meta;
@@ -20,7 +25,9 @@ type Story = StoryObj<typeof meta>;
 
 /**
  * Alone, which is a complete meal plan: start whenever, or invite someone first.
- * Every plan is born for dinner (#114); the host's picker is there to say otherwise.
+ * A plan is born for dinner (#114) and capped at half an hour (#163) — this is the
+ * lobby exactly as making one hands it to you, with both pickers already saying
+ * something and there for the host to say otherwise.
  *
  * Also the last-person-out case for leaving (#96): with nobody else here, walking
  * away ends the plan rather than shrinking it, so the button says so before it is
@@ -105,17 +112,19 @@ export const KitchenMembers: Story = {
   },
 };
 
-/** The host has capped the plan to 30 minutes (#80): the bucket reads selected and
- * the honest fine print is attached — the estimate is a lower bound, and recipes
- * without timings still show. */
-export const TimeCapped: Story = {
+/** The host has the afternoon, so they widened the plan to "Any" (#163) — the far
+ * end of the row, one tap from where the plan started. Nothing is selected among
+ * the numbers and the honest fine print goes with them: there is no bound left to
+ * be honest about. This is the state that used to be every plan's first moment, and
+ * declaring it is what keeps the default from becoming a floor. */
+export const Uncapped: Story = {
   args: {
     status: "ready",
     host: true,
     hostId: "4242",
     mealType: "dinner",
     inviteLink: invite,
-    cap: 1800,
+    cap: null,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
   },
 };
@@ -146,6 +155,10 @@ export const Guest: Story = {
     hostId: "4242",
     mealType: "snack",
     additions: ["drink"],
+    // Pinned open rather than inheriting the born default, so the guest view is
+    // declared both ways: `GuestSeesTheCap` is the bound one, this is the plan a
+    // host has widened, where there is no line to read at all.
+    cap: null,
     voters: [
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: "mel" },
