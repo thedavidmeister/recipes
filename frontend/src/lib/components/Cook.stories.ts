@@ -40,6 +40,21 @@ export const Timers: Story = {
   },
 };
 
+/**
+ * A method that forks: Beef and Mustard Pie (TheMealDB 52874), whose stored reading
+ * has two parallel stages — one of them three steps wide — so "At the same time"
+ * has a record behind it.
+ *
+ * Its own recipe rather than a fork spliced into Chicken Handi's graph, because
+ * whether a method forks is a fact about the recipe. Chicken Handi's real reading is
+ * a single chain from the first sauté to the cream; the nine-step fixture this
+ * replaces gave it a parallel stage it does not have, and the `Ready` story above
+ * was the picture of that (#157).
+ */
+export const Parallel: Story = {
+  args: { status: "ready", recipe: cookRecipe("52874") },
+};
+
 /** Loading the recipe. */
 export const Pending: Story = {
   args: { status: "pending" },

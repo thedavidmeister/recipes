@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import sample from "./corpus-sample.json";
 import {
   BASE_ID,
+  cookRecipe,
   longTitleRecipe,
   recipe,
   recipeSteps,
   untimedCard,
   walkStops,
 } from "./fixtures";
-import { formatEstimate } from "./steps";
+import { cookStages, formatEstimate } from "./steps";
 import type { Amount, StructuredStep } from "./types";
 
 /**
@@ -89,6 +90,26 @@ describe("the base recipe's step DAG", () => {
   it("estimates as the pick card shows it", () => {
     // 1380s reads as "23 min+" — the at-least the badge promises (#84).
     expect(formatEstimate(sampled(BASE_ID).total_seconds)).toBe("23 min+");
+  });
+});
+
+describe("the cook stories' recipes", () => {
+  /**
+   * "At the same time" is a UI state, so a story has to declare it — and whether a
+   * method forks is a fact about the recipe, not something a fixture may arrange.
+   * The base recipe's stored reading is one chain; Beef and Mustard Pie's forks. If a
+   * re-read ever flattens the pie, this fails rather than letting the story quietly
+   * stop showing what it claims to.
+   */
+  const widest = (id: string) =>
+    Math.max(...cookStages(cookRecipe(id).steps).map((s) => s.steps.length));
+
+  it("keeps a recipe whose method really forks for the parallel story", () => {
+    expect(widest("52874")).toBeGreaterThan(1);
+  });
+
+  it("does not claim the base recipe forks", () => {
+    expect(widest(BASE_ID)).toBe(1);
   });
 });
 

@@ -39,16 +39,23 @@ export const Empty: Story = {
   },
 };
 
-/** The gap between an ingest and the enrich cron: new recipes are in, unread. Every
+/**
+ * The gap between an ingest and the enrich cron: new recipes are in, unread. Every
  * ingest opens this window, so the part-read bar is a state the corpus really passes
- * through — the numbers are a moment in it, not a reading of one. */
+ * through.
+ *
+ * The numbers are chosen rather than read, and there is no reading to take — every
+ * enrichment stage is at 790 of 790 today. 745 of 790 is the shape the gap takes,
+ * and both ends of it are real: 745 is what the corpus held before the growth that
+ * left the old fixture stale, 790 is what it holds now.
+ */
 export const PartlyRead: Story = {
   args: {
     status: "ready",
     stats: healthStats({
-      enriched: 712,
-      enriched_pct: (712 / 790) * 100,
-      by_model: [{ model: "claude-sonnet-5", count: 712 }],
+      enriched: 745,
+      enriched_pct: (745 / 790) * 100,
+      by_model: [{ model: "claude-sonnet-5", count: 745 }],
     }),
   },
 };

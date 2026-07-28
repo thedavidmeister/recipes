@@ -259,14 +259,23 @@ export function buyRecipe(): BuyRecipe {
   return { source: r.source, id: r.id, title: r.title, ingredients: readings() };
 }
 
-/** The picked recipe in full, for the cook view — the step DAG to render (#74). */
-export function cookRecipe(): CookRecipe {
-  const r = recipe();
+/**
+ * The picked recipe in full, for the cook view — the step DAG to render (#74).
+ *
+ * Defaults to the base recipe. It takes an id because a method's *shape* is a
+ * property of the record: Chicken Handi's stored reading is a single chain, so a
+ * story that needs a fork ("at the same time") has to ask a recipe whose reading
+ * actually forks rather than invent one that does.
+ */
+export function cookRecipe(id: string = BASE_ID): CookRecipe {
+  const r = row(id);
   return {
     title: r.title,
     image: r.image,
-    ingredients: readings(),
-    steps: recipeSteps(),
+    ingredients: r.ingredients
+      .map((i) => i.structured)
+      .filter((s): s is StructuredMeasure => !!s),
+    steps: r.steps,
   };
 }
 
