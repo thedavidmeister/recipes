@@ -374,18 +374,27 @@ pub struct Voter {
     pub username: Option<String>,
 }
 
-/// One ticked line of a meal's shopping list (#131): which ingredient, and whose
-/// tick it is.
+/// One ticked line of a meal's shopping list (#131): which ingredient, and where the
+/// tick came from.
 ///
-/// `by` is the whole person rather than an id because every surface that shows a
-/// tick shows *who* — a bare id would make the browser join it back against the
-/// roster, and a shopper who never joined the lobby (there is no such thing today,
-/// but the roster is not this table's business) would render as a blank.
+/// **Exactly one of `by` and `pantry` is set** — the database says so with a CHECK
+/// (migration 0021), and the two are genuinely different claims:
+///
+/// - `by` — a person got it. The whole person rather than an id, because every surface
+///   that shows a tick shows *who*; a bare id would make the browser join it back
+///   against the roster, and a shopper who never joined the lobby (there is no such
+///   thing today, but the roster is not this table's business) would render as a blank.
+/// - `pantry` — the plan's kitchen already had it (#156), and this is the pantry entry
+///   that answered for the line. Nobody claimed it, so nobody's colour goes on it: a
+///   colour means a person, and the cupboard is not one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuyCheck {
     /// The 0-based position in the recipe's ingredient list.
     pub index: i64,
-    pub by: Voter,
+    /// Who got it, when a person did.
+    pub by: Option<Voter>,
+    /// The pantry entry that pre-ticked it, when the kitchen already had it.
+    pub pantry: Option<String>,
 }
 
 /// A meal's shopping checklist for one recipe (#131) — every line already got.
@@ -759,6 +768,10 @@ pub struct BuyCheckBody {
 /// ([`lobby`]) whose roster it names: the two answer the same question about the
 /// same meal, so gating one and not the other would only mean a person who can see
 /// that Mel is deciding cannot see that Mel got the carrots.
+///
+/// This is also where a list is **built**, so it is where the pantry seed happens
+/// (#156) — see [`ensure_buy_seed`] for why a read is the right moment and why it is
+/// safe here despite not being roster-gated.
 pub async fn buy_list(
     State(state): State<AppState>,
     Extension(_user): Extension<CurrentUser>,
@@ -774,6 +787,7 @@ pub async fn buy_list(
     {
         return Err(AppError::BadRequest(format!("unknown session: {channel}")));
     }
+    ensure_buy_seed(&state, channel, &q.source, &q.id).await?;
     let checks = state
         .with_db(move |db| async move { load_buy_checks(&db, channel, &q.source, &q.id).await })
         .await
@@ -825,6 +839,12 @@ pub async fn set_buy_check(
             "only the people having this meal can tick things off its list".into(),
         ));
     }
+
+    // A tick can be the first thing that ever touches this list (a peer opened `buy`
+    // and tapped before this client read it), so the seed runs here too — before the
+    // write, so a first tap lands *on top of* the pantry's answer rather than being
+    // overwritten by a seed that arrives after it.
+    ensure_buy_seed(&state, channel, &body.source, &body.id).await?;
 
     let user = &user;
     state
@@ -1297,6 +1317,11 @@ async fn record_vote(
 /// include the person, so a second tapper replaces the first (last writer wins) and
 /// the timestamp moves with them. Tapping your own tick again rewrites the same row
 /// to the same values.
+///
+/// `pantry_item` is cleared on the way through (#156). A pantry pre-tick is a claim
+/// nobody made; the moment somebody taps that line it becomes theirs, and a row
+/// carrying both would be two answers to "who has this". The CHECK in migration 0021
+/// would refuse it anyway.
 async fn tick_item(
     conn: &Connection,
     channel: &str,
@@ -1306,10 +1331,11 @@ async fn tick_item(
     user: &str,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id, pantry_item)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)
          ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
             user_id = excluded.user_id,
+            pantry_item = NULL,
             created_at = unixepoch()",
         libsql::params![channel, source, id, index, user],
     )
@@ -1320,6 +1346,10 @@ async fn tick_item(
 /// Put one line back on the shopping list — the tick is the row, so clearing it is a
 /// delete. Deleting nothing is success: unticking something already unticked is the
 /// state the caller asked for.
+///
+/// A pantry pre-tick (#156) goes the same way as anyone's, and that is the point: the
+/// jar was empty, and saying so must not be a special case. The seed marker in
+/// `buy_seeds` is what stops the pantry putting it straight back.
 async fn untick_item(
     conn: &Connection,
     channel: &str,
@@ -1336,9 +1366,167 @@ async fn untick_item(
     Ok(())
 }
 
+// ---- the pantry seed (#156) ------------------------------------------------
+
+/// Whether this meal's list for this recipe has already been seeded from the pantry.
+async fn buy_list_seeded(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM buy_seeds WHERE channel_id = ?1 AND source = ?2 AND id = ?3",
+            libsql::params![channel, source, id],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+/// The shopping list's ingredient names, in the list's own index order, or `None` when
+/// the corpus holds no such recipe.
+///
+/// `None` and `Some(vec![])` are different answers and both matter: no row means there
+/// is no list to seed *yet* (so nothing is recorded and the next ask tries again),
+/// while a row with no readings means the recipe is unread and genuinely has nothing to
+/// match — that list is seeded, with nothing in it.
+async fn shopping_names_of(
+    conn: &Connection,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let mut rows = conn
+        .query(
+            "SELECT ingredients FROM recipes WHERE source = ?1 AND id = ?2",
+            libsql::params![source, id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let json: String = row.get(0)?;
+    // A row whose ingredients no longer parse is treated as a list with no names, the
+    // same way `enrich::load` skips a reading that no longer deserializes: the shop
+    // still works, it just starts empty.
+    let ingredients: Vec<recipe_core::Ingredient> = serde_json::from_str(&json).unwrap_or_default();
+    Ok(Some(recipe_core::pantry::shopping_names(&ingredients)))
+}
+
+/// The pantry of the kitchen this plan belongs to, indexed for matching. A plan with no
+/// kitchen has no pantry, and that is an empty one rather than an error — plans without
+/// a kitchen are ordinary (6 of the 9 in production today).
+async fn plan_pantry(
+    conn: &Connection,
+    channel: &str,
+) -> anyhow::Result<recipe_core::pantry::Pantry> {
+    let mut rows = conn
+        .query(
+            "SELECT p.item
+             FROM pick_sessions s
+             JOIN kitchen_pantry p ON p.kitchen_id = s.kitchen_id
+             WHERE s.channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    let mut items = Vec::new();
+    while let Some(r) = rows.next().await? {
+        items.push(r.get::<String>(0)?);
+    }
+    Ok(recipe_core::pantry::Pantry::new(items))
+}
+
+/// Write the seed: the marker first, then the pre-ticks.
+///
+/// **Marker first, deliberately.** If the process dies between the two writes the list
+/// is left under-seeded rather than seedable again, and under-seeding is the safe
+/// direction throughout this feature — a missed pre-tick costs a jar of salt, a
+/// resurrected one costs the dinner. It also makes the write idempotent under the
+/// `with_db` retry (#130), which may run this closure more than once.
+///
+/// `DO NOTHING` on conflict so a person who ticked a line in the same breath keeps it:
+/// the seed never overwrites a claim.
+async fn write_seed(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+    preticks: &[(usize, String)],
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO buy_seeds (channel_id, source, id) VALUES (?1, ?2, ?3)
+         ON CONFLICT(channel_id, source, id) DO NOTHING",
+        libsql::params![channel, source, id],
+    )
+    .await?;
+    for (index, item) in preticks {
+        conn.execute(
+            "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id, pantry_item)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)
+             ON CONFLICT(channel_id, source, id, ingredient_index) DO NOTHING",
+            libsql::params![channel, source, id, *index as i64, item.clone()],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Seed this meal's list for this recipe from the plan's kitchen pantry, once (#156).
+///
+/// **When the list is first built.** There is no earlier server-side moment to use: the
+/// pick's decision is stashed by the browser (see [`BuyQuery`]), so `(channel, source,
+/// id)` first exists here, the first time anyone asks for that list — a read or a
+/// write, whichever comes first. A read that writes is unusual and this one is stated
+/// rather than hidden. It is safe to reach from the ungated read ([`buy_list`]) because
+/// the seed depends on nothing about the caller: it is a function of the plan's kitchen
+/// and the recipe, so a stranger holding the channel id can at most make it happen
+/// slightly sooner than the first member would have.
+///
+/// **Once, and recorded.** `buy_seeds` holds the fact that it ran, so stock added to
+/// the kitchen mid-shop does not re-tick, and — the case that actually bites —
+/// unticking the last pre-tick and reloading does not put it all back. See the
+/// migration for why that is a table and not a heuristic.
+async fn ensure_buy_seed(
+    state: &AppState,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let seeded = state
+        .with_db(move |db| async move { buy_list_seeded(&db, channel, source, id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if seeded {
+        return Ok(());
+    }
+
+    let pantry = state
+        .with_db(move |db| async move { plan_pantry(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let names = state
+        .with_db(move |db| async move { shopping_names_of(&db, source, id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    // No such recipe: there is no list yet, so nothing was created and nothing is
+    // recorded. The next ask — after a derive, say — gets its seed.
+    let Some(names) = names else {
+        return Ok(());
+    };
+
+    let preticks = recipe_core::pantry::preticks(&names, &pantry);
+    let preticks = &preticks;
+    state
+        .with_db(move |db| async move { write_seed(&db, channel, source, id, preticks).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(())
+}
+
 /// One recipe's checklist in a meal: the ticked lines, in ingredient order, each with
-/// the person who has it. The `users` join is a LEFT one for the same reason the
-/// lobby's is — a handle is a display convenience and may be absent.
+/// where its tick came from. The `users` join is a LEFT one for the same reason the
+/// lobby's is — a handle is a display convenience and may be absent, and now also
+/// because a pantry pre-tick has no user row to join to at all.
 async fn load_buy_checks(
     conn: &Connection,
     channel: &str,
@@ -1347,7 +1535,7 @@ async fn load_buy_checks(
 ) -> anyhow::Result<Vec<BuyCheck>> {
     let mut rows = conn
         .query(
-            "SELECT b.ingredient_index, b.user_id, u.username
+            "SELECT b.ingredient_index, b.user_id, u.username, b.pantry_item
              FROM buy_checks b
              LEFT JOIN users u ON u.telegram_user_id = b.user_id
              WHERE b.channel_id = ?1 AND b.source = ?2 AND b.id = ?3
@@ -1357,12 +1545,17 @@ async fn load_buy_checks(
         .await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? {
+        // The CHECK in migration 0021 makes these mutually exclusive, so the row is
+        // read as it is rather than one being preferred over the other.
+        let user_id: Option<String> = r.get(1)?;
+        let username: Option<String> = r.get(2)?;
         out.push(BuyCheck {
             index: r.get(0)?,
-            by: Voter {
-                telegram_user_id: r.get::<String>(1)?,
-                username: r.get::<Option<String>>(2)?,
-            },
+            by: user_id.map(|telegram_user_id| Voter {
+                telegram_user_id,
+                username,
+            }),
+            pantry: r.get(3)?,
         });
     }
     Ok(out)
@@ -2138,6 +2331,12 @@ mod tests {
 
     // ---- buy checklist (#131) ----------------------------------------------
 
+    /// The person on a check, for the tests that are about people. A check whose
+    /// `by` is absent is a pantry pre-tick (#156) and belongs to the tests below it.
+    fn claimant(c: &BuyCheck) -> &Voter {
+        c.by.as_ref().expect("a person's tick")
+    }
+
     /// A tick and an untick round-trip, and the read is keyed by the *recipe*:
     /// two recipes' checklists in one meal do not bleed into each other.
     #[tokio::test]
@@ -2214,7 +2413,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(checks.len(), 1, "one line, one tick");
-        assert_eq!(checks[0].by.telegram_user_id, "alice");
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "alice");
         assert!(
             load_buy_checks(&conn, "c2", "themealdb", "52772")
                 .await
@@ -2243,7 +2442,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(checks.len(), 1, "never two people on one ingredient");
-        assert_eq!(checks[0].by.telegram_user_id, "bob");
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "bob");
     }
 
     /// Unticking a line nobody had is the state the caller asked for, not an error.
@@ -2287,13 +2486,321 @@ mod tests {
         let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
             .await
             .unwrap();
-        assert_eq!(checks[0].by.telegram_user_id, "4242");
-        assert_eq!(checks[0].by.username.as_deref(), Some("dave"));
-        assert_eq!(checks[1].by.telegram_user_id, "5150");
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "4242");
+        assert_eq!(claimant(&checks[0]).username.as_deref(), Some("dave"));
+        assert_eq!(claimant(&checks[1]).telegram_user_id, "5150");
         assert_eq!(
-            checks[1].by.username, None,
+            claimant(&checks[1]).username,
+            None,
             "a Telegram account need not have a handle"
         );
+        assert!(
+            checks.iter().all(|c| c.pantry.is_none()),
+            "a person's tick is not the pantry's"
+        );
+    }
+
+    // ---- the pantry seed (#156) --------------------------------------------
+
+    /// A kitchen stocked with `pantry`, and a plan in it — the whole precondition for
+    /// a pre-tick. The entries go in raw, exactly as `kitchens::add_pantry` writes them
+    /// (normalised names taken from the corpus vocabulary).
+    async fn stocked_plan(conn: &Connection, channel: &str, pantry: &[&str]) -> String {
+        let kid = crate::kitchens::create_kitchen(conn, "Home", "alice")
+            .await
+            .unwrap();
+        for item in pantry {
+            conn.execute(
+                "INSERT INTO kitchen_pantry (kitchen_id, item) VALUES (?1, ?2)",
+                libsql::params![kid.clone(), *item],
+            )
+            .await
+            .unwrap();
+        }
+        plan_for(conn, channel, Some(&kid)).await;
+        kid
+    }
+
+    /// A recipe in the corpus as `derive` stores it: a raw name and measure with the
+    /// enrich worker's reading beside it (#11). A `None` reading is an unread line,
+    /// which takes no index on the shopping list — exactly what a seed must get right.
+    async fn corpus_recipe(
+        conn: &Connection,
+        source: &str,
+        id: &str,
+        lines: &[(&str, Option<&str>)],
+    ) {
+        let ingredients: Vec<recipe_core::Ingredient> = lines
+            .iter()
+            .map(|(name, reading)| recipe_core::Ingredient {
+                name: (*name).to_owned(),
+                measure: None,
+                structured: reading.map(|item| recipe_core::StructuredMeasure {
+                    item: item.to_owned(),
+                    amount: None,
+                    preparation: None,
+                    note: None,
+                }),
+            })
+            .collect();
+        conn.execute(
+            "INSERT INTO recipes (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url)
+             VALUES (?1, ?2, 'Chicken Handi', NULL, NULL, NULL, '[]', ?3, '', NULL, NULL)",
+            libsql::params![source, id, serde_json::to_string(&ingredients).unwrap()],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The whole feature in one pass: the kitchen's staples arrive already ticked, on
+    /// the right lines, with nobody's name on them and the jar that answered named.
+    #[tokio::test]
+    async fn a_stocked_kitchen_pre_ticks_the_lines_it_covers() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt", "olive oil", "onion"]).await;
+        corpus_recipe(
+            &conn,
+            "themealdb",
+            "52795",
+            &[
+                ("Chicken", Some("chicken")),
+                ("Onion", Some("Onions")),
+                ("A splash of something", None),
+                ("Salt", Some("salt")),
+                ("Spring onions", Some("spring onions")),
+            ],
+        )
+        .await;
+
+        let pantry = plan_pantry(&conn, "c").await.unwrap();
+        let names = shopping_names_of(&conn, "themealdb", "52795")
+            .await
+            .unwrap()
+            .expect("the recipe is in the corpus");
+        // The unread line took no index, so "Salt" is line 2 of the checklist.
+        assert_eq!(names, vec!["chicken", "Onions", "salt", "spring onions"]);
+
+        let preticks = recipe_core::pantry::preticks(&names, &pantry);
+        assert_eq!(
+            preticks,
+            vec![(1, "onion".to_string()), (2, "salt".to_string())],
+            "onion covers Onions and salt covers Salt; chicken and spring onions are not in this pantry"
+        );
+
+        write_seed(&conn, "c", "themealdb", "52795", &preticks)
+            .await
+            .unwrap();
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap();
+        assert_eq!(
+            checks.iter().map(|c| c.index).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            checks.iter().all(|c| c.by.is_none()),
+            "nobody claimed these, so nobody's colour goes on them"
+        );
+        assert_eq!(
+            checks.iter().map(|c| c.pantry.clone()).collect::<Vec<_>>(),
+            vec![Some("onion".to_string()), Some("salt".to_string())],
+            "and each says which jar answered for it"
+        );
+    }
+
+    /// A plan with no kitchen has no pantry — 6 of the 9 plans in production today.
+    /// That is an empty pantry, never an error and never a reason to refuse a list.
+    #[tokio::test]
+    async fn a_plan_without_a_kitchen_pre_ticks_nothing() {
+        let conn = conn().await;
+        plan_for(&conn, "c", None).await;
+        assert!(plan_pantry(&conn, "c").await.unwrap().is_empty());
+    }
+
+    /// A kitchen with an empty pantry — every kitchen in production today, so this is
+    /// the shape the feature actually meets on the live site. Inert, not broken.
+    #[tokio::test]
+    async fn an_unstocked_kitchen_pre_ticks_nothing() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &[]).await;
+        assert!(plan_pantry(&conn, "c").await.unwrap().is_empty());
+    }
+
+    /// A recipe the corpus does not hold is not a list yet, and `None` says so — as
+    /// against a recipe that *is* held but unread, whose list is genuinely empty. The
+    /// seed treats the two differently: nothing is recorded for the first, so a list
+    /// built after a derive still gets its seed.
+    #[tokio::test]
+    async fn an_absent_recipe_is_not_an_empty_list() {
+        let conn = conn().await;
+        assert_eq!(
+            shopping_names_of(&conn, "themealdb", "99999")
+                .await
+                .unwrap(),
+            None
+        );
+        corpus_recipe(&conn, "themealdb", "52795", &[("Salt", None)]).await;
+        assert_eq!(
+            shopping_names_of(&conn, "themealdb", "52795")
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "held but unread — a list with no lines to match"
+        );
+    }
+
+    /// The seed happens **once**. Unticking a pre-tick is an ordinary untick, and the
+    /// pantry does not put the empty jar back on the next read — which is the whole
+    /// reason `buy_seeds` is a table rather than "seed when the list looks empty".
+    #[tokio::test]
+    async fn unticking_a_pre_tick_sticks() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        let preticks = vec![(0usize, "salt".to_string())];
+
+        assert!(!buy_list_seeded(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap());
+        write_seed(&conn, "c", "themealdb", "52795", &preticks)
+            .await
+            .unwrap();
+        assert!(buy_list_seeded(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap());
+
+        untick_item(&conn, "c", "themealdb", "52795", 0)
+            .await
+            .unwrap();
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the jar was empty; the untick is an untick"
+        );
+    }
+
+    /// Ticking a pre-ticked line makes it yours, colour and all — the pantry's claim is
+    /// replaced, not stacked on. The schema would refuse a row holding both.
+    #[tokio::test]
+    async fn taking_over_a_pre_tick_makes_it_a_persons() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        write_seed(
+            &conn,
+            "c",
+            "themealdb",
+            "52795",
+            &[(0usize, "salt".to_string())],
+        )
+        .await
+        .unwrap();
+
+        tick_item(&conn, "c", "themealdb", "52795", 0, "alice")
+            .await
+            .unwrap();
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap();
+        assert_eq!(checks.len(), 1, "one line, one tick");
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "alice");
+        assert_eq!(
+            checks[0].pantry, None,
+            "a person's claim replaces the cupboard's, it does not sit beside it"
+        );
+    }
+
+    /// The seed never overwrites a claim. If somebody ticks a line in the same breath
+    /// as the seed runs, the person keeps it.
+    #[tokio::test]
+    async fn the_seed_does_not_overwrite_a_persons_tick() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        tick_item(&conn, "c", "themealdb", "52795", 0, "alice")
+            .await
+            .unwrap();
+        write_seed(
+            &conn,
+            "c",
+            "themealdb",
+            "52795",
+            &[(0usize, "salt".to_string())],
+        )
+        .await
+        .unwrap();
+
+        let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap();
+        assert_eq!(claimant(&checks[0]).telegram_user_id, "alice");
+        assert_eq!(checks[0].pantry, None);
+    }
+
+    /// The seed is per (meal, recipe): a re-decided plan gets a fresh list and a fresh
+    /// seed, and one meal's seed says nothing about another meal's.
+    #[tokio::test]
+    async fn the_seed_marker_is_per_meal_and_recipe() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c1", &["salt"]).await;
+        stocked_plan(&conn, "c2", &["salt"]).await;
+        write_seed(&conn, "c1", "themealdb", "52795", &[])
+            .await
+            .unwrap();
+
+        assert!(buy_list_seeded(&conn, "c1", "themealdb", "52795")
+            .await
+            .unwrap());
+        assert!(
+            !buy_list_seeded(&conn, "c1", "themealdb", "52772")
+                .await
+                .unwrap(),
+            "another recipe in the same meal is another list"
+        );
+        assert!(
+            !buy_list_seeded(&conn, "c2", "themealdb", "52795")
+                .await
+                .unwrap(),
+            "another meal's list is its own"
+        );
+    }
+
+    /// Seeding a list that matches nothing still records that it happened — otherwise
+    /// stock added later would silently re-tick a list somebody is already shopping.
+    #[tokio::test]
+    async fn a_seed_that_matches_nothing_is_still_a_seed() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["saffron"]).await;
+        write_seed(&conn, "c", "themealdb", "52795", &[])
+            .await
+            .unwrap();
+        assert!(buy_list_seeded(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap());
+        assert!(load_buy_checks(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A row cannot claim both a person and the pantry, and cannot claim neither. The
+    /// database says so, so no code path can talk it into an ambiguous tick.
+    #[tokio::test]
+    async fn a_tick_is_a_persons_or_the_pantrys_never_both_nor_neither() {
+        let conn = conn().await;
+        plan_for(&conn, "c", None).await;
+        for (user, pantry) in [(Some("alice"), Some("salt")), (None, None)] {
+            let refused = conn
+                .execute(
+                    "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id, pantry_item)
+                     VALUES ('c', 'themealdb', '52795', 0, ?1, ?2)",
+                    libsql::params![user, pantry],
+                )
+                .await;
+            assert!(
+                refused.is_err(),
+                "the schema must refuse user_id={user:?} pantry_item={pantry:?}"
+            );
+        }
     }
 
     /// The tally names who said yes, not just how many — so a client rehydrating

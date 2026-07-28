@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/sveltekit";
 import Buy from "./Buy.svelte";
+import { NOBODY, type Tick } from "$lib/shopping";
 import { buyRecipe } from "$lib/fixtures";
+import type { Voter } from "$lib/pick";
 
 const meta = {
   title: "recipes/Buy",
@@ -23,6 +25,25 @@ const kit = { telegram_user_id: "3141", username: "kit" }; // honey
 const sam = { telegram_user_id: "8080", username: "sam" }; // sea
 const jo = { telegram_user_id: "9317", username: null }; // berry
 
+/** Somebody got it: the row wears their colour and says their name (#131). */
+const got = (by: Voter): Tick => ({ by, pantry: null });
+
+/**
+ * The kitchen already had it (#156): nobody got it, so no colour — the entry that
+ * answered for the line goes where a name would.
+ *
+ * The names used are real corpus vocabulary with real weight behind them — `salt`
+ * is in 302 of the 790 recipes, `garlic` 238, `onion` 224, `vegetable oil` 116. The
+ * fixture is Chicken Handi, and the indices below are positions in *its own*
+ * sixteen-line record (#157), so a pantry holding `tomato` pre-ticks `tomatoes` —
+ * one food, two spellings, which is the whole of what the matcher's plural fold
+ * does. Positions are the thing to get right here: `salt` is the sixteenth line,
+ * and while these ticks were written against an earlier eight-line fixture the
+ * salt sat on the seventh, which pre-ticked `cumin seeds` — a fixture asserting
+ * exactly the false match this matcher exists to refuse.
+ */
+const inPantry = (item: string): Tick => ({ by: null, pantry: item });
+
 /** The shopping checklist for the picked recipe — two lines already got,
  * each wearing the colour of whoever got it (#131). */
 export const Ready: Story = {
@@ -30,7 +51,127 @@ export const Ready: Story = {
     status: "ready",
     recipe: buyRecipe(),
     shared: true,
-    ticks: { 0: dave, 2: mel },
+    ticks: { 0: got(dave), 2: got(mel) },
+  },
+};
+
+/**
+ * The list as it is **born** when the plan's kitchen is stocked (#156): the staples
+ * are already accounted for and nobody had to do anything.
+ *
+ * This is the treatment on its own, with no people on the list at all — plain stone,
+ * no colour anywhere, and each ticked row naming the jar. Read it against `Ready`
+ * above: a tick that somebody made is coloured, a tick nobody made is not, and that
+ * difference is the only thing carrying the distinction.
+ */
+export const StartedFromThePantry: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: {
+      1: inPantry("onion"),
+      2: inPantry("tomato"),
+      3: inPantry("garlic"),
+      5: inPantry("vegetable oil"),
+      15: inPantry("salt"),
+    },
+  },
+};
+
+/**
+ * The story the two treatments have to survive together: a real shop in progress on
+ * a list that started stocked.
+ *
+ * Three rows are somebody's and wear their colour; three are the kitchen's and wear
+ * none. Nothing about a pantry row may read as a person having claimed it — that is
+ * #131's rule (a colour means a person) held honest against a tick that has no
+ * person behind it — and nothing about a person's row may read as a cupboard.
+ *
+ * `Vegetable oil` at index 5 is the interesting one: it was pre-ticked from the
+ * pantry, the jar turned out to be empty, and `@kit` went and got some. Taking one
+ * over is an ordinary tick, so it looks like an ordinary tick.
+ */
+export const PantryAndPeople: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: {
+      0: got(dave),
+      2: inPantry("tomato"),
+      3: inPantry("garlic"),
+      5: got(kit),
+      15: inPantry("salt"),
+      7: got(jo),
+    },
+  },
+};
+
+/**
+ * Nothing to buy at all: every line of the recipe was already in the kitchen, so the
+ * list is finished the moment it opens and nobody shopped for any of it.
+ *
+ * #132's completion said *"Everything's in the kitchen"* — true here, but it sits
+ * under a heading that would be congratulating a group on a shop none of them did.
+ * So the words change and the arithmetic does not. Measured against a plausible
+ * 30-item staple pantry this is rare and real: 2 of the corpus's 790 recipes are
+ * born complete.
+ */
+export const NothingToBuy: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: {
+      0: inPantry("chicken"),
+      1: inPantry("onion"),
+      2: inPantry("tomato"),
+      3: inPantry("garlic"),
+      4: inPantry("ginger paste"),
+      5: inPantry("vegetable oil"),
+      6: inPantry("cumin seeds"),
+      7: inPantry("coriander seeds"),
+      8: inPantry("turmeric powder"),
+      9: inPantry("chilli powder"),
+      10: inPantry("green chilli"),
+      11: inPantry("yogurt"),
+      12: inPantry("cream"),
+      13: inPantry("fenugreek"),
+      14: inPantry("garam masala"),
+      15: inPantry("salt"),
+    },
+  },
+};
+
+/**
+ * The same full list, but one line was actually shopped for — so it *is* a finished
+ * shop and says so the way #132 always did. One person's tick anywhere is the whole
+ * threshold, and this pins that the two endings do not blur into each other.
+ */
+export const CompleteAfterOneRealShop: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: {
+      0: got(mel),
+      1: inPantry("onion"),
+      2: inPantry("tomato"),
+      3: inPantry("garlic"),
+      4: inPantry("ginger paste"),
+      5: inPantry("vegetable oil"),
+      6: inPantry("cumin seeds"),
+      7: inPantry("coriander seeds"),
+      8: inPantry("turmeric powder"),
+      9: inPantry("chilli powder"),
+      10: inPantry("green chilli"),
+      11: inPantry("yogurt"),
+      12: inPantry("cream"),
+      13: inPantry("fenugreek"),
+      14: inPantry("garam masala"),
+      15: inPantry("salt"),
+    },
   },
 };
 
@@ -48,7 +189,14 @@ export const SixShoppers: Story = {
     status: "ready",
     recipe: buyRecipe(),
     shared: true,
-    ticks: { 0: dave, 1: ada, 2: mel, 3: kit, 4: sam, 5: jo },
+    ticks: {
+      0: got(dave),
+      1: got(ada),
+      2: got(mel),
+      3: got(kit),
+      4: got(sam),
+      5: got(jo),
+    },
   },
 };
 
@@ -68,22 +216,22 @@ export const Complete: Story = {
     // All sixteen of the recipe's lines — the corpus record has sixteen, not the
     // eight the fixture used to carry (#157), and "every line" has to mean every one.
     ticks: {
-      0: dave,
-      1: ada,
-      2: mel,
-      3: kit,
-      4: sam,
-      5: jo,
-      6: ada,
-      7: dave,
-      8: mel,
-      9: kit,
-      10: sam,
-      11: jo,
-      12: dave,
-      13: ada,
-      14: mel,
-      15: kit,
+      0: got(dave),
+      1: got(ada),
+      2: got(mel),
+      3: got(kit),
+      4: got(sam),
+      5: got(jo),
+      6: got(ada),
+      7: got(dave),
+      8: got(mel),
+      9: got(kit),
+      10: got(sam),
+      11: got(jo),
+      12: got(dave),
+      13: got(ada),
+      14: got(mel),
+      15: got(kit),
     },
   },
 };
@@ -100,22 +248,22 @@ export const CompleteOnThisDevice: Story = {
     recipe: buyRecipe(),
     shared: false,
     ticks: {
-      0: null,
-      1: null,
-      2: null,
-      3: null,
-      4: null,
-      5: null,
-      6: null,
-      7: null,
-      8: null,
-      9: null,
-      10: null,
-      11: null,
-      12: null,
-      13: null,
-      14: null,
-      15: null,
+      0: NOBODY,
+      1: NOBODY,
+      2: NOBODY,
+      3: NOBODY,
+      4: NOBODY,
+      5: NOBODY,
+      6: NOBODY,
+      7: NOBODY,
+      8: NOBODY,
+      9: NOBODY,
+      10: NOBODY,
+      11: NOBODY,
+      12: NOBODY,
+      13: NOBODY,
+      14: NOBODY,
+      15: NOBODY,
     },
   },
 };
@@ -128,7 +276,7 @@ export const TickRefused: Story = {
     status: "ready",
     recipe: buyRecipe(),
     shared: true,
-    ticks: { 0: dave },
+    ticks: { 0: got(dave) },
     tickError: "Only the people having this meal can tick things off its list.",
   },
 };
@@ -141,7 +289,7 @@ export const OnThisDeviceOnly: Story = {
     status: "ready",
     recipe: buyRecipe(),
     shared: false,
-    ticks: { 0: null, 3: null },
+    ticks: { 0: NOBODY, 3: NOBODY },
   },
 };
 

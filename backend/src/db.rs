@@ -52,6 +52,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (17, include_str!("../migrations/0017_pick_time_cap.sql")),
     (18, include_str!("../migrations/0018_buy_checks.sql")),
     (19, include_str!("../migrations/0019_time_cap_default.sql")),
+    // 20 is reserved for work in flight on another branch (#96). The runner below
+    // applies by `MAX(version)`, so reserving a number is only half the job: one that
+    // lands *after* a higher number has already run on production never applies at
+    // all. Whichever deploys first sets the floor, so anything behind it must be
+    // renumbered above it before it merges.
+    (21, include_str!("../migrations/0021_pantry_pretick.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

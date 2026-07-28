@@ -10,6 +10,7 @@ pub mod adapters;
 pub mod equipment;
 pub mod measure;
 pub mod models;
+pub mod pantry;
 pub mod step;
 pub mod themealdb;
 
