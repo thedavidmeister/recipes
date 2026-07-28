@@ -72,38 +72,6 @@ export const SeveralAlreadyYes: Story = {
   },
 };
 
-/**
- * Somebody stepped out mid-swipe (#96).
- *
- * More than a courtesy note: the roster is the number a recipe has to win over, so a
- * departure moves the bar *down* and can complete an agreement that was one holdout
- * away. A recipe winning the instant that number dropped has to read as "Mel left",
- * never as the app deciding by itself — so the person who moved it is named, in
- * their own colour, and stays named. It does not fade, because it explains the
- * target everyone is swiping against for the rest of the session.
- */
-export const SomeoneLeft: Story = {
-  args: {
-    status: "swiping",
-    card: cards[2],
-    participants: 2,
-    shareUrl: share,
-    departed: { telegram_user_id: "5150", username: "mel" },
-  },
-};
-
-/**
- * The last person left, so the plan is over (#96).
- *
- * An empty plan is nobody's meal: the backend closes it and the link stops resolving,
- * so anyone still watching is told rather than left swiping into a channel that no
- * longer exists. A Notice rather than the Alert, because nothing failed — and no
- * Leave, because there is nothing left to leave.
- */
-export const PlanEnded: Story = {
-  args: { status: "ended" },
-};
-
 /** Starting: the socket is opening and the first deck is loading. */
 export const Connecting: Story = {
   args: { status: "connecting", shareUrl: share },

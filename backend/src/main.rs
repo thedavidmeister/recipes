@@ -2827,11 +2827,16 @@ mod tests {
         assert_eq!(lobby["host"], "host");
     }
 
-    /// Leaving is allowed **after** the start, which is the whole point of it: a
-    /// person who joined and went to bed otherwise holds the plan hostage, because
-    /// every recipe needs a yes that is never coming.
+    /// People are added to and removed from a plan **in its lobby** (#96). Once the
+    /// swiping starts the set of deciders is fixed, so both directions are refused
+    /// with the same 400 every other lobby write gives — and the point of the test is
+    /// that nothing was written, not that a number came back.
+    ///
+    /// Both halves in one test on purpose: they are one rule. The people swiping
+    /// agreed to decide together, and the number they have to agree on may no more
+    /// fall out from under them than a late arrival may raise it.
     #[tokio::test]
-    async fn leaving_is_allowed_after_the_plan_has_started() {
+    async fn the_roster_is_closed_in_both_directions_after_the_start() {
         let (app, conn) = test_app().await;
         let host = auth::issue_test_session(&conn, "host").await;
         let hcookie = format!("recipes_session={host}");
@@ -2852,7 +2857,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        // A late *joiner* is still refused — the roster may shrink, never grow.
+        // A late joiner: the roster may not grow.
         let outsider = auth::issue_test_session(&conn, "outsider").await;
         let res = app
             .clone()
@@ -2865,6 +2870,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
+        // And a departure: nor may it shrink.
         let res = app
             .clone()
             .oneshot(delete_req(
@@ -2873,16 +2879,43 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(body_json(res).await["plan_ended"], false);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(res).await["error"],
+            "this meal plan has already started"
+        );
 
         let res = app
+            .clone()
             .oneshot(get_req(&format!("/api/session/{channel}"), &hcookie))
             .await
             .unwrap();
         let lobby = body_json(res).await;
         assert_eq!(lobby["started"], true, "the plan is still under way");
-        assert_eq!(lobby["voters"].as_array().unwrap().len(), 1);
+        let voters: Vec<&str> = lobby["voters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["telegram_user_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            voters,
+            vec!["host", "mel"],
+            "the roster is exactly what it was — the refusal wrote nothing"
+        );
+
+        // …and mel is still a decider, not a half-removed one: the roster is the
+        // membership every other write is judged against, so a refused departure has
+        // to leave her able to act.
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/buy"),
+                Some(&format!("recipes_session={mel}")),
+                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     /// The host is not trapped in their own plan: leaving hands it to the next person
@@ -2980,59 +3013,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    }
-
-    /// Leaving releases the shopping claims the leaver was holding (#131): the lines
-    /// go back on the list for somebody else, and nobody else's ticks move.
-    #[tokio::test]
-    async fn leaving_puts_your_shopping_claims_back_on_the_list() {
-        let (app, conn) = test_app().await;
-        let host = auth::issue_test_session(&conn, "host").await;
-        let hcookie = format!("recipes_session={host}");
-        let kid = make_kitchen(&app, &hcookie, "Home").await;
-        let channel = make_plan(&app, &hcookie, &kid).await;
-        kitchens::seat_member_for_test(&conn, &kid, "mel").await;
-        seat_into(&app, &hcookie, &channel, "mel").await;
-        let mel = auth::issue_test_session(&conn, "mel").await;
-        let mcookie = format!("recipes_session={mel}");
-
-        for (cookie, index) in [(&hcookie, 0), (&mcookie, 1)] {
-            let res = app
-                .clone()
-                .oneshot(json_post(
-                    &format!("/api/session/{channel}/buy"),
-                    Some(cookie),
-                    &format!(
-                        r#"{{"source":"themealdb","id":"52772","index":{index},"checked":true}}"#
-                    ),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-        }
-
-        let res = app
-            .clone()
-            .oneshot(delete_req(
-                &format!("/api/session/{channel}/join"),
-                Some(&mcookie),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-
-        let res = app
-            .oneshot(get_req(
-                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
-                &hcookie,
-            ))
-            .await
-            .unwrap();
-        let checks = body_json(res).await;
-        let checks = checks["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 1, "mel's line is unclaimed again");
-        assert_eq!(checks[0]["index"], 0);
-        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
     }
 
     /// Having left, you are out: a second attempt is refused, and the plan cannot be

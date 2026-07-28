@@ -34,18 +34,8 @@
     /** The shareable link that invites others into this pick. */
     shareUrl?: string;
     copied?: boolean;
-    /** Who last stepped out of the plan (#96), if anyone has.
-     *
-     * A departure moves the number under the swipe — the roster is what a recipe
-     * has to win over, so one fewer person can complete an agreement that was one
-     * holdout away. That must never look like the app deciding on its own, so the
-     * person who moved it is named and stays named for the rest of the session. */
-    departed?: Voter;
     onVote?: (yes: boolean) => void;
     onShare?: () => void;
-    /** Step out of the plan (#96) — the same way out the lobby offers, still here
-     * once the swiping has begun, which is exactly when a stuck plan hurts most. */
-    onLeave?: () => void;
   }
 
   let {
@@ -56,10 +46,8 @@
     error,
     shareUrl,
     copied = false,
-    departed,
     onVote,
     onShare,
-    onLeave,
   }: Props = $props();
 
   const meta = $derived(
@@ -82,40 +70,17 @@
       <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"></span>
       Pick
     </p>
-    <div class="flex items-center gap-2">
-      {#if shareUrl}
-        <button
-          onclick={() => onShare?.()}
-          class="rounded-pill font-display inline-flex items-center gap-2 border border-stone-200 bg-cream-50 px-4 py-2 text-sm font-medium text-stone-900 transition-colors hover:border-pesto-500"
-        >
-          {copied ? "Link copied" : "Invite"}
-        </button>
-      {/if}
-      <!-- Quieter than Invite, and beside it rather than buried: the way in and
-           the way out are the same kind of thing (#96). Absent once the plan is
-           over, because there is nothing left to leave. -->
-      {#if status !== "ended"}
-        <button
-          onclick={() => onLeave?.()}
-          class="rounded-pill font-display inline-flex items-center gap-2 border border-stone-200 px-4 py-2 text-sm text-stone-600 transition-colors hover:border-stone-400"
-        >
-          Leave
-        </button>
-      {/if}
-    </div>
+    {#if shareUrl}
+      <button
+        onclick={() => onShare?.()}
+        class="rounded-pill font-display inline-flex items-center gap-2 border border-stone-200 bg-cream-50 px-4 py-2 text-sm font-medium text-stone-900 transition-colors hover:border-pesto-500"
+      >
+        {copied ? "Link copied" : "Invite"}
+      </button>
+    {/if}
   </header>
 
-  {#if status === "ended"}
-    <!-- Not an Alert: nothing went wrong. Everyone in the plan left it, so it is
-         simply over (#96) — the plan is gone server-side and the link no longer
-         resolves, and "the pick dropped" would send someone hunting a fault. -->
-    <Notice>
-      <p class="font-display text-stone-900">This meal plan is over.</p>
-      <p class="mt-1 text-sm text-stone-600">
-        Everyone left it, so there is nothing left to decide.
-      </p>
-    </Notice>
-  {:else if status === "error"}
+  {#if status === "error"}
     <Alert>
       <p class="font-display text-stone-900">The pick dropped.</p>
       <p class="mt-1 text-sm text-stone-600">
@@ -134,20 +99,6 @@
       >
         <span class="size-2 rounded-full bg-honey-500" aria-hidden="true"></span>
         Reconnecting…
-      </p>
-    {/if}
-
-    {#if departed}
-      <!-- The number in the footer just moved, and this says who moved it (#96).
-           It stays for the rest of the session rather than fading: "we are two
-           because Mel left" is the standing explanation of the target everyone is
-           now swiping against, not a momentary event. -->
-      <p
-        class="rounded-pill mb-3 inline-flex items-center gap-2 px-3 py-1 text-sm text-stone-600 {userTint(
-          departed.telegram_user_id,
-        )}"
-      >
-        <UserName user={departed} /> left the plan
       </p>
     {/if}
 

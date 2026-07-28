@@ -138,11 +138,12 @@ export interface PickHandlers {
     id: string,
     checks: { index: number; by: Voter }[],
   ) => void;
-  /** Somebody left the plan (#96). The `lobby` and `tally` frames that arrive with
-   * it already carry the smaller roster and the tally their votes left; this is the
-   * event that explains them, so a recipe completed by their departure reads as
-   * "Mel left" rather than as a decision made by nobody. `ended` means they were
-   * the last, so the plan is gone. */
+  /** Somebody left the plan (#96) — always from its lobby, because that is the only
+   * place the roster moves. The `lobby` frame beside this one already carries the
+   * smaller roster, so `voter` is who, for a screen that wants to name them.
+   *
+   * `ended` is the part nothing else can say: they were the last, so the plan itself
+   * is gone and there is no roster left to send. */
   onLeft?: (voter: Voter, ended: boolean) => void;
   onStatus?: (status: ConnStatus) => void;
 }
@@ -310,11 +311,12 @@ export interface Departure {
 /**
  * Leave a meal plan (#96) — the inverse of {@link joinLobby}, on the same path.
  *
- * Allowed **after** the start as well as in the lobby: the roster is the number a
- * recipe has to win over, so somebody who joined and wandered off holds the plan
- * hostage. Your votes and your shopping claims go with you; if you started the plan
- * it passes to the next person in the room, and if you were the last one in it the
- * plan ends.
+ * A **lobby** act, exactly like joining: the roster closes at the start in both
+ * directions, so once the swiping has begun the set of people a recipe has to win
+ * over is fixed and this is refused with the same 400 every other lobby write gives.
+ *
+ * If you started the plan it passes to the next person in the room; if you were the
+ * last one in it the plan ends.
  */
 export async function leavePlan(channel: string): Promise<Departure> {
   const res = await apiFetch(

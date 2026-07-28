@@ -38,7 +38,13 @@
    * and that is exactly why they are safe to use for all six people.
    */
   interface Props {
-    status: "pending" | "error" | "ready";
+    /**
+     * `ended` is the plan everybody walked out of (#96). It belongs here rather
+     * than on the swipe view because a plan can only be emptied *before* it starts
+     * — the roster closes at the start in both directions — so the lobby is the
+     * only screen that can still be open on a plan that no longer exists.
+     */
+    status: "pending" | "error" | "ready" | "ended";
     voters?: Voter[];
     /** Kitchen members not yet in — the host can add them without a link (#72). */
     candidates?: Voter[];
@@ -75,7 +81,12 @@
     /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
     onCap?: (cap: number | null) => void;
     /** Step out of the plan (#96). Everyone has it, the host included — a host who
-     * cannot leave is trapped in their own plan. */
+     * cannot leave is trapped in their own plan.
+     *
+     * And **only** here. The roster closes at the start in both directions, so the
+     * lobby is the whole of the way out: once the swiping begins the set of people
+     * a recipe has to win over is fixed, and neither a late joiner nor a departure
+     * may move it under everybody. */
     onLeave?: () => void;
   }
 
@@ -200,7 +211,17 @@
       </p>
     {/if}
 
-    {#if status === "error"}
+    {#if status === "ended"}
+      <!-- Stated, not styled as a failure: nothing went wrong. The last person in
+           the plan left it, so it is simply over (#96) and the link no longer
+           resolves. Said plainly, in the same place the error would be, because
+           the one thing this screen must not do is keep offering a Start and a
+           Leave for a plan that is gone. -->
+      <p class="font-display mt-4 text-stone-900">This meal plan is over.</p>
+      <p class="mt-1 text-sm text-stone-600">
+        Everyone left it, so there is nothing left to decide.
+      </p>
+    {:else if status === "error"}
       <p class="mt-4 text-sm text-stone-600">
         {error ?? "Couldn't open this meal plan."}
       </p>

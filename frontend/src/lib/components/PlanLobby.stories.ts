@@ -173,6 +173,21 @@ export const Error: Story = {
 };
 
 /**
+ * The last person left, so the plan is over (#96).
+ *
+ * This lives on the lobby and nowhere else, because a plan can only be emptied
+ * *before* it starts — the roster closes at the start in both directions — so the
+ * swipe view can never be the screen looking at one. Reached by a client still in
+ * the room when the last decider walks out: a second tab of the leaver's own, or
+ * somebody watching a lobby they never got seated into.
+ *
+ * Said plainly rather than as an alert: nothing failed, there is simply nothing
+ * left to decide — and no Start and no Leave, because there is no plan to start
+ * and nothing left to leave.
+ */
+export const PlanEnded: Story = { args: { status: "ended" } };
+
+/**
  * The same lobby with a host whose colour is `honey` — the palest slot there is.
  *
  * Worth its own story because it is the one that would break a design leaning on
