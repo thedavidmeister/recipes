@@ -1,5 +1,5 @@
 import { ApiError, apiFetch } from "./client";
-import type { KitchenDetail, KitchenSummary } from "./types";
+import type { EquipmentAdvice, KitchenDetail, KitchenSummary } from "./types";
 
 /**
  * Kitchens (#72): the durable shared space that scopes the meal flow. Unlike the
@@ -75,6 +75,22 @@ export async function pantryVocabulary(): Promise<string[]> {
   const res = await apiFetch("/api/pantry");
   if (!res.ok) throw failed(res.status, "load the pantry list");
   return (await res.json()) as string[];
+}
+
+/**
+ * What this kitchen should add next, and how many more recipes it would put in reach
+ * (#83) — the inverse of the walk's can-make bound (#82).
+ *
+ * Computed per ask rather than carried on the kitchen, because it is a fact about the
+ * corpus as much as about the kitchen: reading a hundred more recipes changes the
+ * answer without anything about the kitchen having moved.
+ */
+export async function equipmentAdvice(id: string): Promise<EquipmentAdvice> {
+  const res = await apiFetch(
+    `/api/kitchens/${encodeURIComponent(id)}/equipment/advice`,
+  );
+  if (!res.ok) throw failed(res.status, "work out what to add");
+  return (await res.json()) as EquipmentAdvice;
 }
 
 /** A freshly minted invite. Mirrors `kitchens::Invite`. */

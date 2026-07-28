@@ -287,6 +287,12 @@ pub fn app(state: AppState) -> Router {
             "/kitchens/{id}/equipment",
             post(kitchens::add_equipment).delete(kitchens::remove_equipment),
         )
+        // What to add next (#83) — the inverse of the can-make bound (#82), and it
+        // hangs off the equipment path because adding is what you would do about it.
+        .route(
+            "/kitchens/{id}/equipment/advice",
+            get(kitchens::equipment_advice),
+        )
         .route(
             "/kitchens/{id}/pantry",
             post(kitchens::add_pantry).delete(kitchens::remove_pantry),
