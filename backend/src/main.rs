@@ -1928,6 +1928,83 @@ mod tests {
         );
     }
 
+    /// End to end through the router (#184): the meal a host chose in the lobby
+    /// reaches the deck. A plan's round deals *the meal*, so a dish the corpus states
+    /// accompanies one is not dealt, and everything the corpus says nothing about is.
+    ///
+    /// This is the whole wire — create with a meal, `resolve_bounds` reading it off the
+    /// plan, `load_corpus` acting on it — which the unit tests in `walk` cannot see:
+    /// they call `load_corpus` with a `Bounds` they built themselves, so a
+    /// `resolve_bounds` that dropped the meal on the floor would leave every one of
+    /// them green while the product went back to dealing 790 recipes to a breakfast.
+    #[tokio::test]
+    async fn the_meal_a_plan_chose_bounds_the_walk_it_deals() {
+        let (app, conn) = test_app().await;
+        // No estimates, so the born-in cap (#163) cannot be what excludes anything
+        // here — an un-estimated recipe stays under any cap (#80).
+        for (id, category) in [
+            ("trifle", "Dessert"),
+            ("chips", "Side"),
+            ("soup", "Starter"),
+            ("pancakes", "Breakfast"),
+            ("stew", "Beef"),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, category)
+                 VALUES ('t', ?1, ?1, ?2)",
+                libsql::params![id, category],
+            )
+            .await
+            .unwrap();
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"breakfast"}"#,
+            ))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stops = body_json(res).await["stops"].clone();
+        let ids: std::collections::HashSet<String> = stops
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        for stated in ["trifle", "chips", "soup"] {
+            assert!(
+                !ids.contains(stated),
+                "the corpus states {stated} accompanies a meal, so the round refuses it: {ids:?}"
+            );
+        }
+        assert!(
+            ids.contains("stew"),
+            "`Beef` says nothing about the meal, so it stays (#82's unread ruling): {ids:?}"
+        );
+        assert!(
+            ids.contains("pancakes"),
+            "a stated sitting stays, in this and every other meal: {ids:?}"
+        );
+    }
+
     /// A nonsense cap — zero, negative, longer than a day — is refused at create.
     #[tokio::test]
     async fn a_plan_with_a_nonsense_cap_is_refused() {
