@@ -159,8 +159,8 @@ struct TallyRow {
 ///
 /// The full vocabulary is two tiers, and the tier is the type. This enum is the
 /// **primary** tier — the meals you sit down to: breakfast, lunch, dinner, a
-/// snack. The **secondary** tier ([`MealAddition`]: dessert, side, drink) is the
-/// things that come *with* a meal. Splitting them into two types is what makes
+/// snack. The **secondary** tier ([`MealAddition`]: dessert, side) is the things
+/// that come *with* a meal. Splitting them into two types is what makes
 /// the invalid states unrepresentable: a plan's meal type simply cannot be
 /// "dessert" (it would claim the whole session for something that accompanies
 /// it), and a chosen addition cannot be "dinner" — serde refuses both at the
@@ -182,10 +182,18 @@ pub enum MealType {
     Snack,
 }
 
-/// A secondary choice on a plan (#114): something that comes *with* the meal —
-/// dessert, a side, drinks — never the meal itself. See [`MealType`] for the
-/// two-tier split; this is the tier a plan can carry **several** of, alongside
-/// exactly one meal.
+/// A secondary choice on a plan (#114): something that comes *with* the meal — a
+/// dessert, a side — never the meal itself. See [`MealType`] for the two-tier
+/// split; this is the tier a plan can carry **several** of, alongside exactly one
+/// meal.
+///
+/// **Every word here is one the corpus states about a recipe**: 166 recipes are
+/// a `Dessert` and 84 are a `Side`. `Drink` was a third variant and is not one
+/// any more (#185) — no source we ingest carries drinks (0 categories, 0 tags
+/// across 790 recipes), so a host could toggle it and there was nothing in the
+/// world for it to mean. That is not a claim that a drink is not part of a meal;
+/// it is that nothing we read supplies one. A drinks adapter puts the variant
+/// back, with data behind it.
 ///
 /// Chosen additions are recorded on the session and shown in the lobby, so the
 /// room knows dinner comes with dessert. Whether a chosen addition one day gets
@@ -197,21 +205,16 @@ pub enum MealType {
 pub enum MealAddition {
     Dessert,
     Side,
-    Drink,
 }
 
 impl MealAddition {
     /// Every addition, in canonical order — the order stored, and the order the
     /// picker shows.
-    pub const ALL: [MealAddition; 3] = [
-        MealAddition::Dessert,
-        MealAddition::Side,
-        MealAddition::Drink,
-    ];
+    pub const ALL: [MealAddition; 2] = [MealAddition::Dessert, MealAddition::Side];
 }
 
 /// The canonical form of a chosen-additions list: each addition at most once, in
-/// vocabulary order. The list means a *set* — "dessert and drinks" — so a double
+/// vocabulary order. The list means a *set* — "dessert and a side" — so a double
 /// tap or a reordered client must not mint a different plan.
 fn normalize_additions(input: &[MealAddition]) -> Vec<MealAddition> {
     MealAddition::ALL
@@ -271,8 +274,8 @@ pub struct CreateBody {
     /// ([`MealType::default`]) and the host can change it in the lobby.
     #[serde(default)]
     meal_type: Option<MealType>,
-    /// What comes with it (#114) — dessert, a side, drinks. Optional; none is a
-    /// plain meal, and the host can add them in the lobby.
+    /// What comes with it (#114) — a dessert, a side. Optional; none is a plain
+    /// meal, and the host can add them in the lobby.
     #[serde(default)]
     additions: Vec<MealAddition>,
     /// The plan's total-time cap in seconds (#80); `null` = no cap ("Any"). Not
@@ -751,7 +754,7 @@ pub struct AdditionsBody {
 }
 
 /// `POST /api/session/{channel}/additions` — the host names what comes with the
-/// meal: dessert, a side, drinks.
+/// meal: a dessert, a side.
 ///
 /// Same guards as [`set_meal_type`], for the same reason — host only, and only
 /// while the lobby is open; once people are voting, the terms of the plan must
@@ -2467,7 +2470,7 @@ mod tests {
     #[test]
     fn the_two_tiers_partition_the_vocabulary() {
         let primary = ["breakfast", "lunch", "dinner", "snack"];
-        let secondary = ["dessert", "side", "drink"];
+        let secondary = ["dessert", "side"];
         for word in primary {
             let q = format!("{word:?}");
             assert!(serde_json::from_str::<MealType>(&q).is_ok(), "{word}");
@@ -2495,6 +2498,10 @@ mod tests {
     /// made-up word, the right word in the wrong case, or the *other* tier's word —
     /// never reaches a handler, on create or on change. "dessert" as a meal type is
     /// the ruling made fixture: an addition *to* a meal is not a meal.
+    ///
+    /// "drink" is the same check for a word that *left* the vocabulary (#185): a
+    /// client built against the old list is refused rather than quietly storing a
+    /// word nothing downstream can fill.
     #[test]
     fn a_word_outside_the_tier_is_rejected() {
         for bad in [
@@ -2505,6 +2512,7 @@ mod tests {
             r#"{"meal_type":"drink"}"#,
             r#"{"additions":["dinner"]}"#,
             r#"{"additions":["Dessert"]}"#,
+            r#"{"additions":["drink"]}"#,
             r#"{"additions":["dessert","nonsense"]}"#,
         ] {
             assert!(serde_json::from_str::<CreateBody>(bad).is_err(), "{bad}");
@@ -2514,6 +2522,7 @@ mod tests {
         }
         for bad in [
             r#"{"additions":["dinner"]}"#,
+            r#"{"additions":["drink"]}"#,
             r#"{"additions":["dessert","nonsense"]}"#,
         ] {
             assert!(serde_json::from_str::<AdditionsBody>(bad).is_err(), "{bad}");
@@ -2533,9 +2542,9 @@ mod tests {
             None,
             MealType::Dinner,
             &[
-                MealAddition::Drink,
+                MealAddition::Side,
                 MealAddition::Dessert,
-                MealAddition::Drink,
+                MealAddition::Side,
             ],
             None,
         )
@@ -2544,8 +2553,8 @@ mod tests {
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(
             view.additions,
-            vec![MealAddition::Dessert, MealAddition::Drink],
-            "once each, dessert before drink"
+            vec![MealAddition::Dessert, MealAddition::Side],
+            "once each, dessert before side"
         );
     }
 
@@ -2717,7 +2726,7 @@ mod tests {
         assert!(!update_meal_type(&conn, "c", MealType::Breakfast)
             .await
             .unwrap());
-        assert!(!update_additions(&conn, "c", &[MealAddition::Drink])
+        assert!(!update_additions(&conn, "c", &[MealAddition::Side])
             .await
             .unwrap());
 
@@ -3699,7 +3708,7 @@ mod tests {
             None,
             None,
             MealType::Breakfast,
-            &[MealAddition::Drink],
+            &[MealAddition::Side],
             Some(1800),
         )
         .await
@@ -3719,7 +3728,7 @@ mod tests {
         assert_eq!(view.host, "bob");
         assert_eq!(view.voters.len(), 2);
         assert_eq!(view.meal_type, MealType::Breakfast, "the plan is unchanged");
-        assert_eq!(view.additions, vec![MealAddition::Drink]);
+        assert_eq!(view.additions, vec![MealAddition::Side]);
         assert_eq!(view.max_total_seconds, Some(1800));
 
         // And it keeps handing on, so a plan can never be left hostless.

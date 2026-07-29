@@ -1503,14 +1503,14 @@ mod tests {
             .oneshot(json_post(
                 &format!("/api/session/{channel}/additions"),
                 Some(&cookie),
-                r#"{"additions":["drink","dessert"]}"#,
+                r#"{"additions":["side","dessert"]}"#,
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
             body_json(res).await["additions"],
-            serde_json::json!(["dessert", "drink"])
+            serde_json::json!(["dessert", "side"])
         );
     }
 
@@ -1527,7 +1527,7 @@ mod tests {
             .oneshot(json_post(
                 "/api/session",
                 Some(&cookie),
-                r#"{"meal_type":"snack","additions":["drink"]}"#,
+                r#"{"meal_type":"snack","additions":["dessert"]}"#,
             ))
             .await
             .unwrap();
@@ -1549,7 +1549,7 @@ mod tests {
             .unwrap();
         let body = body_json(res).await;
         assert_eq!(body["meal_type"], "snack");
-        assert_eq!(body["additions"], serde_json::json!(["drink"]));
+        assert_eq!(body["additions"], serde_json::json!(["dessert"]));
     }
 
     /// The vocabulary is closed server-side: a meal outside it is refused at the
