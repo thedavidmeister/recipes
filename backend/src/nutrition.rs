@@ -195,10 +195,52 @@ pub async fn submit(
     items: Vec<SubmittedNutrition>,
     model: &str,
 ) -> anyhow::Result<SubmitReport> {
+    let store_run = runs::begin(conn, "enrich_nutrition").await?;
+    let (mut report, accepted) = match store_batch(conn, items, model, store_run).await {
+        Ok(stored) => stored,
+        // A run that errored out closes itself `failed` (#174), the same as the other
+        // three enrichments. Abandoning the row would file this alongside the process
+        // Render killed mid-flight, and those are two different facts.
+        Err(e) => return Err(runs::fail(conn, store_run, e).await),
+    };
+    // A reading the worker offered that this run did not store is work it was handed
+    // and dropped — an unknown recipe, a count that moved under it, a figure no food
+    // could have, a race it lost. Each is named in `rejected`; the status is what
+    // points a person at them. A batch stored whole is the only `completed` one.
+    let store_outcome = if report.rejected.is_empty() {
+        runs::Outcome::Completed
+    } else {
+        runs::Outcome::Partial
+    };
+    runs::finish(conn, store_run, store_outcome).await?;
+
+    // The derive run is allocated *here*, after storage — see the doc comment.
+    if !accepted.is_empty() {
+        let derive_run = runs::begin(conn, "derive").await?;
+        match derive::derive_recipes(conn, &accepted, derive_run).await {
+            Ok(derived) => {
+                report.derived = derived.derived;
+                runs::finish(conn, derive_run, runs::Outcome::Completed).await?;
+            }
+            Err(e) => return Err(runs::fail(conn, derive_run, e).await),
+        }
+    }
+    Ok(report)
+}
+
+/// Validate and store one batch under `store_run`, returning what happened and the
+/// recipes worth re-deriving.
+///
+/// Separated from [`submit`] so an error anywhere in the batch has one exit, and
+/// [`submit`] can close the run [`runs::Outcome::Failed`] on the way out (#174).
+async fn store_batch(
+    conn: &Connection,
+    items: Vec<SubmittedNutrition>,
+    model: &str,
+    store_run: i64,
+) -> anyhow::Result<(SubmitReport, Vec<RecipeKey>)> {
     let mut report = SubmitReport::default();
     let mut accepted: Vec<RecipeKey> = Vec::new();
-
-    let store_run = runs::begin(conn, "enrich_nutrition").await?;
     for item in items {
         let Some(count) = current_ingredient_count(conn, &item.source, &item.id).await? else {
             report.rejected.push(Rejection {
@@ -248,16 +290,7 @@ pub async fn submit(
             });
         }
     }
-    runs::finish(conn, store_run, runs::COMPLETED).await?;
-
-    if !accepted.is_empty() {
-        let derive_run = runs::begin(conn, "derive").await?;
-        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
-            .await?
-            .derived;
-        runs::finish(conn, derive_run, runs::COMPLETED).await?;
-    }
-    Ok(report)
+    Ok((report, accepted))
 }
 
 /// How many ingredients the recipe has **right now**, or `None` if it is gone. The
@@ -545,6 +578,89 @@ mod tests {
             .unwrap();
         assert_eq!(report.accepted, 0);
         assert_eq!(report.rejected[0].reason, "no such recipe");
+    }
+
+    /// The status a run row ended on — the fourth enrichment has to answer #174 the
+    /// same way the other three do.
+    async fn last_run_status(conn: &Connection, kind: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT status FROM runs WHERE kind = ?1 ORDER BY id DESC LIMIT 1",
+                libsql::params![kind],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    /// A push that stored everything it was handed is `completed`.
+    #[tokio::test]
+    async fn a_whole_push_records_completed() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[line("Flour", Some("g"), true)]).await;
+        let report = submit(&conn, vec![submitted("1", vec![food(364.0, None)], 4)], "m")
+            .await
+            .unwrap();
+        assert!(report.rejected.is_empty());
+        assert_eq!(
+            last_run_status(&conn, "enrich_nutrition").await,
+            runs::COMPLETED,
+            "a batch stored whole is completed"
+        );
+    }
+
+    /// A push that dropped a reading is `partial`, never `completed` (#174). The run
+    /// finished, but it did not do everything it was handed, and `rejected` says which
+    /// — the status is what points a person at a worker sending nonsense.
+    #[tokio::test]
+    async fn a_push_that_dropped_a_reading_records_partial() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[line("Flour", Some("g"), true)]).await;
+        let report = submit(
+            &conn,
+            vec![
+                submitted("1", vec![food(364.0, None)], 4),
+                // No such recipe → rejected, so this batch was not stored whole.
+                submitted("9", vec![food(100.0, None)], 4),
+            ],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.accepted, 1);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(
+            last_run_status(&conn, "enrich_nutrition").await,
+            runs::PARTIAL,
+            "a dropped reading is work the run was handed and did not do"
+        );
+    }
+
+    /// A figure no food could have is rejected, and that too makes the run `partial`
+    /// rather than clean — an invalid reading is dropped work like any other.
+    #[tokio::test]
+    async fn an_impossible_figure_makes_the_run_partial() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[line("Flour", Some("g"), true)]).await;
+        let report = submit(
+            &conn,
+            vec![submitted("1", vec![food(99_999.0, None)], 4)],
+            "m",
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.accepted, 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(
+            last_run_status(&conn, "enrich_nutrition").await,
+            runs::PARTIAL
+        );
     }
 
     /// A stale run cannot overwrite a newer reading, and the push says so rather than
