@@ -131,6 +131,53 @@ the model extracts, code converts/scales — never ask the model to do arithmeti
   `structured: None` and the site serves raw measures. Enrichment is an
   addition, never a gate.
 
+## Nutrition is the arithmetic case for split-by-strength (#162)
+
+The fourth enrichment (`nutrition_structures`, migration 0023) is where "the
+model extracts, deterministic code converts and scales" gets its hardest test,
+because a recipe's energy is **almost entirely arithmetic**. The rule holds
+anyway, and the shape it forces is worth stating:
+
+- The model supplies, per ingredient line, two facts about the **food** —
+  `kcal_per_100g`, and `grams_per_unit` (the mass of one of that line's unit:
+  one cup, one clove, one egg). Neither number grows with the recipe.
+- `recipe_core::nutrition` multiplies by the quantity the #11 reading already
+  captured, converts off the unit table in `measure`, and sums. **A scaled
+  recipe therefore comes out right for free** — `StructuredMeasure::scaled`
+  already scales the quantity, and nothing nutrition-specific has to know about
+  it.
+- Deterministic code wins wherever it can answer: a mass unit is weighed from
+  the unit table and the reading is not consulted, and a stated size
+  (`1 (14 oz) can`) is multiplied out rather than asked about. The reading
+  covers only the residue, and the pull tells the worker per line which residue
+  that is (`weighable`).
+
+Two rulings that go with it:
+
+- **Servings is read, not invented and not skipped.** No source carries a yield,
+  and a bare total is ambiguous exactly where it matters — 2,400 kcal is a
+  reasonable tray of lasagne and an absurd plate of it. Per #158 an unread count
+  is a gap in our reading, not a property of the dish, so the reading supplies
+  one (1–100, required) the way the step reading supplies a duration. `recipes`
+  stores the **whole-recipe** total plus `servings`; per-serving is a division
+  the surface does, not a fourth stored column that could disagree with the two
+  it came from.
+- **The estimate says how well we know it.** `kcal_complete` is the peer of
+  `fully_timed`: `0` when a line stated a number nothing could weigh, so the
+  total can only be too low. A line with _no_ number ("salt, to taste") does not
+  clear it — that is not a failed reading, and flagging it would leave the flag
+  permanently 0. The unmeasurable tail is hedged once at the surface (#84),
+  never rendered as a confident exact figure.
+
+The capture is keyed per `(source, id)` like the other three, not per ingredient
+name, even though energy density is a fact about a food. Most of what the model
+supplies is per _line_ (the unit comes from the line); ingredient names have no
+forcing function to normalise them the way a kitchen's picker normalises
+equipment names (#81); and the whole cascade — the pull's left join, the count
+check, the `run_id` guard, the targeted re-derive — is keyed that way. A
+per-food table can still be **derived** from these readings later, which is more
+than a per-food capture would have given.
+
 ## Boot degrades, it does not die (#146)
 
 **The process binds its port and serves before it has ever talked to the

@@ -17,6 +17,8 @@
 //!   recipe-backend enrich push              POST readings (from stdin) to the app
 //!   recipe-backend steps pull [--limit N]   GET the app's pending methods (#74)
 //!   recipe-backend steps push               POST step DAGs (from stdin) to the app
+//!   recipe-backend nutrition pull [--limit N] GET the app's pending nutrition (#162)
+//!   recipe-backend nutrition push            POST nutrition readings (from stdin)
 //!   recipe-backend mcp                       MCP stdio server: enrich/step pull/push tools
 
 mod admin;
@@ -33,6 +35,8 @@ mod error;
 mod ingest;
 mod kitchens;
 mod mcp;
+mod nutrition;
+mod nutrition_api;
 mod proxy;
 mod recipes;
 mod runs;
@@ -236,6 +240,11 @@ pub fn app(state: AppState) -> Router {
         .route("/enrich/steps/results", post(step_api::results))
         .route("/enrich/equipment/pending", get(equipment_api::pending))
         .route("/enrich/equipment/results", post(equipment_api::results))
+        // The nutrition queue (#162): the same machine-gated shape again, for reading
+        // what a recipe costs you. Machine-gated for the same reason as the rest — the
+        // worker is infrastructure, and the app is what writes the corpus.
+        .route("/enrich/nutrition/pending", get(nutrition_api::pending))
+        .route("/enrich/nutrition/results", post(nutrition_api::results))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -497,6 +506,29 @@ async fn main() -> anyhow::Result<()> {
             _ => {
                 eprintln!(
                     "usage: recipe-backend equipment pull [--limit N] | recipe-backend equipment push"
+                );
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+
+    // The nutrition queue's worker side (#162) — same shape again, another path.
+    if std::env::args().nth(1).as_deref() == Some("nutrition") {
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                nutrition_api::client::pull(limit).await?;
+            }
+            Some("push") => nutrition_api::client::push().await?,
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend nutrition pull [--limit N] | recipe-backend nutrition push"
                 );
                 std::process::exit(2);
             }
@@ -1035,6 +1067,162 @@ mod tests {
             0,
             "reading stored → no longer pending"
         );
+    }
+
+    fn nutrition_pending_req(auth: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("GET")
+            .uri("/api/enrich/nutrition/pending");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    fn nutrition_results_req(auth: Option<&str>, body: &str) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/enrich/nutrition/results")
+            .header("content-type", "application/json");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    /// The nutrition queue sits behind the same machine gate as every other worker
+    /// endpoint (#162): no key, no entry, and a valid session does not open it either.
+    #[tokio::test]
+    async fn nutrition_endpoints_require_the_api_key_not_a_session() {
+        let (app, conn) = test_app().await;
+        for req in [
+            nutrition_pending_req(None),
+            nutrition_results_req(None, r#"{"model":"m","readings":[]}"#),
+        ] {
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/enrich/nutrition/pending")
+                    .header("cookie", format!("recipes_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session must not open the nutrition queue"
+        );
+    }
+
+    /// End to end through the router (#162), and the acceptance for the whole
+    /// enrichment: the worker only ever speaks HTTP+JSON, the **app** does every piece
+    /// of arithmetic, and the derived recipe comes out carrying a total nobody sent it.
+    ///
+    /// The recipe is one line of 500 g flour. The worker submits a density and a
+    /// serving count — no total, no per-line calories — and the app derives
+    /// 500 g × 364 kcal/100 g = 1,820 kcal.
+    #[tokio::test]
+    async fn nutrition_pending_then_results_derives_a_total_the_worker_never_sent() {
+        let (app, conn) = test_app().await;
+        conn.execute(
+            "INSERT INTO raw_imports (source, id, raw, source_url) VALUES ('themealdb','1',?1,?2)",
+            libsql::params![
+                r#"{"meals":[{"idMeal":"1","strMeal":"T","strInstructions":"go","strIngredient1":"Flour","strMeasure1":"500 g"}]}"#,
+                "https://www.themealdb.com/api/json/v1/1/lookup.php?i=1"
+            ],
+        )
+        .await
+        .unwrap();
+        derive::derive(&conn, None, 1).await.unwrap();
+
+        let auth = "Bearer test-ingest-key";
+
+        // Nothing is offered yet: the ingredient measures have not been read, so there
+        // would be no quantity to multiply.
+        let res = app
+            .clone()
+            .oneshot(nutrition_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            pending.as_array().unwrap().len(),
+            0,
+            "nutrition waits on the ingredient reading"
+        );
+
+        // Read the measures first, through the app, exactly as the worker would.
+        let submit = r#"{"model":"m","readings":[{"source":"themealdb","id":"1","readings":[{"item":"flour","amount":{"kind":"quantified","quantity":{"kind":"exact","value":500.0},"unit":"g","size":null},"preparation":null,"note":null}]}]}"#;
+        let res = app
+            .clone()
+            .oneshot(enrich_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Now it is offered, and the pull says the app can already weigh the line.
+        let res = app
+            .clone()
+            .oneshot(nutrition_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 1);
+        assert_eq!(pending[0]["id"], "1");
+        assert_eq!(pending[0]["ingredients"][0]["unit"], "g");
+        assert_eq!(pending[0]["ingredients"][0]["weighable"], true);
+
+        // The worker submits facts about the food, and a serving count. No total.
+        let submit = r#"{"model":"claude-opus-4-8","readings":[{"source":"themealdb","id":"1","servings":4,"foods":[{"kcal_per_100g":364.0}]}]}"#;
+        let res = app
+            .clone()
+            .oneshot(nutrition_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["accepted"], 1);
+        assert_eq!(report["derived"], 1);
+
+        // The app did the arithmetic, and the derived view holds it.
+        let mut rows = conn
+            .query(
+                "SELECT kcal, servings, kcal_complete FROM recipes WHERE id = '1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Option<i64>>(0).unwrap(), Some(1820));
+        assert_eq!(row.get::<Option<i64>>(1).unwrap(), Some(4));
+        assert_eq!(row.get::<i64>(2).unwrap(), 1);
+
+        // And the recipe leaves the queue.
+        let res = app
+            .oneshot(nutrition_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 0);
     }
 
     /// A blank model is a bad request, not a silently-stored placeholder (CodeRabbit).

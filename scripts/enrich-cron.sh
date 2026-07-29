@@ -90,6 +90,7 @@ PLUGIN_DIR="$REPO/plugins/recipes-enrich"
 ING_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__enrich_pull,mcp__plugin_recipes-enrich_recipes-enrich__enrich_push"
 STEP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__step_pull,mcp__plugin_recipes-enrich_recipes-enrich__step_push"
 EQUIP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__equipment_pull,mcp__plugin_recipes-enrich_recipes-enrich__equipment_push"
+NUTR_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__nutrition_pull,mcp__plugin_recipes-enrich_recipes-enrich__nutrition_push"
 
 ING_PROMPT="Drain the recipes ingredient enrichment queue now. Loop: call enrich_pull, \
 read each returned recipe's ingredient lines into StructuredMeasure readings, then \
@@ -105,6 +106,12 @@ as well as appliances, since a salad still needs a bowl, a knife and a board —
 every name normalised (lowercase, trimmed, single-spaced), then call equipment_push; \
 repeat until equipment_pull returns an empty array. Use only the equipment_pull and \
 equipment_push tools."
+NUTR_PROMPT="Drain the recipes nutrition-reading queue now. Loop: call nutrition_pull, \
+read each returned recipe into one {kcal_per_100g, grams_per_unit} per ingredient in \
+order — facts about the food, never this recipe's totals, and grams_per_unit only where \
+the line is not already weighable — plus how many people it serves, then call \
+nutrition_push; repeat until nutrition_pull returns an empty array. Do no arithmetic; \
+the app sums. Use only the nutrition_pull and nutrition_push tools."
 
 # --- drain one queue -------------------------------------------------------------
 # Peek the queue cheaply via the CLI (a read-only pull; it does not consume). While
@@ -169,4 +176,14 @@ fi
 # large backfill it would simply never run. Gate what depends; run what does not.
 drain_queue equipment "$PLUGIN_DIR/skills/enrich-equipment/SKILL.md" \
   "$EQUIP_TOOLS" "$EQUIP_PROMPT" \
+  || true # a backlog just waits for the next run
+
+# Nutrition (#162) genuinely depends on the ingredient reading — there is no quantity to
+# multiply without it — but it is not gated here either, because that dependency is
+# enforced where it cannot be got wrong: `nutrition pending` only offers recipes whose
+# ingredient lines already carry a structured measure. A shell gate would be a second,
+# weaker copy of a rule the query already guarantees, and on a large backfill it would
+# stall a queue that has work it can legitimately do.
+drain_queue nutrition "$PLUGIN_DIR/skills/enrich-nutrition/SKILL.md" \
+  "$NUTR_TOOLS" "$NUTR_PROMPT" \
   || true # a backlog just waits for the next run

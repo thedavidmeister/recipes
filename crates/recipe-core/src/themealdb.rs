@@ -96,6 +96,12 @@ impl Meal {
             // Likewise: what a recipe needs is read off the service (#81), never
             // guessed from the source's fields.
             equipment: Vec::new(),
+            // And likewise nutrition (#162). TheMealDB carries neither a nutrition
+            // block nor a yield field, so there is nothing here to map these from —
+            // both are readings, and `servings` is a reading even though it looks
+            // like the kind of thing a source would state.
+            nutrition: Vec::new(),
+            servings: None,
             // http(s) only — strSource/strYoutube/strMealThumb are third-party data
             // we do not control. http_url also subsumes the old empty-string filter.
             source_url: self.source_url.and_then(|s| crate::adapters::http_url(&s)),

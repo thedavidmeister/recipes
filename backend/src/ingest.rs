@@ -158,6 +158,11 @@ mod tests {
                 instructions: "Cook it.".to_string(),
                 steps: Vec::new(),
                 equipment: Vec::new(),
+                // Unread, like every other reading on this fixture: the outcome under
+                // test is the run's, not the corpus's, and an invented figure here
+                // would be a fixture asserting a calorie count no source ever gave.
+                nutrition: Vec::new(),
+                servings: None,
                 source_url: None,
                 video_url: None,
             },

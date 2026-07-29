@@ -86,6 +86,25 @@ impl Quantity {
             },
         }
     }
+
+    /// The single number this quantity stands for when exactly one is needed.
+    ///
+    /// A range collapses to its **midpoint**. `Quantity` keeps both ends because
+    /// "2-3 cloves" is what the source said and flattening it at read time would
+    /// throw the range away for good — but some arithmetic has no room for two
+    /// answers, and the nutrition sum (#162) is the first: adding a range to a range
+    /// across a dozen ingredients yields a spread nobody can act on, and the low end
+    /// of every range at once is a recipe no cook makes.
+    ///
+    /// The midpoint is a *choice*, not a fact, which is why it lives here as a named
+    /// operation rather than inline in a caller: anywhere a range has been flattened,
+    /// this function is in the stack trace.
+    pub fn midpoint(&self) -> f64 {
+        match *self {
+            Quantity::Exact { value } => value,
+            Quantity::Range { low, high } => (low + high) / 2.0,
+        }
+    }
 }
 
 impl Amount {
@@ -151,6 +170,26 @@ impl StructuredMeasure {
             amount: Some(self.amount.as_ref()?.converted(to_unit)?),
             ..self.clone()
         })
+    }
+}
+
+/// The mass in grams of **one** `unit`, or `None` when `unit` is not a mass unit at
+/// all — a volume (`"cup"`), a count (`"clove"`), a package (`"can"`), or a typo.
+///
+/// The unit table's answer for the one question the nutrition sum (#162) asks of it:
+/// *how many grams is this?* Exposed rather than re-derived by the caller because
+/// there must be exactly one gram-per-ounce in this codebase, and it is the one
+/// [`Amount::converted`] already uses.
+///
+/// **`None` is the important half.** Everything this returns is exact arithmetic from
+/// a fixed table; everything it refuses needs a fact about the *food* (how much a cup
+/// of flour weighs, how much one clove weighs) that no unit table can hold. That line
+/// is precisely where the model's reading takes over from deterministic code — see
+/// [`crate::nutrition::FoodEnergy::grams_per_unit`].
+pub fn grams_of(unit: &str) -> Option<f64> {
+    match parse_unit(unit)? {
+        (Dimension::Mass, grams) => Some(grams),
+        (Dimension::Volume, _) => None,
     }
 }
 
@@ -268,6 +307,55 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A range collapses to its midpoint, an exact value to itself. The midpoint is
+    /// the one place a range is flattened, so it is pinned here rather than trusted.
+    #[test]
+    fn midpoint_collapses_a_range_and_leaves_an_exact_value_alone() {
+        assert_eq!(exact(2.0).midpoint(), 2.0);
+        assert_eq!(
+            Quantity::Range {
+                low: 2.0,
+                high: 3.0
+            }
+            .midpoint(),
+            2.5
+        );
+        // A degenerate range is its own midpoint — no special case needed.
+        assert_eq!(
+            Quantity::Range {
+                low: 4.0,
+                high: 4.0
+            }
+            .midpoint(),
+            4.0
+        );
+    }
+
+    /// `grams_of` answers only for mass units, and refuses everything that needs a
+    /// fact about the food rather than about the unit — which is the line the
+    /// nutrition reading (#162) picks up from.
+    #[test]
+    fn grams_of_answers_for_mass_and_refuses_volume_counts_and_nonsense() {
+        assert_eq!(grams_of("g"), Some(1.0));
+        assert_eq!(grams_of("kg"), Some(1000.0));
+        assert!((grams_of("oz").unwrap() - 28.349_52).abs() < 1e-6);
+        assert!((grams_of("lb").unwrap() - 453.592_4).abs() < 1e-6);
+        // Same case/plural/trailing-dot tolerance as every other unit lookup.
+        assert_eq!(grams_of("Grams"), Some(1.0));
+        assert!(grams_of("oz.").is_some());
+
+        // A volume has no mass without a density; a count and a package have none
+        // without knowing the food. All three are the model's half of #162.
+        assert_eq!(grams_of("cup"), None);
+        assert_eq!(grams_of("ml"), None);
+        assert_eq!(grams_of("clove"), None);
+        assert_eq!(grams_of("can"), None);
+        assert_eq!(grams_of("wat"), None);
+        // "fl oz" is volume even though "oz" is mass — the distinction recipes rely
+        // on, and getting it wrong here would silently mass-ify every liquid.
+        assert_eq!(grams_of("fl oz"), None);
     }
 
     #[test]
