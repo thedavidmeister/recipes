@@ -10,6 +10,11 @@
       "name": "recipes-enrich",
       "source": "./plugins/recipes-enrich",
       "description": "The corpus enrichment worker: fixed pull -> read -> push loops that read a recipe's ingredient lines into structured measures, its method into a step DAG, the equipment it requires, and the energy density of each food it uses \u2014 using recipe-backend as its only I/O."
+    },
+    {
+      "name": "recipes-audit",
+      "source": "./plugins/recipes-audit",
+      "description": "The judgement half of this repo's gates (#176), for defects that are type-correct, lint-clean, tested and green and still describe something untrue: `audit-change` reviews a diff against its claimed intent and against the tree that moved under it, `audit-corpus` measures the tree against the live corpus. Anything mechanical enough to be a gate is one already, in CI."
     }
   ]
 }
