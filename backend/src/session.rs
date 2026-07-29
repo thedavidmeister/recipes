@@ -1529,11 +1529,11 @@ async fn set_time_cap(
     Ok(written > 0)
 }
 
-/// Everything about a plan that bounds the walk it deals (#80, #82).
+/// Everything about a plan that bounds the walk it deals (#80, #82, #184).
 ///
 /// One struct and one read, rather than a query per facet: the walk resolves the whole
-/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen)
-/// would otherwise be another round trip on the pick page's hot path.
+/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen,
+/// #184's meal) would otherwise be another round trip on the pick page's hot path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanBounds {
     /// The total-time cap in seconds (#80); `None` = "Any".
@@ -1542,6 +1542,13 @@ pub struct PlanBounds {
     /// (#82); `None` for a plan started outside a kitchen. Unconditional — there is no
     /// flag, because a meal planned in a kitchen is cooked in that kitchen.
     pub kitchen_id: Option<String>,
+    /// Which meal this plan is for (#114). The pick's one round deals *the meal*, so
+    /// the walk keeps that round clear of dishes the corpus states are accompaniments
+    /// (#184) — the choice a host makes in the lobby reaching the deck at last.
+    ///
+    /// Not an `Option`: migration 0016 made the column `NOT NULL DEFAULT 'dinner'` and
+    /// the create handler applies the same default, so every plan is for some meal.
+    pub meal_type: MealType,
 }
 
 /// A session's bounds, for the walk: `Ok(None)` is an unknown session, `Ok(Some(..))`
@@ -1551,7 +1558,7 @@ pub struct PlanBounds {
 pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Option<PlanBounds>> {
     let mut rows = conn
         .query(
-            "SELECT max_total_seconds, kitchen_id
+            "SELECT max_total_seconds, kitchen_id, meal_type
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1559,9 +1566,17 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
+    // Same ruling as [`load_lobby`]: every writer of this column validates against the
+    // vocabulary, so a stored word outside it is corruption. Fail loud rather than
+    // quietly fall back to the default and deal a deck bounded by a meal nobody chose.
+    let meal_raw: String = row.get(2)?;
+    let meal_type = MealType::parse(&meal_raw).ok_or_else(|| {
+        anyhow::anyhow!("pick_sessions.meal_type outside the vocabulary: {meal_raw:?}")
+    })?;
     Ok(Some(PlanBounds {
         max_total_seconds: row.get(0)?,
         kitchen_id: row.get(1)?,
+        meal_type,
     }))
 }
 
@@ -2776,8 +2791,57 @@ mod tests {
             Some(PlanBounds {
                 max_total_seconds: Some(7200),
                 kitchen_id: None,
+                meal_type: MealType::Dinner,
             })
         );
+    }
+
+    /// The walk's read carries which meal the plan is for (#114/#184), so the deck a
+    /// host is dealt is bounded by the answer they gave in the lobby — the whole point
+    /// of asking. Every word of the vocabulary survives the round trip: the column is
+    /// text, so a bad write and a bad read look identical from the walk's side.
+    #[tokio::test]
+    async fn plan_bounds_carry_the_plans_meal() {
+        let conn = conn().await;
+        for meal in [
+            MealType::Breakfast,
+            MealType::Lunch,
+            MealType::Dinner,
+            MealType::Snack,
+        ] {
+            let channel = format!("plan-{}", meal.as_str());
+            create_session(&conn, &channel, "alice", None, None, meal, &[], None)
+                .await
+                .unwrap();
+            assert_eq!(
+                plan_bounds(&conn, &channel).await.unwrap(),
+                Some(PlanBounds {
+                    max_total_seconds: None,
+                    kitchen_id: None,
+                    meal_type: meal,
+                }),
+                "a {meal:?} plan bounds its walk to {meal:?}"
+            );
+        }
+    }
+
+    /// A stored word outside the vocabulary is corruption, and the bounds read fails
+    /// loud rather than falling back to the default — the same ruling `load_lobby`
+    /// already makes. Falling back would be worse here than in the lobby: the lobby at
+    /// least shows the wrong word, while a silently-defaulted bound deals a deck for a
+    /// meal nobody chose and says nothing.
+    #[tokio::test]
+    async fn plan_bounds_refuse_a_corrupt_meal_type() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by, meal_type)
+             VALUES ('c', 'alice', 'brunch')",
+            (),
+        )
+        .await
+        .unwrap();
+        let err = plan_bounds(&conn, "c").await.unwrap_err().to_string();
+        assert!(err.contains("brunch"), "the bad word is named: {err}");
     }
 
     // ---- the kitchen limit (#82) -------------------------------------------
@@ -2827,6 +2891,7 @@ mod tests {
             Some(PlanBounds {
                 max_total_seconds: None,
                 kitchen_id: Some(kid),
+                meal_type: MealType::Dinner,
             })
         );
         assert_eq!(
