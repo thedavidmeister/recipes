@@ -8,6 +8,7 @@
 
 pub mod adapters;
 pub mod equipment;
+pub mod meal;
 pub mod measure;
 pub mod models;
 pub mod nutrition;
