@@ -80,16 +80,17 @@ export const Breakfast: Story = {
   },
 };
 
-/** Dinner with things alongside (#114): the host toggled dessert and drinks on,
- * so the chosen pills fill in and the heading gains its quiet "with dessert &
- * drink" line — the room decides the dinner; these come with it. */
+/** Dinner with things alongside (#114): the host toggled dessert and a side on, so
+ * the chosen pills fill in — both of them, the whole tier — and the heading gains
+ * its quiet "with dessert & side" line; the room decides the dinner, these come
+ * with it. */
 export const WithAdditions: Story = {
   args: {
     status: "ready",
     host: true,
     hostId: "4242",
     mealType: "dinner",
-    additions: ["dessert", "drink"],
+    additions: ["dessert", "side"],
     inviteLink: invite,
     voters: [{ telegram_user_id: "4242", username: "dave" }],
   },
@@ -154,7 +155,7 @@ export const Guest: Story = {
     host: false,
     hostId: "4242",
     mealType: "snack",
-    additions: ["drink"],
+    additions: ["side"],
     // Pinned open rather than inheriting the born default, so the guest view is
     // declared both ways: `GuestSeesTheCap` is the bound one, this is the plan a
     // host has widened, where there is no line to read at all.

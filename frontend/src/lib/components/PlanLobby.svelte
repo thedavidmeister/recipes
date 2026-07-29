@@ -163,7 +163,7 @@
   // Display-only sentence-casing over an ASCII vocabulary; the wire stays lowercase.
   const mealLabel = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
 
-  // "with dessert & drink" — additions as a quiet prose list.
+  // "with dessert & side" — additions as a quiet prose list.
   const listAdditions = (list: MealAddition[]) =>
     list.length <= 1
       ? (list[0] ?? "")
@@ -235,7 +235,7 @@
     </p>
     {#if additions.length}
       <!-- The secondary tier, quietly: the room is deciding a dinner; the dessert
-           and drinks come with it. -->
+           and the side come with it. -->
       <p class="mt-1 text-sm text-stone-500">
         with {listAdditions(additions)}
       </p>

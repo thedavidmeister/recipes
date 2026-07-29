@@ -1,13 +1,15 @@
 -- A meal plan is FOR a meal (#114), in a two-tier vocabulary. The primary tier
 -- is the meals you sit down to — breakfast, lunch, dinner, snack — and a plan is
 -- for exactly one of them. The secondary tier is what comes WITH a meal —
--- dessert, side, drink — and a plan can carry several, or none. The tiers are
--- separate Rust types (session::MealType / session::MealAddition), so a plan
--- "for dessert" or an addition of "dinner" is unrepresentable, refused at the
--- wire before any handler runs. Both are fixed closed sets — not free text —
--- chosen by the host, up front, in the lobby (#93), so a picker over them can be
--- exhaustive and stable. Always lowercase; the browser sentence-cases for
--- display.
+-- dessert, side — and a plan can carry several, or none. (This migration shipped
+-- with a third secondary word, 'drink'; #185 took it out, because no source we
+-- ingest carries drinks. No stored row ever held it, so there was nothing here
+-- to backfill.) The tiers are separate Rust types (session::MealType /
+-- session::MealAddition), so a plan "for dessert" or an addition of "dinner" is
+-- unrepresentable, refused at the wire before any handler runs. Both are fixed
+-- closed sets — not free text — chosen by the host, up front, in the lobby
+-- (#93), so a picker over them can be exhaustive and stable. Always lowercase;
+-- the browser sentence-cases for display.
 --
 -- meal_type NOT NULL DEFAULT 'dinner': a plan is always for *some* meal, and
 -- dinner is the meal a group most plausibly plans together — the same default
@@ -16,7 +18,7 @@
 -- until the swiping starts; after that the roster voted under it, so it is
 -- fixed.
 --
--- additions: a JSON array of secondary words ('["dessert","drink"]'), each at
+-- additions: a JSON array of secondary words ('["dessert","side"]'), each at
 -- most once, in vocabulary order; '[]' is a plain meal and the backfill for
 -- pre-migration rows. Same lobby-open editability, same freeze at start.
 -- Chosen additions are recorded and shown to the room; the pick itself still
