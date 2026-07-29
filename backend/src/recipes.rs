@@ -117,10 +117,17 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
     // different data — the `fully_timed` precedent exactly.
     let kcal_complete = i64::from(energy.is_some_and(|e| e.complete()));
     let servings = recipe.servings.map(i64::from);
+    // The meal-time reading (#191) `derive` has just reattached: the set of sittings the
+    // dish suits. Named in the INSERT *and* in the ON CONFLICT SET below — the #161
+    // lesson, which is that a derived column the sole writer of this table never lists is
+    // recomputed and thrown away on every run, invisibly, for as long as nothing needs
+    // it. The walk reads this column on every channelled request, so it has to actually
+    // hold the reading.
+    let sittings = serde_json::to_string(&recipe.sittings)?;
     conn.execute(
         "INSERT INTO recipes
-            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, fully_timed, equipment, nutrition, servings, kcal, kcal_complete, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            (source, id, title, image, category, area, tags, ingredients, instructions, source_url, video_url, steps, total_seconds, fully_timed, equipment, nutrition, servings, kcal, kcal_complete, sittings, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(source, id) DO UPDATE SET
             title        = excluded.title,
             image        = COALESCE(NULLIF(excluded.image, ''), recipes.image),
@@ -166,6 +173,13 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
                                 THEN excluded.kcal ELSE recipes.kcal END,
             kcal_complete = CASE WHEN json_array_length(excluded.nutrition) > 0
                                 THEN excluded.kcal_complete ELSE recipes.kcal_complete END,
+            -- Merge-non-empty like `equipment`, and for the same sharp reason: `[]` is
+            -- not a reading here, it is the absence of one (#191 refuses an empty set on
+            -- the way in, because every dish is eaten at some time), so an incoming empty
+            -- must never blank a reading we hold. A category browse would otherwise
+            -- silently un-read the corpus and quietly widen every plan's deck.
+            sittings     = CASE WHEN json_array_length(excluded.sittings) > 0
+                                THEN excluded.sittings ELSE recipes.sittings END,
             source_url   = COALESCE(NULLIF(excluded.source_url, ''), recipes.source_url),
             video_url    = COALESCE(NULLIF(excluded.video_url, ''), recipes.video_url),
             fetched_at   = unixepoch(),
@@ -191,6 +205,7 @@ pub(crate) async fn upsert(conn: &Connection, recipe: &Recipe, run_id: i64) -> a
             servings,
             kcal,
             kcal_complete,
+            sittings,
             run_id,
         ],
     )
@@ -248,6 +263,7 @@ mod tests {
             equipment: Vec::new(),
             nutrition: Vec::new(),
             servings: None,
+            sittings: Vec::new(),
             source_url: None,
             video_url: None,
         }
@@ -269,6 +285,7 @@ mod tests {
             equipment: Vec::new(),
             nutrition: Vec::new(),
             servings: None,
+            sittings: Vec::new(),
             source_url: None,
             video_url: None,
         }
@@ -788,5 +805,84 @@ mod tests {
         let (_, servings, kcal, _) = read_nutrition(&conn, "1").await;
         assert_eq!(kcal, Some(500));
         assert_eq!(servings, Some(2));
+    }
+
+    // --- The meal-time reading (#191) ------------------------------------------
+
+    async fn read_sittings(conn: &Connection, id: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT sittings FROM recipes WHERE source = 'themealdb' AND id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    /// **The #161 round-trip, written with the migration rather than after it.** The
+    /// equipment reading was correctly produced and reattached for months while `upsert`
+    /// never listed the column, so all 790 rows read `[]` and nobody could tell. The
+    /// walk reads this column on every channelled request, so it has to hold the
+    /// reading — and this is the test that says the sole writer names it.
+    #[tokio::test]
+    async fn upsert_stores_the_meal_time_reading() {
+        let conn = conn().await;
+        let mut r = sample();
+        r.sittings = vec![recipe_core::Sitting::Lunch, recipe_core::Sitting::Dinner];
+        upsert(&conn, &r, 1).await.unwrap();
+        assert_eq!(read_sittings(&conn, "1").await, r#"["lunch","dinner"]"#);
+    }
+
+    /// A recipe nobody has read stores `[]` — the degrade-not-die state, which reads as
+    /// "unread" and narrows nobody's deck, never as "eaten at no sitting" (#191 refuses
+    /// an empty reading on the way in, so `[]` can only mean unread).
+    #[tokio::test]
+    async fn an_unread_recipe_stores_no_sittings() {
+        let conn = conn().await;
+        upsert(&conn, &sample(), 1).await.unwrap();
+        assert_eq!(read_sittings(&conn, "1").await, "[]");
+    }
+
+    /// Merge-non-empty, and here it matters as much as it does for equipment: `[]` is
+    /// the absence of a reading, so an incoming empty must never blank one we hold. A
+    /// category browse would otherwise silently un-read the corpus and quietly widen
+    /// every plan's deck back to everything.
+    #[tokio::test]
+    async fn a_partial_does_not_clobber_the_stored_sittings() {
+        let conn = conn().await;
+        let mut full = sample();
+        full.sittings = vec![recipe_core::Sitting::Dinner];
+        upsert(&conn, &full, 1).await.unwrap();
+
+        upsert(&conn, &partial(), 1).await.unwrap();
+        assert_eq!(
+            read_sittings(&conn, "1").await,
+            r#"["dinner"]"#,
+            "an unread partial must not blank the stored reading"
+        );
+    }
+
+    /// A fresh reading still replaces a stored one, so a re-read that narrows a dish
+    /// takes effect rather than being frozen out by the merge.
+    #[tokio::test]
+    async fn a_fresh_reading_replaces_the_stored_sittings() {
+        let conn = conn().await;
+        let mut r = sample();
+        r.sittings = vec![
+            recipe_core::Sitting::Breakfast,
+            recipe_core::Sitting::Lunch,
+            recipe_core::Sitting::Dinner,
+        ];
+        upsert(&conn, &r, 1).await.unwrap();
+
+        r.sittings = vec![recipe_core::Sitting::Dinner];
+        upsert(&conn, &r, 2).await.unwrap();
+        assert_eq!(read_sittings(&conn, "1").await, r#"["dinner"]"#);
     }
 }

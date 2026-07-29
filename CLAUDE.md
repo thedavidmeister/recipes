@@ -178,6 +178,45 @@ check, the `run_id` guard, the targeted re-derive — is keyed that way. A
 per-food table can still be **derived** from these readings later, which is more
 than a per-food capture would have given.
 
+## When a dish is eaten is read, not inferred (#191)
+
+The fifth enrichment (`meal_time_structures`, migration 0024) is the one that makes a
+control work. A plan asks **"which meal"**, and nothing the corpus *states* can answer
+it: there is no `Lunch`, `Dinner` or `Snack` category at all, and `Breakfast` is 19 of
+790. #188 narrowed a meal round as far as stated data allows — it drops the 264 dishes
+the corpus says accompany a meal — and that exclusion is identical for all four words.
+
+- **The reading is a set of sittings**, per recipe, from `breakfast`/`lunch`/`dinner`/
+  `snack`: a chicken curry is `{lunch, dinner}`, a roast is `{dinner}`. A single label
+  would be wrong on its face, since most dishes suit more than one sitting.
+- **It is the same type the lobby uses.** `session::MealType` **is**
+  `recipe_core::meal::Sitting`, not a lookalike beside it, so the walk's bound is
+  literally `sittings.contains(&meal)` — no mapping, and so no second chance to disagree
+  about what "dinner" means.
+- **An empty set is refused on the way in.** Every dish is eaten at some time, so an
+  empty reading is a failed reading, not a fact about the food (#158 on durations, #162
+  on servings, #81 on an empty equipment list). That refusal is what lets `[]` mean
+  *unread* everywhere downstream.
+
+**The rollout: unread is unrestricted, per recipe.** `meal::fit` answers `Suits`,
+`Wrong` or `Unread`, and the walk deals `Unread` — `Capability::Unread`'s ruling (#82)
+and #158's, that a missing reading is a gap in ours rather than a property of the dish.
+Two things follow, and both should be said out loud rather than discovered:
+
+- **The day this merged, nothing had been read**, because the reading is produced off
+  the service by a worker somebody runs (#59) — deploying it creates no rows. So a
+  dinner plan kept dealing dishes nobody had called dinners. Excluding unread recipes
+  instead would have dealt an **empty deck** until a person noticed.
+- **There is no switch to forget.** The rule is per recipe, not a corpus-wide mode, so
+  the deck tightens exactly as fast as the corpus is read and is fully strict the moment
+  it is complete. The requirement — a plan for a meal shows recipes that are explicitly
+  that meal — is met by *reading the corpus*, and the filter is what makes it true the
+  moment each reading exists.
+
+The stated-accompaniment rule (#184) still runs first and still wins: a trifle read as
+`{dinner}` is correct and is still not the dinner. #147's per-addition rounds are what
+will deal it, and they read this same table from the other direction.
+
 ## Boot degrades, it does not die (#146)
 
 **The process binds its port and serves before it has ever talked to the

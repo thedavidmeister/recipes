@@ -102,6 +102,7 @@ impl Meal {
             // like the kind of thing a source would state.
             nutrition: Vec::new(),
             servings: None,
+            sittings: Vec::new(),
             // http(s) only — strSource/strYoutube/strMealThumb are third-party data
             // we do not control. http_url also subsumes the old empty-string filter.
             source_url: self.source_url.and_then(|s| crate::adapters::http_url(&s)),

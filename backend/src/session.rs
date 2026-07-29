@@ -157,7 +157,14 @@ struct TallyRow {
 /// Which meal a plan is for (#114): the strongest filter there is on what belongs
 /// in the deck — nobody swipes pancakes and a lamb roast in the same session.
 ///
-/// The full vocabulary is two tiers, and the tier is the type. This enum is the
+/// **The same type the corpus is read into** ([`recipe_core::meal::Sitting`], #191), not
+/// a lookalike beside it. That reading answers "when is this dish eaten" with a set of
+/// these words, and the walk's bound is then literally `sittings.contains(&meal)` — no
+/// mapping, and so no second chance to disagree about what "dinner" means. The
+/// vocabulary used to say a coming meal-type reading "can share the same words"; sharing
+/// the type is how it does.
+///
+/// The full vocabulary is two tiers, and the tier is the type. This one is the
 /// **primary** tier — the meals you sit down to: breakfast, lunch, dinner, a
 /// snack. The **secondary** tier ([`MealAddition`]: dessert, side) is the things
 /// that come *with* a meal. Splitting them into two types is what makes
@@ -167,20 +174,22 @@ struct TallyRow {
 /// wire, no handler checks anything.
 ///
 /// A **fixed vocabulary**, not free text: unlike ingredients this is a small
-/// closed set, so a picker over it can be exhaustive and stable, and the coming
-/// meal-type reading of the corpus can share the same words (the union of both
-/// tiers). Serde owns the wire form — always the lowercase name, and an unknown
-/// or wrongly-cased value is rejected at deserialization, so no handler ever
-/// holds a word outside its tier. The browser sentence-cases for display; the
-/// wire and the database stay lowercase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MealType {
-    Breakfast,
-    Lunch,
-    Dinner,
-    Snack,
-}
+/// closed set, so a picker over it can be exhaustive and stable. Serde owns the wire
+/// form — always the lowercase name, and an unknown or wrongly-cased value is rejected
+/// at deserialization, so no handler ever holds a word outside its tier. The browser
+/// sentence-cases for display; the wire and the database stay lowercase.
+pub type MealType = recipe_core::meal::Sitting;
+
+/// A plan that names no meal is for dinner — the meal a group most plausibly
+/// plans together. The same word migration 0016 backfills, so an unstated choice
+/// and a pre-migration row read identically. Not time-of-day inference: it is one
+/// fixed word, and the host changes it in the lobby if it is wrong.
+///
+/// A constant here rather than a `Default` on the type, because it is a decision about
+/// **a plan** and not about the vocabulary: a *dish* has no default sitting, and giving
+/// the shared type one would let a reading quietly default to dinner instead of being
+/// refused as empty (#191).
+pub const DEFAULT_MEAL_TYPE: MealType = MealType::Dinner;
 
 /// A secondary choice on a plan (#114): something that comes *with* the meal — a
 /// dessert, a side — never the meal itself. See [`MealType`] for the two-tier
@@ -224,40 +233,6 @@ fn normalize_additions(input: &[MealAddition]) -> Vec<MealAddition> {
         .collect()
 }
 
-/// A plan that names no meal is for dinner — the meal a group most plausibly
-/// plans together. The same word migration 0016 backfills, so an unstated choice
-/// and a pre-migration row read identically. Not time-of-day inference: the
-/// default is one fixed word, and the host changes it in the lobby if it is wrong.
-impl Default for MealType {
-    fn default() -> Self {
-        MealType::Dinner
-    }
-}
-
-impl MealType {
-    /// The lowercase canonical form — what the wire carries and the DB stores.
-    fn as_str(self) -> &'static str {
-        match self {
-            MealType::Breakfast => "breakfast",
-            MealType::Lunch => "lunch",
-            MealType::Dinner => "dinner",
-            MealType::Snack => "snack",
-        }
-    }
-
-    /// The inverse of [`Self::as_str`], for reading a stored row back. `None` for
-    /// anything outside the vocabulary — the caller decides how loud to be.
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "breakfast" => MealType::Breakfast,
-            "lunch" => MealType::Lunch,
-            "dinner" => MealType::Dinner,
-            "snack" => MealType::Snack,
-            _ => return None,
-        })
-    }
-}
-
 // ---- HTTP handlers ---------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -271,7 +246,7 @@ pub struct CreateBody {
     #[serde(default)]
     kitchen_id: Option<String>,
     /// Which meal this plans (#114). Optional — an unstated choice is dinner
-    /// ([`MealType::default`]) and the host can change it in the lobby.
+    /// ([`DEFAULT_MEAL_TYPE`]) and the host can change it in the lobby.
     #[serde(default)]
     meal_type: Option<MealType>,
     /// What comes with it (#114) — a dessert, a side. Optional; none is a plain
@@ -368,7 +343,7 @@ pub async fn create(
                 &user.telegram_user_id,
                 body.filter.as_deref(),
                 body.kitchen_id.as_deref(),
-                body.meal_type.unwrap_or_default(),
+                body.meal_type.unwrap_or(DEFAULT_MEAL_TYPE),
                 &body.additions,
                 body.max_total_seconds,
             )
@@ -1534,7 +1509,7 @@ async fn set_time_cap(
 /// One struct and one read, rather than a query per facet: the walk resolves the whole
 /// bound from the channel on every call, and each facet (#80's cap, #82's kitchen,
 /// #184's meal) would otherwise be another round trip on the pick page's hot path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBounds {
     /// The total-time cap in seconds (#80); `None` = "Any".
     pub max_total_seconds: Option<i64>,
@@ -1549,6 +1524,23 @@ pub struct PlanBounds {
     /// Not an `Option`: migration 0016 made the column `NOT NULL DEFAULT 'dinner'` and
     /// the create handler applies the same default, so every plan is for some meal.
     pub meal_type: MealType,
+}
+
+/// The bounds of a plan that named nothing: no cap, no kitchen, and the meal every plan
+/// is born for.
+///
+/// Written out rather than derived, because [`MealType`] is the corpus's vocabulary
+/// (#191) and a *dish* has no default sitting — only a plan does. Deriving `Default`
+/// would have needed one on the shared type, where it could quietly stand in for a
+/// reading that should have been refused as empty.
+impl Default for PlanBounds {
+    fn default() -> Self {
+        PlanBounds {
+            max_total_seconds: None,
+            kitchen_id: None,
+            meal_type: DEFAULT_MEAL_TYPE,
+        }
+    }
 }
 
 /// A session's bounds, for the walk: `Ok(None)` is an unknown session, `Ok(Some(..))`
@@ -2419,17 +2411,20 @@ mod tests {
     }
 
     /// An unstated choice is dinner, twice over and identically: the create handler
-    /// fills `None` with [`MealType::default`], and migration 0016 backfills rows
+    /// fills `None` with [`DEFAULT_MEAL_TYPE`], and migration 0016 backfills rows
     /// that predate the column with the same word — so a pre-#114 plan and a
     /// caller who named nothing read the same.
     #[tokio::test]
     async fn an_unstated_meal_type_is_dinner() {
-        assert_eq!(MealType::default(), MealType::Dinner);
+        assert_eq!(DEFAULT_MEAL_TYPE, MealType::Dinner);
 
         // A body naming no meal deserializes, and resolves to the default —
         // exactly what the create handler does with it.
         let body: CreateBody = serde_json::from_str("{}").unwrap();
-        assert_eq!(body.meal_type.unwrap_or_default(), MealType::Dinner);
+        assert_eq!(
+            body.meal_type.unwrap_or(DEFAULT_MEAL_TYPE),
+            MealType::Dinner
+        );
 
         // A row written without the columns — the shape of every plan that existed
         // before migration 0016 — reads back as a plain dinner via the column

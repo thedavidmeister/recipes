@@ -48,6 +48,21 @@
 //! added here when a source starts stating it, and an unrecognised word falls to
 //! [`Course::Unstated`], which restricts nothing. That direction is deliberate — a
 //! source we have not met yet cannot narrow anyone's deck by accident.
+//!
+//! # The reading that answers what the category cannot (#191)
+//!
+//! Everything above is about what a **source** stated, and the answer is mostly
+//! silence. [`Sitting`] and [`fit`] are the other half: a **reading** of when a dish is
+//! actually eaten, produced off the service like the four enrichments before it, and
+//! the only thing in this module that can tell breakfast from dinner.
+//!
+//! The two do not compete. `course` reads a field the source wrote; [`fit`] reads a
+//! reading we made. A category of `Breakfast` is still [`Course::Sitting`] and still
+//! narrows nothing on its own — deciding that a breakfast dish is not a dinner is a
+//! judgement, and judgements belong to the reading, not to a word a source happened to
+//! file the dish under.
+
+use serde::{Deserialize, Serialize};
 
 /// Category words that state a dish **accompanies** a meal rather than being one.
 ///
@@ -122,6 +137,173 @@ pub fn course(category: Option<&str>) -> Course {
         return Course::Sitting(word);
     }
     Course::Unstated
+}
+
+// --- The reading: when a dish is actually eaten (#191) --------------------------
+
+/// One sitting a person eats at — the closed vocabulary a plan is *for* and a reading
+/// answers *with*.
+///
+/// **One type, used from both ends.** A plan's chosen meal (#114) and a recipe's read
+/// sittings are the same four words, so they are the same type: the walk's bound is
+/// literally `sittings.contains(&meal)`, with nothing in between that could disagree.
+/// Two enums with the same four variants and a mapping function would be a second
+/// chance to get it wrong — the reasoning that put [`course`] and
+/// [`crate::equipment::capability`] in one place each.
+///
+/// Serde owns the wire form: always the lowercase name, and an unknown or wrongly-cased
+/// word is rejected at deserialization, so no reading and no handler ever holds a word
+/// outside the vocabulary. The browser sentence-cases for display; the wire, the reading
+/// and the database stay lowercase.
+///
+/// `Ord` is derived, and the declaration order is the canonical one — the order of the
+/// day, which is the order [`canonical`] stores a set in and the order a picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sitting {
+    Breakfast,
+    Lunch,
+    Dinner,
+    Snack,
+}
+
+impl Sitting {
+    /// Every sitting, in canonical order — the order of the day.
+    pub const ALL: [Sitting; 4] = [
+        Sitting::Breakfast,
+        Sitting::Lunch,
+        Sitting::Dinner,
+        Sitting::Snack,
+    ];
+
+    /// The lowercase canonical form — what the wire carries and the database stores.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sitting::Breakfast => "breakfast",
+            Sitting::Lunch => "lunch",
+            Sitting::Dinner => "dinner",
+            Sitting::Snack => "snack",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`], for reading a stored row back. `None` for
+    /// anything outside the vocabulary — the caller decides how loud to be.
+    pub fn parse(s: &str) -> Option<Self> {
+        Sitting::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+}
+
+/// The canonical form of a set of sittings: each at most once, in vocabulary order.
+///
+/// The reading **means a set** — "lunch or dinner" — so `["dinner","lunch"]` and
+/// `["lunch","dinner"]` are one fact and must not be stored as two. Ordering is no part
+/// of that meaning, so normalising it is serialising a set rather than repairing a
+/// reading; a genuine mistake in the reading (the same sitting twice) is *refused* by
+/// [`validate`] instead. Same split, and the same reason, as the chosen-additions list
+/// a plan carries (#114).
+pub fn canonical(sittings: &[Sitting]) -> Vec<Sitting> {
+    Sitting::ALL
+        .into_iter()
+        .filter(|s| sittings.contains(s))
+        .collect()
+}
+
+/// Is this a usable reading of when a dish is eaten?
+///
+/// Two rejections, and the first is the ruling that matters:
+///
+/// **An empty set is a failed reading, never a fact about the food.** Every dish is
+/// eaten at some time. A reading that names no sitting has not discovered a dish nobody
+/// eats; it has failed, and storing it would drop the recipe out of the queue for good
+/// while leaving the deck no better off. That is the call #158 made on step durations
+/// and #162 made on servings, and the call #81 made on an empty equipment reading — a
+/// salad still needs a bowl.
+///
+/// **A repeat is refused rather than deduplicated**, because a set that names `dinner`
+/// twice is a reading that did not know what it was asked for, and quietly folding it
+/// away is how you never find that out (#81's reasoning, and #74's).
+///
+/// A word outside the vocabulary needs no check here at all: [`Sitting`] is a closed
+/// enum and serde refuses one at the wire, so an unknown word can never reach a reading
+/// to be validated.
+pub fn validate(sittings: &[Sitting]) -> Result<(), String> {
+    if sittings.is_empty() {
+        return Err(
+            "no sittings — every dish is eaten at some time, so an empty set is a failed \
+             reading rather than a fact about the food"
+                .into(),
+        );
+    }
+    for (i, sitting) in sittings.iter().enumerate() {
+        if sittings[..i].contains(sitting) {
+            return Err(format!("sitting {i} repeats {:?}", sitting.as_str()));
+        }
+    }
+    Ok(())
+}
+
+/// What a recipe's read sittings say about dealing it to a plan for `meal`.
+///
+/// Three answers, and the third is an absence — the same shape and the same ruling as
+/// [`crate::equipment::Capability`] and [`Course`]. Collapsing [`MealFit::Unread`] into
+/// either of the other two is how a corpus nobody has read yet starts being described
+/// as though it had been.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MealFit {
+    /// The reading names this sitting. The dish is eaten then, so it is dealt.
+    Suits,
+    /// The reading names sittings, and this is not one of them. **This is the whole
+    /// point of the reading**: it is the first thing in the corpus that can keep a roast
+    /// out of a breakfast, and it does so on something we read rather than on silence.
+    Wrong,
+    /// The recipe has no reading. **Not "eaten at no sitting"** — an empty reading is
+    /// refused on the way in ([`validate`]), so an empty set can only mean unread, and
+    /// when a dish is eaten is simply unknown.
+    Unread,
+}
+
+/// Read one recipe's sittings against the meal a plan is for (#191).
+///
+/// This is the whole of the rule, in one place, for the reason [`course`] is: #191
+/// keeps a plan's round to the meal it asked for, and #147's per-addition rounds will
+/// ask the same question about a dessert. A second implementation would be a second
+/// chance to disagree.
+///
+/// # An unread recipe is not restricted, and that decides the rollout
+///
+/// [`MealFit::Unread`] exists so that absence narrows nothing, which is
+/// [`crate::equipment::Capability::Unread`]'s ruling (#82) and #158's: a missing reading
+/// is a gap in **our** reading, not a property of the dish, and the answer to a gap is
+/// filling it rather than narrowing the product against it.
+///
+/// It is also the only rollout that works. On the day this lands not one of the corpus's
+/// 790 recipes has a reading, because the reading is produced off the service by a
+/// worker somebody runs (#59) — nothing about deploying this causes one to exist.
+/// Excluding unread recipes would therefore deal **an empty deck**, for as long as it
+/// took a person to notice and run the worker. That is not "honest, briefly bad"; it is
+/// the product not working, and #161 already recorded the same hazard from the other
+/// side ("the deck stays whole meanwhile rather than emptying").
+///
+/// The usual objection to this choice is that it is the one nobody ever switches off.
+/// **There is nothing to switch.** The rule is per recipe, not a corpus-wide mode: every
+/// recipe that gets a reading is filtered strictly from that moment, so the deck tightens
+/// exactly as fast as the corpus is read and is fully strict the moment the corpus is
+/// complete. No flag, no threshold, no dated act anybody has to remember.
+///
+/// What that costs, stated plainly rather than left to be discovered: **until the corpus
+/// is read, a plan for dinner still deals dishes nobody has said are dinners.** The
+/// requirement ("a plan for a meal shows only recipes that are explicitly that meal") is
+/// met by reading the corpus, and this function is what makes it true the moment the
+/// reading exists — not before.
+pub fn fit(sittings: &[Sitting], meal: Sitting) -> MealFit {
+    if sittings.is_empty() {
+        return MealFit::Unread;
+    }
+    if sittings.contains(&meal) {
+        MealFit::Suits
+    } else {
+        MealFit::Wrong
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +426,114 @@ mod tests {
             19,
             "the only sitting the corpus states"
         );
+    }
+
+    // --- The reading (#191) ----------------------------------------------------
+
+    use Sitting::{Breakfast, Dinner, Lunch, Snack};
+
+    /// The wire form is the lowercase word and nothing else, both ways — the reading,
+    /// the plan's stored `meal_type` and the browser all speak it, so a drift here would
+    /// be a drift between all three.
+    #[test]
+    fn a_sitting_is_its_lowercase_word_on_the_wire() {
+        for sitting in Sitting::ALL {
+            let json = serde_json::to_string(&sitting).unwrap();
+            assert_eq!(json, format!("\"{}\"", sitting.as_str()));
+            assert_eq!(
+                serde_json::from_str::<Sitting>(&json).unwrap(),
+                sitting,
+                "round trip"
+            );
+            assert_eq!(Sitting::parse(sitting.as_str()), Some(sitting));
+        }
+        // A closed vocabulary is closed at the wire, so no reading can carry a word
+        // outside it and no later check has to look for one.
+        for outside in ["\"Dinner\"", "\"brunch\"", "\"supper\"", "\"\""] {
+            assert!(
+                serde_json::from_str::<Sitting>(outside).is_err(),
+                "{outside} is not a sitting"
+            );
+        }
+        assert_eq!(Sitting::parse("Dinner"), None, "and not out of band either");
+        assert_eq!(Sitting::parse("brunch"), None);
+    }
+
+    /// **The ruling this reading turns on.** An empty set is a failed reading, never a
+    /// dish nobody eats — the call #158 made on durations and #162 on servings. If this
+    /// were accepted the recipe would leave the queue permanently with a set that can
+    /// match no plan at all.
+    #[test]
+    fn an_empty_reading_is_refused_because_every_dish_is_eaten_sometime() {
+        let err = validate(&[]).unwrap_err();
+        assert!(err.contains("every dish is eaten at some time"), "{err}");
+    }
+
+    /// A repeat is a reading that misunderstood the question, so it is refused rather
+    /// than quietly folded away — #81's rule about a reading that has to be fixed on the
+    /// way in.
+    #[test]
+    fn a_reading_cannot_name_the_same_sitting_twice() {
+        let err = validate(&[Dinner, Lunch, Dinner]).unwrap_err();
+        assert!(err.contains("repeats"), "{err}");
+        assert!(validate(&[Dinner, Lunch]).is_ok());
+    }
+
+    /// Every set the vocabulary can express is a legitimate reading, single or several.
+    /// A dish that genuinely suits every sitting is not an error — it is unusual, and
+    /// the skill is where that is discouraged, not the validator, because refusing it
+    /// here would be inventing a fact about food.
+    #[test]
+    fn any_non_empty_set_is_a_reading() {
+        assert!(validate(&[Breakfast]).is_ok(), "a pancake");
+        assert!(validate(&[Lunch, Dinner]).is_ok(), "a chicken curry");
+        assert!(validate(&[Breakfast, Snack]).is_ok(), "toast");
+        assert!(validate(&Sitting::ALL).is_ok(), "an omelette, at a push");
+    }
+
+    /// A set has no order, so two spellings of one fact store as one row. The order is
+    /// the order of the day, not the order the model happened to answer in.
+    #[test]
+    fn a_set_is_stored_in_one_canonical_order() {
+        assert_eq!(canonical(&[Dinner, Lunch]), vec![Lunch, Dinner]);
+        assert_eq!(canonical(&[Lunch, Dinner]), vec![Lunch, Dinner]);
+        assert_eq!(canonical(&[Snack, Breakfast]), vec![Breakfast, Snack]);
+        assert_eq!(canonical(&Sitting::ALL), Sitting::ALL.to_vec());
+        assert_eq!(canonical(&[]), Vec::<Sitting>::new());
+    }
+
+    /// **What the whole issue is for.** A read dish is dealt to the sittings it names
+    /// and refused by the ones it does not — the first thing in this module that can
+    /// tell breakfast from dinner, and it does it on a reading rather than on silence.
+    #[test]
+    fn a_read_dish_suits_the_sittings_it_names_and_no_others() {
+        // A chicken curry: lunch or dinner, not breakfast.
+        let curry = [Lunch, Dinner];
+        assert_eq!(fit(&curry, Lunch), MealFit::Suits);
+        assert_eq!(fit(&curry, Dinner), MealFit::Suits);
+        assert_eq!(fit(&curry, Breakfast), MealFit::Wrong);
+        assert_eq!(fit(&curry, Snack), MealFit::Wrong);
+
+        // A roast: dinner alone.
+        for meal in [Breakfast, Lunch, Snack] {
+            assert_eq!(fit(&[Dinner], meal), MealFit::Wrong, "{meal:?}");
+        }
+        assert_eq!(fit(&[Dinner], Dinner), MealFit::Suits);
+    }
+
+    /// The rollout, in one assertion: an unread recipe is **unread**, not "eaten at no
+    /// sitting", so it restricts nothing and is dealt to every meal. That is
+    /// `Capability::Unread`'s ruling (#82) and #158's — a missing reading is a gap in
+    /// ours, not a property of the dish — and it is the only rollout that does not deal
+    /// an empty deck on the day this lands, when 0 of 790 recipes have been read.
+    ///
+    /// It is per recipe rather than a corpus-wide mode, which is what makes it
+    /// self-closing: there is no flag to switch, so a recipe is filtered strictly from
+    /// the moment it is read and the corpus is fully strict the moment it is complete.
+    #[test]
+    fn an_unread_recipe_is_unread_and_therefore_dealt_to_every_meal() {
+        for meal in Sitting::ALL {
+            assert_eq!(fit(&[], meal), MealFit::Unread, "{meal:?}");
+        }
     }
 }

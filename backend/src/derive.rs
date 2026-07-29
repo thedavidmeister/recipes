@@ -12,10 +12,11 @@
 use std::collections::HashMap;
 
 use libsql::Connection;
-use recipe_core::{adapters, FoodEnergy, StructuredMeasure, StructuredStep};
+use recipe_core::{adapters, FoodEnergy, Sitting, StructuredMeasure, StructuredStep};
 
 use crate::enrich;
 use crate::equipment as equipment_readings;
+use crate::meal_times as meal_time_readings;
 use crate::nutrition as nutrition_readings;
 use crate::recipes::upsert;
 use crate::steps;
@@ -54,6 +55,10 @@ pub async fn derive(
     // And the nutrition readings (#162) — same shape, same reason: one load, then an
     // in-memory join per recipe.
     let nutrition_readings = nutrition_readings::load(conn).await?;
+    // And the meal-time readings (#191), the fifth and last of them. Empty when nothing
+    // has been read, which leaves every recipe's `sittings` at `[]` — unread, which
+    // narrows nobody's deck.
+    let meal_time_readings = meal_time_readings::load(conn).await?;
 
     let mut rows = match source {
         Some(source) => {
@@ -85,6 +90,7 @@ pub async fn derive(
             &step_readings,
             &equipment_readings,
             &nutrition_readings,
+            &meal_time_readings,
             run_id,
             &mut report,
         )
@@ -110,6 +116,7 @@ pub async fn derive_recipes(
     let step_readings = steps::load(conn).await?;
     let equipment_readings = equipment_readings::load(conn).await?;
     let nutrition_readings = nutrition_readings::load(conn).await?;
+    let meal_time_readings = meal_time_readings::load(conn).await?;
 
     for (source, id) in recipes {
         let mut rows = conn
@@ -135,6 +142,7 @@ pub async fn derive_recipes(
             &step_readings,
             &equipment_readings,
             &nutrition_readings,
+            &meal_time_readings,
             run_id,
             &mut report,
         )
@@ -159,6 +167,7 @@ async fn normalize_and_upsert(
     step_readings: &HashMap<(String, String), Vec<StructuredStep>>,
     equipment_reads: &HashMap<(String, String), Vec<recipe_core::equipment::RequiredEquipment>>,
     nutrition_reads: &HashMap<(String, String), (Vec<FoodEnergy>, u32)>,
+    meal_time_reads: &HashMap<(String, String), Vec<Sitting>>,
     run_id: i64,
     report: &mut Report,
 ) -> anyhow::Result<()> {
@@ -215,6 +224,15 @@ async fn normalize_and_upsert(
             &item.recipe.id,
             &mut item.recipe.nutrition,
             &mut item.recipe.servings,
+        );
+        // And the meal-time reading (#191) — the set of sittings the dish suits, which
+        // is what lets a plan's round actually be the meal it asked for. A recipe with
+        // no row keeps `[]`, and `[]` means unread, not "eaten at no sitting".
+        meal_time_readings::attach(
+            meal_time_reads,
+            &item.recipe.source,
+            &item.recipe.id,
+            &mut item.recipe.sittings,
         );
         upsert(conn, &item.recipe, run_id).await?;
         report.derived += 1;
