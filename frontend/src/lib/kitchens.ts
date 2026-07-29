@@ -7,11 +7,20 @@ import type { EquipmentAdvice, KitchenDetail, KitchenSummary } from "./types";
  * call here goes through the session-gated backend via `apiFetch`.
  */
 
-/** A friendlier message than a bare status; a 401 is a lapsed session, not a fault. */
+/**
+ * A friendlier message than a bare status; a 401 is a lapsed sign-in, not a fault.
+ *
+ * Both branches are a whole sentence, because both land as one — under a heading on
+ * the page that asked, or on their own. A 401 says what to do about it, since there
+ * is something to do; the rest carry the status, which is the only handle anybody has
+ * when reporting one.
+ */
 function failed(status: number, action: string): ApiError {
   return new ApiError(
     status,
-    status === 401 ? "Your session has expired." : `could not ${action} (${status})`,
+    status === 401
+      ? "You've been signed out. Sign in again to carry on."
+      : `Couldn't ${action} (${status}).`,
   );
 }
 

@@ -30,14 +30,23 @@
 
   const pct = $derived(stats ? Math.round(stats.enriched_pct) : 0);
 
-  // Run-status pill colours: completed reads as done (pesto), failed as danger
-  // (paprika), anything else (running) as in-progress (honey).
+  // Run-status pill colours track the run's *outcome* (`runs::Outcome`): completed
+  // reads as done (pesto), partial as a shortfall worth a look (honey), failed as
+  // danger (paprika).
+  //
+  // A run still `running` has no outcome yet, so it is neutral rather than amber: an
+  // ingest that opened three seconds ago is not a warning, and the ones that are —
+  // the rows that died mid-flight and will never close — are counted by the red
+  // "Running" tile above. Amber here would have said the same thing twice, and, since
+  // #174 gave `partial` a word, said it in `partial`'s colour.
   function badgeCls(runStatus: string): string {
     if (runStatus === "completed")
       return "border-pesto-500/30 bg-pesto-100 text-pesto-500";
+    if (runStatus === "partial")
+      return "border-honey-500/30 bg-honey-100 text-stone-900";
     if (runStatus === "failed")
       return "border-paprika-500/30 bg-paprika-100 text-paprika-500";
-    return "border-honey-500/30 bg-honey-100 text-stone-900";
+    return "border-stone-200 bg-stone-100 text-stone-600";
   }
 </script>
 

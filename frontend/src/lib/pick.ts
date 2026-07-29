@@ -43,8 +43,8 @@ export async function createPick(
     throw new ApiError(
       res.status,
       res.status === 401
-        ? "Your session has expired."
-        : `could not start a pick (${res.status})`,
+        ? "You've been signed out. Sign in again to carry on."
+        : `Couldn't start a pick (${res.status}).`,
     );
   }
   const body = (await res.json()) as { channel_id: string };
@@ -286,8 +286,8 @@ function lobbyFailed(status: number, action: string): ApiError {
   return new ApiError(
     status,
     status === 401
-      ? "Your session has expired."
-      : `could not ${action} (${status})`,
+      ? "You've been signed out. Sign in again to carry on."
+      : `Couldn't ${action} (${status}).`,
   );
 }
 

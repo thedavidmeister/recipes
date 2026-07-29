@@ -56,9 +56,9 @@
   }
 
   const onAdd = (item: string) =>
-    run(() => addEquipment(id, item), "could not add that");
+    run(() => addEquipment(id, item), "Couldn't add that.");
   const onRemove = (item: string) =>
-    run(() => removeEquipment(id, item), "could not remove that");
+    run(() => removeEquipment(id, item), "Couldn't remove that.");
 </script>
 
 <KitchenItems

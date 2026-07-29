@@ -52,14 +52,13 @@
     <div class="mt-3"><Skeleton /></div>
   {:else if advice.read === 0}
     <p class="mt-2 text-sm text-stone-600">
-      Nothing to go on yet — no recipe in the corpus carries an equipment
-      reading. Until one does there is nothing to count here, and a pick isn't
-      limited to what this kitchen can make either.
+      Nothing to suggest yet — no recipe here says what equipment it needs. So
+      there is nothing to count, and nothing is being left out of a meal for
+      want of a tool.
     </p>
   {:else if advice.additions.length === 0}
     <p class="mt-2 text-sm text-stone-600">
-      Nothing to add: this kitchen has the tools for all {advice.read} recipes we've
-      read.
+      Nothing to add — every recipe is already in reach of this kitchen.
     </p>
   {:else}
     <p class="mt-2 text-sm text-stone-600">
@@ -96,8 +95,7 @@
           >and everything above it</em
         >, so the bottom line is the lot — {recipes(total)}.
       {/if}
-      Counted over the {advice.read} recipes we've read for the equipment they need,
-      {advice.makeable} of which this kitchen can make today.
+      This kitchen can make {recipes(advice.makeable)} today.
     </p>
   {/if}
 </section>

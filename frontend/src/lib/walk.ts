@@ -34,9 +34,11 @@ export async function getWalk(
   if (!res.ok) {
     throw new ApiError(
       res.status,
+      // "Walk the corpus" is what this call *is*; what failed, from the swiper's
+      // side of the screen, is that no more recipes arrived.
       res.status === 401
-        ? "Your session has expired."
-        : `could not walk the corpus (${res.status})`,
+        ? "You've been signed out. Sign in again to carry on."
+        : `Couldn't find more recipes (${res.status}).`,
     );
   }
   const body = (await res.json()) as { stops: WalkStop[] };

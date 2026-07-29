@@ -38,7 +38,7 @@
         await goto(`/kitchens/${k.id}`);
       })
       .catch((e) => {
-        actionError = e instanceof Error ? e.message : "could not join that kitchen";
+        actionError = e instanceof Error ? e.message : "Couldn't join that kitchen.";
       });
   });
 </script>

@@ -175,10 +175,53 @@ pub async fn submit(
     items: Vec<SubmittedReadings>,
     model: &str,
 ) -> anyhow::Result<SubmitReport> {
+    let store_run = runs::begin(conn, "enrich").await?;
+    let (mut report, accepted) = match store_batch(conn, items, model, store_run).await {
+        Ok(stored) => stored,
+        // A run that errored out closes itself `failed` (#174). Abandoning the row
+        // would file this alongside the process Render killed mid-flight, and those
+        // are two different facts.
+        Err(e) => return Err(runs::fail(conn, store_run, e).await),
+    };
+    // Every reading the worker offered that this run did not store is work it was
+    // handed and dropped — a stale key, a recipe whose raw moved under it, a race it
+    // lost. Each one is named in `rejected`; the status is what points a person at
+    // them. A batch stored whole is the only `completed` one.
+    let store_outcome = if report.rejected.is_empty() {
+        runs::Outcome::Completed
+    } else {
+        runs::Outcome::Partial
+    };
+    runs::finish(conn, store_run, store_outcome).await?;
+
+    // The derive run is allocated *here*, after storage — see the doc comment.
+    if !accepted.is_empty() {
+        let derive_run = runs::begin(conn, "derive").await?;
+        match derive::derive_recipes(conn, &accepted, derive_run).await {
+            Ok(derived) => {
+                report.derived = derived.derived;
+                runs::finish(conn, derive_run, runs::Outcome::Completed).await?;
+            }
+            Err(e) => return Err(runs::fail(conn, derive_run, e).await),
+        }
+    }
+    Ok(report)
+}
+
+/// Validate and store one batch under `store_run`, returning what happened and the
+/// recipes worth re-deriving.
+///
+/// Separated from [`submit`] so an error anywhere in the batch has one exit, and
+/// [`submit`] can close the run [`runs::Outcome::Failed`] on the way out.
+async fn store_batch(
+    conn: &Connection,
+    items: Vec<SubmittedReadings>,
+    model: &str,
+    store_run: i64,
+) -> anyhow::Result<(SubmitReport, Vec<RecipeKey>)> {
     let mut report = SubmitReport::default();
     let mut accepted: Vec<RecipeKey> = Vec::new();
 
-    let store_run = runs::begin(conn, "enrich").await?;
     for item in items {
         match current_ingredient_count(conn, &item.source, &item.id).await? {
             Some(count) if count == item.readings.len() => {
@@ -221,17 +264,7 @@ pub async fn submit(
             }),
         }
     }
-    runs::finish(conn, store_run, runs::COMPLETED).await?;
-
-    // The derive run is allocated *here*, after storage — see the doc comment.
-    if !accepted.is_empty() {
-        let derive_run = runs::begin(conn, "derive").await?;
-        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
-            .await?
-            .derived;
-        runs::finish(conn, derive_run, runs::COMPLETED).await?;
-    }
-    Ok(report)
+    Ok((report, accepted))
 }
 
 /// The number of ingredients a recipe currently has, or `None` if there is no such
@@ -510,6 +543,108 @@ mod tests {
             .await
             .unwrap();
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    /// The status of the most recent run of a kind — what the push left in the row.
+    async fn last_run_status(conn: &Connection, kind: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT status FROM runs WHERE kind = ?1 ORDER BY id DESC LIMIT 1",
+                libsql::params![kind],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    /// A push that stored everything it was handed is `completed` — the fix must not
+    /// have turned every run into a complaint.
+    #[tokio::test]
+    async fn a_push_that_stored_everything_records_completed() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+        let report = submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour")],
+            }],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert!(report.rejected.is_empty());
+        assert_eq!(last_run_status(&conn, "enrich").await, runs::COMPLETED);
+    }
+
+    /// A push that dropped a submission is `partial` (#174): the run stored less than
+    /// it was handed, `rejected` says which, and the row is what points a person at a
+    /// worker that has started sending nonsense. It was `completed` before.
+    #[tokio::test]
+    async fn a_push_that_dropped_a_reading_records_partial() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+        let report = submit(
+            &conn,
+            vec![
+                SubmittedReadings {
+                    source: "themealdb".into(),
+                    id: "1".into(),
+                    readings: vec![item_reading("flour")],
+                },
+                // No such recipe → rejected, so this batch was not stored whole.
+                SubmittedReadings {
+                    source: "themealdb".into(),
+                    id: "9".into(),
+                    readings: vec![item_reading("x")],
+                },
+            ],
+            "m",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.accepted, 1);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(last_run_status(&conn, "enrich").await, runs::PARTIAL);
+    }
+
+    /// A push that errored partway closes its run `failed` rather than abandoning it.
+    /// An un-closed row means *nothing closed me* — the process died — and 22 rows in
+    /// production say exactly that; a request that failed must not be filed among
+    /// them (#174). Dropping the table the store writes is the shape a real failure
+    /// takes: the write comes back a database error.
+    #[tokio::test]
+    async fn a_push_that_errored_records_failed_not_running() {
+        let conn = conn().await;
+        insert_recipe(&conn, "1", &[ing("flour", Some("1 cup"))]).await;
+        conn.execute("DROP TABLE ingredient_structures", ())
+            .await
+            .unwrap();
+
+        let err = submit(
+            &conn,
+            vec![SubmittedReadings {
+                source: "themealdb".into(),
+                id: "1".into(),
+                readings: vec![item_reading("flour")],
+            }],
+            "m",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("ingredient_structures"),
+            "the caller still gets the real error: {err}"
+        );
+        assert_eq!(last_run_status(&conn, "enrich").await, runs::FAILED);
     }
 
     /// `pending` lists exactly the recipes with no reading yet, carrying their raw

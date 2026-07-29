@@ -345,8 +345,9 @@
         </div>
         {#if cap !== null}
           <p class="mt-2 text-xs text-stone-500">
-            Only recipes estimated at {capLabel(cap)} or less. Estimates are a
-            lower bound, and recipes we can't time yet still show.
+            Only recipes that fit in {capLabel(cap)}. A time is the least a
+            recipe can take, so some run longer — and ones with no time on them
+            still show.
           </p>
         {/if}
       {:else if cap !== null}
@@ -364,8 +365,8 @@
             {/if}
             {capLabel(cap)}</span
           >
-          Recipes estimated over this are left out. Estimates are a lower bound,
-          and recipes we can't time yet still show.
+          Anything longer is left out. A time is the least a recipe can take, so
+          some run longer — and ones with no time on them still show.
         </p>
       {/if}
 

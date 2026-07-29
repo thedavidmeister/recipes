@@ -17,7 +17,7 @@
       qc.setQueryData(["kitchen", k.id], k);
       await goto(`/kitchens/${k.id}`);
     } catch (e) {
-      error = e instanceof Error ? e.message : "could not create the kitchen";
+      error = e instanceof Error ? e.message : "Couldn't create the kitchen.";
       throw e;
     }
   }

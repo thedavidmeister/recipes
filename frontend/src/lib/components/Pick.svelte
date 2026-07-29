@@ -67,6 +67,18 @@
   const estimate = $derived(
     card ? formatEstimate(card.total_seconds, card.fully_timed) : null,
   );
+
+  /**
+   * What the badge's mark means, on hover. It has to follow `fully_timed` for the
+   * same reason the mark does: a `~19 min` card carries no untimed steps, so telling
+   * its reader the number is only a floor is simply wrong about that card. One
+   * tooltip for both marks said the `+` sentence over every `~`.
+   */
+  const estimateHint = $derived(
+    card?.fully_timed
+      ? "Roughly how long it takes, start to finish."
+      : "At least this long — some steps here have no time on them, so the cooking runs longer.",
+  );
 </script>
 
 <div class="pt-32 pb-16">
@@ -88,9 +100,9 @@
 
   {#if status === "error"}
     <Alert>
-      <p class="font-display text-stone-900">The pick dropped.</p>
+      <p class="font-display text-stone-900">Lost the connection.</p>
       <p class="mt-1 text-sm text-stone-600">
-        {error ?? "Could not reach the room."}
+        {error ?? "Reload the page to rejoin the others."}
       </p>
     </Alert>
   {:else if status === "connecting"}
@@ -140,8 +152,7 @@
               {#if estimate}
                 <span
                   class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
-                  title="At least this long. Steps we can't time yet count as nothing, so the real cook takes longer."
-                  >{estimate}</span
+                  title={estimateHint}>{estimate}</span
                 >
               {/if}
             </p>

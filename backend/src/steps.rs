@@ -158,10 +158,49 @@ pub async fn submit(
     items: Vec<SubmittedSteps>,
     model: &str,
 ) -> anyhow::Result<SubmitReport> {
+    let store_run = runs::begin(conn, "enrich_steps").await?;
+    let (mut report, accepted) = match store_batch(conn, items, model, store_run).await {
+        Ok(stored) => stored,
+        // A run that errored out closes itself `failed` (#174), rather than being
+        // abandoned to look like a process that died mid-flight.
+        Err(e) => return Err(runs::fail(conn, store_run, e).await),
+    };
+    // A reading the worker offered and this run did not store is work it dropped, and
+    // `rejected` says which — the ingredient push's reasoning applied to steps.
+    let store_outcome = if report.rejected.is_empty() {
+        runs::Outcome::Completed
+    } else {
+        runs::Outcome::Partial
+    };
+    runs::finish(conn, store_run, store_outcome).await?;
+
+    // The derive run is allocated *here*, after storage — see the doc comment.
+    if !accepted.is_empty() {
+        let derive_run = runs::begin(conn, "derive").await?;
+        match derive::derive_recipes(conn, &accepted, derive_run).await {
+            Ok(derived) => {
+                report.derived = derived.derived;
+                runs::finish(conn, derive_run, runs::Outcome::Completed).await?;
+            }
+            Err(e) => return Err(runs::fail(conn, derive_run, e).await),
+        }
+    }
+    Ok(report)
+}
+
+/// Validate and store one batch of step readings under `store_run`, returning what
+/// happened and the recipes worth re-deriving. Separated from [`submit`] so an error
+/// anywhere in the batch has one exit and the run can be closed
+/// [`runs::Outcome::Failed`] on the way out.
+async fn store_batch(
+    conn: &Connection,
+    items: Vec<SubmittedSteps>,
+    model: &str,
+    store_run: i64,
+) -> anyhow::Result<(SubmitReport, Vec<RecipeKey>)> {
     let mut report = SubmitReport::default();
     let mut accepted: Vec<RecipeKey> = Vec::new();
 
-    let store_run = runs::begin(conn, "enrich_steps").await?;
     for item in items {
         if !recipe_exists(conn, &item.source, &item.id).await? {
             report.rejected.push(Rejection {
@@ -208,17 +247,7 @@ pub async fn submit(
             });
         }
     }
-    runs::finish(conn, store_run, runs::COMPLETED).await?;
-
-    // The derive run is allocated *here*, after storage — see the doc comment.
-    if !accepted.is_empty() {
-        let derive_run = runs::begin(conn, "derive").await?;
-        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
-            .await?
-            .derived;
-        runs::finish(conn, derive_run, runs::COMPLETED).await?;
-    }
-    Ok(report)
+    Ok((report, accepted))
 }
 
 /// Whether a recipe exists — a step submission for an unknown recipe is dropped.
