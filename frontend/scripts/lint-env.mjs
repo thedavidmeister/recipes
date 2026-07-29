@@ -166,10 +166,11 @@ console.error(
     `no SvelteKit runtime — every story of the component will crash on ` +
     `\`undefined (reading 'env')\`, and the visual fence will photograph it:\n`,
 );
-for (const { entry, chain } of violations) {
-  console.error(`  ${relative(ROOT, entry)}`);
+for (const { chain } of violations) {
+  // The chain starts at the entry point itself, so it is the whole report — the file
+  // to change is usually neither end of it.
   for (const [i, step] of chain.entries()) {
-    const arrow = i === 0 ? "    " : `    ${"  ".repeat(i)}→ `;
+    const arrow = i === 0 ? "  " : `  ${"  ".repeat(i)}→ `;
     const tail = reads.has(step) ? `  (reads ${reads.get(step)})` : "";
     console.error(`${arrow}${relative(ROOT, step)}${tail}`);
   }
