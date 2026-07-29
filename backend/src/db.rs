@@ -27,6 +27,12 @@ use libsql::{Builder, Connection, Database};
 ///
 /// A number in this list is **burnt, not free**: see the comment on 23 below. Filling
 /// one back in is the exact failure the runner cannot survive.
+///
+/// `cfg(test)` because only the check reads it — [`migrate`] iterates [`MIGRATIONS`]
+/// and has no use for a number with no SQL behind it. It still lives here rather than
+/// down in the test module, because it belongs to the ledger: a reservation that is not
+/// visible beside the list it applies to is a reservation nobody will honour.
+#[cfg(test)]
 const RESERVED: &[i64] = &[
     // Claimed by work in flight on another branch (#96) while 21–23 were being
     // written, then never used. It is below the production floor now, so it can
