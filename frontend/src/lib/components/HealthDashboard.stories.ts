@@ -63,10 +63,13 @@ export const PartlyRead: Story = {
 /**
  * A run that failed — the pill goes paprika.
  *
- * Depicted, and worth flagging as such: `runs::FAILED` exists in the backend but no
- * caller passes it (`finish` is only ever called with `COMPLETED`), so no row in the
- * corpus has ever carried this status. A run that dies leaves itself `running`
- * instead, which is what the `Ready` snapshot above shows 22 of.
+ * Reachable since #174. `runs::finish` now takes the outcome the run actually
+ * reached, so a derive that blew up inside an ingest, or a push that errored partway
+ * through a batch, closes itself `failed`; before that, `finish` was only ever called
+ * with `COMPLETED` and no row in the corpus had carried this status in the database's
+ * lifetime (223 `completed`, 22 `running`, 0 `failed`). A run that *dies* still
+ * leaves itself `running`, which is what the `Ready` snapshot above shows 22 of —
+ * that is a different fact and it keeps its own word.
  */
 export const RunFailed: Story = {
   args: {
@@ -79,6 +82,33 @@ export const RunFailed: Story = {
           status: "failed",
           started_at: 1_785_214_900,
           finished_at: 1_785_214_915,
+        },
+        ...healthStats().recent_runs.slice(0, 4),
+      ],
+    }),
+  },
+};
+
+/**
+ * A run that did part of its job — the pill goes honey.
+ *
+ * The state #174 added a word for, and the one a scheduled ingest reaches most often:
+ * the sync could not reach every source (each dropped URL is named in the run's
+ * report), and it derived what it did have. Calling that `failed` would have pinned
+ * the column to one value again — sources 502 scrapers as a matter of routine — and
+ * calling it `completed` is what made this table answer "yes" for every run.
+ */
+export const RunPartial: Story = {
+  args: {
+    status: "ready",
+    stats: healthStats({
+      recent_runs: [
+        {
+          id: 246,
+          kind: "ingest",
+          status: "partial",
+          started_at: 1_785_214_900,
+          finished_at: 1_785_214_961,
         },
         ...healthStats().recent_runs.slice(0, 4),
       ],

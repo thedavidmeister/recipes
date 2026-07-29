@@ -100,10 +100,48 @@ pub async fn submit(
     items: Vec<SubmittedEquipment>,
     model: &str,
 ) -> anyhow::Result<SubmitReport> {
+    let store_run = runs::begin(conn, "enrich_equipment").await?;
+    let (mut report, accepted) = match store_batch(conn, items, model, store_run).await {
+        Ok(stored) => stored,
+        // A run that errored out closes itself `failed` (#174), rather than being
+        // abandoned to look like a process that died mid-flight.
+        Err(e) => return Err(runs::fail(conn, store_run, e).await),
+    };
+    // A reading the worker offered and this run did not store is work it dropped, and
+    // `rejected` says which — the ingredient push's reasoning applied to equipment.
+    let store_outcome = if report.rejected.is_empty() {
+        runs::Outcome::Completed
+    } else {
+        runs::Outcome::Partial
+    };
+    runs::finish(conn, store_run, store_outcome).await?;
+
+    if !accepted.is_empty() {
+        let derive_run = runs::begin(conn, "derive").await?;
+        match derive::derive_recipes(conn, &accepted, derive_run).await {
+            Ok(derived) => {
+                report.derived = derived.derived;
+                runs::finish(conn, derive_run, runs::Outcome::Completed).await?;
+            }
+            Err(e) => return Err(runs::fail(conn, derive_run, e).await),
+        }
+    }
+    Ok(report)
+}
+
+/// Validate and store one batch of equipment readings under `store_run`, returning
+/// what happened and the recipes worth re-deriving. Separated from [`submit`] so an
+/// error anywhere in the batch has one exit and the run can be closed
+/// [`runs::Outcome::Failed`] on the way out.
+async fn store_batch(
+    conn: &Connection,
+    items: Vec<SubmittedEquipment>,
+    model: &str,
+    store_run: i64,
+) -> anyhow::Result<(SubmitReport, Vec<RecipeKey>)> {
     let mut report = SubmitReport::default();
     let mut accepted: Vec<RecipeKey> = Vec::new();
 
-    let store_run = runs::begin(conn, "enrich_equipment").await?;
     for item in items {
         if !recipe_exists(conn, &item.source, &item.id).await? {
             report.rejected.push(Rejection {
@@ -150,16 +188,7 @@ pub async fn submit(
             });
         }
     }
-    runs::finish(conn, store_run, runs::COMPLETED).await?;
-
-    if !accepted.is_empty() {
-        let derive_run = runs::begin(conn, "derive").await?;
-        report.derived = derive::derive_recipes(conn, &accepted, derive_run)
-            .await?
-            .derived;
-        runs::finish(conn, derive_run, runs::COMPLETED).await?;
-    }
-    Ok(report)
+    Ok((report, accepted))
 }
 
 async fn recipe_exists(conn: &Connection, source: &str, id: &str) -> anyhow::Result<bool> {

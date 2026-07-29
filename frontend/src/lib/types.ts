@@ -255,8 +255,10 @@ export interface ModelCount {
   count: number;
 }
 
-/** A row of the `runs` table (`admin::RunRow`). `finished_at` is null while a run
- * is still going — a long-null one is the died-mid-flight signal. */
+/** A row of the `runs` table (`admin::RunRow`). `status` is `running` until the run
+ * closes itself with what it did — `completed`, `partial` or `failed` (the backend's
+ * `runs::Outcome`, #174). `finished_at` is null while a run is still going — a
+ * long-null one is the died-mid-flight signal, which is why nothing sweeps it. */
 export interface RunRow {
   id: number;
   kind: string;
