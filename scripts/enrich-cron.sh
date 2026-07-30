@@ -91,6 +91,7 @@ ING_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__enrich_pull,mcp__plugin_re
 STEP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__step_pull,mcp__plugin_recipes-enrich_recipes-enrich__step_push"
 EQUIP_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__equipment_pull,mcp__plugin_recipes-enrich_recipes-enrich__equipment_push"
 NUTR_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__nutrition_pull,mcp__plugin_recipes-enrich_recipes-enrich__nutrition_push"
+MEAL_TOOLS="mcp__plugin_recipes-enrich_recipes-enrich__meal_times_pull,mcp__plugin_recipes-enrich_recipes-enrich__meal_times_push"
 
 ING_PROMPT="Drain the recipes ingredient enrichment queue now. Loop: call enrich_pull, \
 read each returned recipe's ingredient lines into StructuredMeasure readings, then \
@@ -112,6 +113,12 @@ order — facts about the food, never this recipe's totals, and grams_per_unit o
 the line is not already weighable — plus how many people it serves, then call \
 nutrition_push; repeat until nutrition_pull returns an empty array. Do no arithmetic; \
 the app sums. Use only the nutrition_pull and nutrition_push tools."
+
+MEAL_PROMPT="Drain the recipes meal-time queue now. Loop: call meal_times_pull, read \
+each returned dish into the set of sittings it suits — every one of breakfast, lunch, \
+dinner, snack that genuinely fits, never just the likeliest and never an empty set — \
+then call meal_times_push; repeat until meal_times_pull returns an empty array. Use \
+only the meal_times_pull and meal_times_push tools."
 
 # --- drain one queue -------------------------------------------------------------
 # Peek the queue cheaply via the CLI (a read-only pull; it does not consume). While
@@ -186,4 +193,14 @@ drain_queue equipment "$PLUGIN_DIR/skills/enrich-equipment/SKILL.md" \
 # stall a queue that has work it can legitimately do.
 drain_queue nutrition "$PLUGIN_DIR/skills/enrich-nutrition/SKILL.md" \
   "$NUTR_TOOLS" "$NUTR_PROMPT" \
+  || true # a backlog just waits for the next run
+
+# Meal times (#191) runs beside the others, ungated: when a dish is eaten reads from
+# its title, category, cuisine and method, all present from ingest — it needs no other
+# reading first (meal_times.rs says so and pending() enforces nothing but a title).
+# This drain is what makes #192's strict filter mean anything in production: a meal
+# round serves only explicitly-read sittings, so until this queue drains, every meal
+# deck is empty — by ruling, and the fix is this data entry, not the filter.
+drain_queue meal-times "$PLUGIN_DIR/skills/enrich-meal-times/SKILL.md" \
+  "$MEAL_TOOLS" "$MEAL_PROMPT" \
   || true # a backlog just waits for the next run
