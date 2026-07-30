@@ -1309,13 +1309,16 @@ mod tests {
         );
     }
 
-    /// End to end through the router (#191), and the acceptance for the whole issue: a
-    /// worker pulls a dish, pushes the sittings it suits, and the plan's deck changes.
+    /// End to end through the router (#191/#192), and the acceptance for the whole
+    /// issue: a worker pulls a dish, pushes the sittings it suits, and the dish joins
+    /// exactly the decks the reading names.
     ///
-    /// The recipe is a roast. Before the reading, a breakfast plan deals it — nothing
-    /// says otherwise. After a reading of `["dinner"]`, the breakfast plan deals nothing
-    /// and the dinner plan deals it. **That is the control finally meaning something**,
-    /// and it happens without a single word of model code in this service.
+    /// The recipe is a roast. Before the reading, **no** plan deals it — a meal round
+    /// serves only explicit matches, and nothing has been read (ruled in #192; the
+    /// same day-one state as the whole corpus). After a reading of `["dinner"]`, the
+    /// dinner plan deals it and the breakfast plan still does not. **That is the
+    /// control finally meaning something**, and it happens without a single word of
+    /// model code in this service.
     #[tokio::test]
     async fn a_meal_time_reading_changes_which_plan_is_dealt_the_dish() {
         let (app, conn) = test_app().await;
@@ -1334,8 +1337,8 @@ mod tests {
         let token = auth::issue_test_session(&conn, "4242").await;
         let cookie = format!("recipes_session={token}");
 
-        // Two plans, one for breakfast and one for dinner. Both deal the roast, because
-        // nothing has read it — the state of the whole corpus the day this lands.
+        // Two plans, one for breakfast and one for dinner. Neither deals the roast yet:
+        // unread means no meal round, which is the whole corpus the day this lands.
         for (channel, meal) in [("b", "breakfast"), ("d", "dinner")] {
             conn.execute(
                 "INSERT INTO pick_sessions (channel_id, created_by, meal_type, max_total_seconds)
@@ -1364,11 +1367,13 @@ mod tests {
             let walk: serde_json::Value = serde_json::from_slice(&body).unwrap();
             walk["stops"].as_array().unwrap().len()
         };
-        assert_eq!(
-            dealt(app.clone(), "b", cookie.clone()).await,
-            1,
-            "unread, so a breakfast plan is dealt the roast"
-        );
+        for channel in ["b", "d"] {
+            assert_eq!(
+                dealt(app.clone(), channel, cookie.clone()).await,
+                0,
+                "unread, so no meal round deals the roast ({channel})"
+            );
+        }
 
         // The worker pulls it, with everything the reading needs.
         let res = app
@@ -2129,9 +2134,12 @@ mod tests {
             ("slow", Some(3600i64)),
             ("unknown", None),
         ] {
+            // Read for the plan's default meal (dinner): the bound under test is the
+            // cap, and a meal round deals only explicit matches (#192), so the meal
+            // filter is satisfied uniformly first.
             conn.execute(
-                "INSERT INTO recipes (source, id, title, total_seconds)
-                 VALUES ('t', ?1, ?1, ?2)",
+                "INSERT INTO recipes (source, id, title, total_seconds, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, secs],
             )
             .await
@@ -2173,31 +2181,36 @@ mod tests {
         );
     }
 
-    /// End to end through the router (#184): the meal a host chose in the lobby
-    /// reaches the deck. A plan's round deals *the meal*, so a dish the corpus states
-    /// accompanies one is not dealt, and everything the corpus says nothing about is.
+    /// End to end through the router (#184/#192): the meal a host chose in the lobby
+    /// reaches the deck, and the round deals **only what is explicitly read as that
+    /// meal**. A stated accompaniment is refused whatever its reading says, an unread
+    /// dish is in no round, and a dish read for another sitting stays out.
     ///
     /// This is the whole wire — create with a meal, `resolve_bounds` reading it off the
     /// plan, `load_corpus` acting on it — which the unit tests in `walk` cannot see:
     /// they call `load_corpus` with a `Bounds` they built themselves, so a
     /// `resolve_bounds` that dropped the meal on the floor would leave every one of
-    /// them green while the product went back to dealing 790 recipes to a breakfast.
+    /// them green while the product dealt dinners to a breakfast.
     #[tokio::test]
     async fn the_meal_a_plan_chose_bounds_the_walk_it_deals() {
         let (app, conn) = test_app().await;
         // No estimates, so the born-in cap (#163) cannot be what excludes anything
-        // here — an un-estimated recipe stays under any cap (#80).
-        for (id, category) in [
-            ("trifle", "Dessert"),
-            ("chips", "Side"),
-            ("soup", "Starter"),
-            ("pancakes", "Breakfast"),
-            ("stew", "Beef"),
+        // here — an un-estimated recipe stays under any cap (#80). `sittings` is the
+        // reading each case needs: read-as-breakfast, read-as-dinner-only, unread,
+        // and a stated accompaniment that is refused even when read.
+        for (id, category, sittings) in [
+            ("trifle", "Dessert", "[\"dinner\"]"),
+            ("chips", "Side", "[\"lunch\"]"),
+            ("soup", "Starter", "[]"),
+            ("pancakes", "Breakfast", "[\"breakfast\"]"),
+            ("stew", "Beef", "[\"lunch\",\"dinner\"]"),
+            ("porridge", "Miscellaneous", "[\"breakfast\",\"snack\"]"),
+            ("blank", "Beef", "[]"),
         ] {
             conn.execute(
-                "INSERT INTO recipes (source, id, title, category)
-                 VALUES ('t', ?1, ?1, ?2)",
-                libsql::params![id, category],
+                "INSERT INTO recipes (source, id, title, category, sittings)
+                 VALUES ('t', ?1, ?1, ?2, ?3)",
+                libsql::params![id, category, sittings],
             )
             .await
             .unwrap();
@@ -2237,17 +2250,23 @@ mod tests {
         for stated in ["trifle", "chips", "soup"] {
             assert!(
                 !ids.contains(stated),
-                "the corpus states {stated} accompanies a meal, so the round refuses it: {ids:?}"
+                "the corpus states {stated} accompanies a meal, so the round refuses it \
+                 even when its reading names a sitting: {ids:?}"
             );
         }
-        assert!(
-            ids.contains("stew"),
-            "`Beef` says nothing about the meal, so it stays (#82's unread ruling): {ids:?}"
-        );
-        assert!(
-            ids.contains("pancakes"),
-            "a stated sitting stays, in this and every other meal: {ids:?}"
-        );
+        for wrong_or_unread in ["stew", "blank"] {
+            assert!(
+                !ids.contains(wrong_or_unread),
+                "{wrong_or_unread} is not read as a breakfast, so a breakfast round \
+                 refuses it (#192 — only explicit matches): {ids:?}"
+            );
+        }
+        for breakfast in ["pancakes", "porridge"] {
+            assert!(
+                ids.contains(breakfast),
+                "{breakfast} is read as a breakfast, so the breakfast round deals it: {ids:?}"
+            );
+        }
     }
 
     /// A nonsense cap — zero, negative, longer than a day — is refused at create.
@@ -2369,8 +2388,10 @@ mod tests {
             ("unknown", None),
         ] {
             conn.execute(
-                "INSERT INTO recipes (source, id, title, total_seconds)
-                 VALUES ('t', ?1, ?1, ?2)",
+                // Read for the plan's default meal: the bound under test is the cap,
+                // and a meal round deals only explicit matches (#192).
+                "INSERT INTO recipes (source, id, title, total_seconds, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, secs],
             )
             .await
@@ -2498,7 +2519,11 @@ mod tests {
             ("unread", "[]"),
         ] {
             conn.execute(
-                "INSERT INTO recipes (source, id, title, equipment) VALUES ('t', ?1, ?1, ?2)",
+                // `unread` here means unread *equipment* — every row carries a sittings
+                // reading, because the bound under test is the kitchen and a meal round
+                // deals only explicit matches (#192).
+                "INSERT INTO recipes (source, id, title, equipment, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, equipment],
             )
             .await

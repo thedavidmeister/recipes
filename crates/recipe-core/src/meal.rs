@@ -10,9 +10,11 @@
 //!   is in the dish or how it is cooked, and **nothing at all** about when it is
 //!   eaten.
 //!
-//! [`course`] reads that field as three answers, and the third is an absence — the
-//! same shape, and the same ruling, as [`crate::equipment::Capability::Unread`]. A
-//! dish the corpus says nothing about is **not restricted**, never excluded.
+//! [`course`] reads that field as three answers, and the third is an absence. An
+//! absence never *classifies* — see below — but by ruling (#192) a meal round serves
+//! only what explicitly matches, so an unread dish is in **no** meal round until the
+//! reading lands. Missing data is a scraper/enrichment gap: the fix is reading the
+//! corpus, never widening a deck to cover for it.
 //!
 //! # Silence is not a classification
 //!
@@ -269,32 +271,27 @@ pub enum MealFit {
 /// ask the same question about a dessert. A second implementation would be a second
 /// chance to disagree.
 ///
-/// # An unread recipe is not restricted, and that decides the rollout
+/// # An unread recipe is excluded from meal rounds, by ruling
 ///
-/// [`MealFit::Unread`] exists so that absence narrows nothing, which is
-/// [`crate::equipment::Capability::Unread`]'s ruling (#82) and #158's: a missing reading
-/// is a gap in **our** reading, not a property of the dish, and the answer to a gap is
-/// filling it rather than narrowing the product against it.
+/// [`MealFit::Unread`] says *we have not read this* — a different fact from
+/// [`MealFit::Wrong`]'s *read, and not this meal*, and the walk must be able to tell
+/// them apart in its reporting even though, by ruling (#192/#193), both are excluded
+/// from a meal round: the round serves only what **explicitly** matches the filter.
+/// This matches the kitchen bound's treatment of an unread equipment reading, and for
+/// the same written reason — containment is a proof, and admitting unread recipes
+/// beside it would mix a proof with a guess.
 ///
-/// It is also the only rollout that works. On the day this lands not one of the corpus's
-/// 790 recipes has a reading, because the reading is produced off the service by a
-/// worker somebody runs (#59) — nothing about deploying this causes one to exist.
-/// Excluding unread recipes would therefore deal **an empty deck**, for as long as it
-/// took a person to notice and run the worker. That is not "honest, briefly bad"; it is
-/// the product not working, and #161 already recorded the same hazard from the other
-/// side ("the deck stays whole meanwhile rather than emptying").
+/// The cost is accepted and stated: the reading is produced off the service by a
+/// worker somebody runs (#59), so until it has read a recipe no meal round deals it —
+/// on the day this lands, that is the whole corpus, and every meal round is empty
+/// until the `enrich-meal-times` worker runs against production. Running the worker is
+/// the act that delivers the feature; the merge is not it. The same rule then keeps
+/// holding: ingest adds recipes unread, and each stays out of every meal round until
+/// its reading lands — a deck never contains a guess.
 ///
-/// The usual objection to this choice is that it is the one nobody ever switches off.
-/// **There is nothing to switch.** The rule is per recipe, not a corpus-wide mode: every
-/// recipe that gets a reading is filtered strictly from that moment, so the deck tightens
-/// exactly as fast as the corpus is read and is fully strict the moment the corpus is
-/// complete. No flag, no threshold, no dated act anybody has to remember.
-///
-/// What that costs, stated plainly rather than left to be discovered: **until the corpus
-/// is read, a plan for dinner still deals dishes nobody has said are dinners.** The
-/// requirement ("a plan for a meal shows only recipes that are explicitly that meal") is
-/// met by reading the corpus, and this function is what makes it true the moment the
-/// reading exists — not before.
+/// There is no flag, no threshold and no dated act to remember: the rule is per
+/// recipe, so each one joins its decks the moment it is read, and the corpus being
+/// read IS the rollout.
 pub fn fit(sittings: &[Sitting], meal: Sitting) -> MealFit {
     if sittings.is_empty() {
         return MealFit::Unread;
@@ -521,17 +518,12 @@ mod tests {
         assert_eq!(fit(&[Dinner], Dinner), MealFit::Suits);
     }
 
-    /// The rollout, in one assertion: an unread recipe is **unread**, not "eaten at no
-    /// sitting", so it restricts nothing and is dealt to every meal. That is
-    /// `Capability::Unread`'s ruling (#82) and #158's — a missing reading is a gap in
-    /// ours, not a property of the dish — and it is the only rollout that does not deal
-    /// an empty deck on the day this lands, when 0 of 790 recipes have been read.
-    ///
-    /// It is per recipe rather than a corpus-wide mode, which is what makes it
-    /// self-closing: there is no flag to switch, so a recipe is filtered strictly from
-    /// the moment it is read and the corpus is fully strict the moment it is complete.
+    /// An unread recipe answers **`Unread`** for every meal — a different fact from
+    /// `Wrong`, and the walk needs the distinction for its reporting even though, by
+    /// ruling (#192), both are excluded from a meal round: only an explicit match is
+    /// served, and a gap in our reading is fixed by reading, never by dealing a guess.
     #[test]
-    fn an_unread_recipe_is_unread_and_therefore_dealt_to_every_meal() {
+    fn an_unread_recipe_is_unread_for_every_meal() {
         for meal in Sitting::ALL {
             assert_eq!(fit(&[], meal), MealFit::Unread, "{meal:?}");
         }
