@@ -37,6 +37,34 @@ diagram in [README.md](./README.md).
   recipe, written by the off-service worker), and **`recipes`** (derive — the
   view the app reads). Dev env + CI via **rainix** (`nix develop`).
 
+## Rulings are specs — read this before designing anything
+
+The human designs this product. A ruling they state once — in an issue, a PR
+comment, or chat — is a **binding spec** for all work, including work already in
+flight. It supersedes any prior precedent in this repo for its dimension. Never
+re-argue it, never soften it, never build the alternative "to compare", never
+present it back as an open question. If new information seems to conflict,
+implement the ruling and report the information in one line. An artifact that
+contradicts a ruling is defective no matter how well argued its comments are.
+
+**Data gaps are data entry.** When a feature looks broken because data is absent
+(an unread enrichment, a missing category, an empty corpus slice), the fix lives
+on the data side — run the worker, add a source, fix the scraper. NEVER widen
+app logic, invent fallbacks, or deal guesses to paper over missing data. An
+empty deck, a NULL, an absent badge that honestly reflects the data IS correct
+behaviour, and its visibility is the pressure that gets the data entered. This
+was violated once by dealing unread recipes into meal rounds "so the deck isn't
+empty"; the human rejected it in the strongest terms. Do not re-derive it.
+
+Standing rulings agents have re-derived wrongly before:
+
+- A meal round serves **only** recipes explicitly read as that meal (#192/#193).
+  Unread = excluded, exactly like the kitchen bound treats unread equipment.
+- Never classify from absence — "not labelled `Dessert`" is not "a dinner".
+- A vocabulary option must have corpus data behind it (#185 removed `drink`).
+- An estimate states its completeness honestly (`fully_timed`, `kcal_complete`);
+  a floor renders as `25 min+`, never `~25 min`.
+
 ## Ingestion is server-driven; the client has no access to it (#49)
 
 **There is no search, and the client does not decide what enters the corpus.** A
