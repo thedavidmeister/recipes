@@ -39,6 +39,21 @@ jobs:
       # `npm ci`, not `install`: CI must build the locked tree, and fail if the
       # lockfile and package.json disagree rather than quietly resolving.
       - run: nix develop -c npm --prefix frontend ci
+      # The WHOLE tree passes every pre-commit hook, not just the files recent
+      # commits touched. Per-commit runs only see a commit's own files, so when
+      # a rainix bump changes the prettier bundle's style everything untouched
+      # since drifts silently — main sat un-formatted on 43 files for two weeks
+      # with every per-commit run green (#190). Same discipline rainix-rs-static
+      # gives rust repos, but from the default shell so prettier-rainix is LIVE
+      # (catching the bundle's own restyling is the point; in rust-shell it
+      # no-ops). Possible at all because one formatter owns each file type
+      # (rainix#291) — with .mjs contested this could never pass. AFTER npm ci,
+      # deliberately: prettier's tailwindcss plugin resolves the project's own
+      # Tailwind from node_modules to decide class order; before install it
+      # silently falls back to its bundled default and sorts differently, so
+      # the step run first rewrote 10 components CI-only (mt-8 mb-4 -> mb-4
+      # mt-8) while every installed machine agreed with the committed order.
+      - run: nix develop -c pre-commit run --all-files --show-diff-on-failure --color always
       # svelte-check: types across .svelte + .ts. The whole reason for this job.
       - run: nix develop -c npm --prefix frontend run check
       # Design-system enforcement (the ratchet): fail the build if a surface
