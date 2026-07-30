@@ -88,7 +88,7 @@ const db = createClient({
 // nothing else is, because trimming a row to what a story happens to use today is
 // how a fixture starts editorialising again.
 const COLUMNS =
-  "source, id, title, image, category, area, tags, ingredients, instructions, steps, equipment, source_url, video_url, total_seconds";
+  "source, id, title, image, category, area, tags, ingredients, instructions, steps, equipment, source_url, video_url, total_seconds, kcal, kcal_complete, servings";
 
 const rows = [];
 for (const [source, id, why] of WANTED) {
@@ -121,6 +121,15 @@ for (const [source, id, why] of WANTED) {
     total_seconds: row.total_seconds === null
       ? null
       : Number(row.total_seconds),
+    // The nutrition reading's three app-facing columns (#162). They are here for the
+    // reason this whole file exists: the pick card's calorie badge is per serving, so
+    // a fixture that carried a total without the servings it is divided by — or
+    // without `kcal_complete` — would render a claim the corpus never made. NULL
+    // stays NULL: unread is a state the badge has to show (as nothing at all), and
+    // the sample is where it comes from.
+    kcal: row.kcal === null ? null : Number(row.kcal),
+    kcal_complete: Number(row.kcal_complete) !== 0,
+    servings: row.servings === null ? null : Number(row.servings),
   });
 }
 

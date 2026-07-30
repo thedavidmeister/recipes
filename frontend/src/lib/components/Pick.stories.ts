@@ -13,10 +13,21 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, no consensus yet. The badge beside the category is the
- * recipe's estimated total time (#84): "23 min+", an at-least — this recipe has
- * steps the reading left untimed, and they count as nothing in the total, so the
- * real cook takes longer. */
+/**
+ * A card up to vote on, no consensus yet. The badge beside the category is the recipe's
+ * estimated total time (#84): "23 min+", an at-least — this recipe has steps the reading
+ * left untimed, and they count as nothing in the total, so the real cook takes longer.
+ *
+ * It is also the **unread** state of the calorie badge (#162), which is why there is no
+ * second badge here. Every card in this file is built from `corpus-sample.json`, and the
+ * sample was dumped on 2026-07-28, before the nutrition columns existed — so it holds no
+ * `kcal` for these recipes, and a recipe nobody has read has no calorie figure. That is
+ * the honest render, not a hole to fill: an invented figure is a claim about a real
+ * record that no reading ever made (#157). Production carries a reading for all 790
+ * recipes, so `node scripts/sample-corpus.mjs` (which now selects the three columns) is
+ * what lights this badge here — in every deck story at once, with the corpus's own
+ * numbers, and with the two *read* states then getting stories of their own.
+ */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
 };

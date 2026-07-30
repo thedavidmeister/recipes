@@ -44,6 +44,14 @@ const rows = sample.recipes as {
   instructions: string;
   steps: unknown;
   total_seconds: number | null;
+  // Optional because the committed sample predates them (#162 / #177): it was dumped
+  // on 2026-07-28 and the nutrition columns landed after, so today these keys are
+  // simply absent. `sample-corpus.mjs` selects them, so a refresh fills them in — and
+  // the tests below are written to hold in both worlds, which is what makes them a
+  // check on the refresh rather than a snapshot of this file's current staleness.
+  kcal?: number | null;
+  kcal_complete?: boolean;
+  servings?: number | null;
 }[];
 
 function sampled(id: string) {
@@ -201,6 +209,44 @@ describe("the walk fixture", () => {
       expect(stop.recipe.total_seconds).toBe(
         sampled(stop.recipe.id).total_seconds,
       );
+    }
+  });
+
+  /**
+   * The calorie badge (#162) may only ever say what the sample says. This is the #157
+   * rule pointed at the newest column, and it is the one a story is most tempted to
+   * break: a calorie figure is a plausible-looking number nobody reading the story can
+   * check, so a fixture that invented one would let the badge's display rules be fitted
+   * to a recipe that does not exist.
+   *
+   * It holds in both directions of the refresh. Today the sample carries no reading, so
+   * this pins that no card deals itself one; once `sample-corpus.mjs` has been re-run
+   * against production, it pins that every card carries the corpus's own numbers rather
+   * than the last hand-typed ones.
+   */
+  it("deals no calorie figure the corpus sample does not hold", () => {
+    for (const stop of stops) {
+      const r = sampled(stop.recipe.id);
+      expect(stop.recipe.kcal).toBe(r.kcal ?? null);
+      expect(stop.recipe.servings).toBe(r.servings ?? null);
+      expect(stop.recipe.kcal_complete).toBe(r.kcal_complete ?? false);
+    }
+  });
+
+  /**
+   * A total and the servings it is divided by are written together by
+   * `recipes::upsert`, so a sampled row carrying one without the other is a half-read
+   * row — and the badge would silently render a whole-recipe total as a per-serving
+   * figure if it ever tried. Vacuous while the sample predates the columns; a real
+   * check the moment it is refreshed, which is exactly when it is needed.
+   */
+  it("never carries a total without the servings that interpret it", () => {
+    for (const r of rows) {
+      if (typeof r.kcal !== "number") continue;
+      expect(typeof r.servings, `${r.title} has kcal but no servings`).toBe(
+        "number",
+      );
+      expect(r.servings).toBeGreaterThan(0);
     }
   });
 });
