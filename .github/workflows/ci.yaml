@@ -36,6 +36,16 @@ jobs:
       - uses: rainlanguage/rainix/.github/actions/nix-cachix-setup@main
         with:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # The WHOLE tree passes every pre-commit hook, not just the files recent
+      # commits touched. Per-commit runs only see a commit's own files, so when
+      # a rainix bump changes the prettier bundle's style everything untouched
+      # since drifts silently — main sat un-formatted on 43 files for two weeks
+      # with every per-commit run green (#190). Same discipline rainix-rs-static
+      # gives rust repos, but from the default shell so prettier-rainix is LIVE
+      # (catching the bundle's own restyling is the point; in rust-shell it
+      # no-ops). Possible at all because one formatter owns each file type
+      # (rainix#291) — with .mjs contested this could never pass.
+      - run: nix develop -c pre-commit run --all-files --show-diff-on-failure --color always
       # `npm ci`, not `install`: CI must build the locked tree, and fail if the
       # lockfile and package.json disagree rather than quietly resolving.
       - run: nix develop -c npm --prefix frontend ci
