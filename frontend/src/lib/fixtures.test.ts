@@ -126,9 +126,9 @@ describe("every sampled row", () => {
       expect(Array.isArray(r.tags)).toBe(true);
       expect(Array.isArray(r.ingredients)).toBe(true);
       expect(Array.isArray(r.steps)).toBe(true);
-      expect(r.total_seconds === null || typeof r.total_seconds === "number").toBe(
-        true,
-      );
+      expect(
+        r.total_seconds === null || typeof r.total_seconds === "number",
+      ).toBe(true);
     }
   });
 
@@ -152,7 +152,9 @@ describe("every sampled row", () => {
         expect(typeof step.id).toBe("number");
         expect(typeof step.text).toBe("string");
         expect(["prep", "cook"]).toContain(step.kind);
-        expect(step.seconds === null || typeof step.seconds === "number").toBe(true);
+        expect(step.seconds === null || typeof step.seconds === "number").toBe(
+          true,
+        );
         // `after` only ever references earlier steps — the backend validates it, and
         // `stepDepths` recurses on it.
         for (const dep of step.after) expect(dep).toBeLessThan(step.id);
@@ -196,7 +198,9 @@ describe("the walk fixture", () => {
 
   it("shows each recipe's own stored estimate", () => {
     for (const stop of stops) {
-      expect(stop.recipe.total_seconds).toBe(sampled(stop.recipe.id).total_seconds);
+      expect(stop.recipe.total_seconds).toBe(
+        sampled(stop.recipe.id).total_seconds,
+      );
     }
   });
 });

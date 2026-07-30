@@ -264,7 +264,7 @@
 
 {#if !authed}
   <Login
-    status={status}
+    {status}
     link={botLink()}
     error={session.error instanceof Error ? session.error.message : undefined}
   />

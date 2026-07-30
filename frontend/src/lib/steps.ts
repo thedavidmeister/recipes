@@ -159,7 +159,11 @@ export function loadDeadlines(source: string, id: string): Deadlines {
     const raw = localStorage.getItem(timersKey(source, id));
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       return {};
     }
     const out: Deadlines = {};
@@ -173,7 +177,11 @@ export function loadDeadlines(source: string, id: string): Deadlines {
 }
 
 /** Persist a recipe's running timers so they survive a reload mid-cook. */
-export function saveDeadlines(source: string, id: string, deadlines: Deadlines): void {
+export function saveDeadlines(
+  source: string,
+  id: string,
+  deadlines: Deadlines,
+): void {
   try {
     localStorage.setItem(timersKey(source, id), JSON.stringify(deadlines));
   } catch {

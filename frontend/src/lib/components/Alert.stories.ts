@@ -11,4 +11,6 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** The one place the palette raises its voice. */
-export const Default: Story = { args: { children: text("Lost the connection.") } };
+export const Default: Story = {
+  args: { children: text("Lost the connection.") },
+};

@@ -321,7 +321,9 @@
         <!-- The time cap (#80): one bound per plan, single-select like the meal
              row, frozen at start. The estimate it filters on is a lower bound, so
              the honesty note is part of the control, not a footnote. -->
-        <p class="mt-6 mb-3 text-xs text-stone-500">How much time do you have?</p>
+        <p class="mt-6 mb-3 text-xs text-stone-500">
+          How much time do you have?
+        </p>
         <div class="flex flex-wrap gap-2">
           {#each BUCKETS as b (b.label)}
             <button
@@ -355,7 +357,9 @@
              settable: the cap is the host's call (#80). -->
         <p class="mt-6 text-sm text-stone-600">
           <span
-            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(hostId)}"
+            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(
+              hostId,
+            )}"
           >
             {#if hostId}
               <span

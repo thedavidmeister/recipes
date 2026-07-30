@@ -86,7 +86,13 @@ export async function getBuyList(): Promise<BuyRecipe | null> {
       // Malformed ingredients JSON: show the recipe with no lines rather than fail.
     }
   }
-  return { source: ref.source, id: ref.id, title, ingredients, channel: ref.channel };
+  return {
+    source: ref.source,
+    id: ref.id,
+    title,
+    ingredients,
+    channel: ref.channel,
+  };
 }
 
 // ---- the shared checklist (#131) -------------------------------------------
@@ -161,10 +167,13 @@ export async function setCheck(
   index: number,
   checked: boolean,
 ): Promise<BuyList> {
-  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/buy`, {
-    method: "POST",
-    body: JSON.stringify({ source, id, index, checked }),
-  });
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/buy`,
+    {
+      method: "POST",
+      body: JSON.stringify({ source, id, index, checked }),
+    },
+  );
   if (!res.ok) throw checksFailed(res.status, "update the shopping list");
   return (await res.json()) as BuyList;
 }
@@ -205,7 +214,11 @@ export function loadChecks(source: string, id: string): number[] {
 }
 
 /** Persist the ticked indices so the checklist survives a reload mid-shop. */
-export function saveChecks(source: string, id: string, indices: number[]): void {
+export function saveChecks(
+  source: string,
+  id: string,
+  indices: number[],
+): void {
   try {
     localStorage.setItem(checksKey(source, id), JSON.stringify(indices));
   } catch {

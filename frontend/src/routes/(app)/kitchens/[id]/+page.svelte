@@ -20,8 +20,6 @@
     queryFn: () => getKitchen(id),
   }));
 
-
-
   /** Start a meal plan for this kitchen; its lobby is where the deciders gather. */
   async function planMeal() {
     const channel = await createPick(undefined, id);

@@ -159,7 +159,7 @@
 <div class="pt-6">
   <header class="mb-6">
     <p class="font-display flex items-center gap-2 text-stone-600">
-      <span class="size-2.5 rounded-full bg-plum-500" aria-hidden="true"></span>
+      <span class="bg-plum-500 size-2.5 rounded-full" aria-hidden="true"></span>
       Buy
     </p>
     {#if status === "ready" && recipe}
@@ -180,7 +180,7 @@
     <ul class="flex flex-col gap-2" aria-hidden="true">
       {#each Array(8) as _, i (i)}
         <li
-          class="rounded-card flex items-center gap-3 border border-stone-200 bg-cream-100 px-4 py-3"
+          class="rounded-card bg-cream-100 flex items-center gap-3 border border-stone-200 px-4 py-3"
         >
           <span class="size-5 flex-none rounded-md bg-stone-100"></span>
           <span class="rounded-pill h-4 flex-1 bg-stone-100"></span>
@@ -192,14 +192,16 @@
     <Notice>
       <p class="font-display text-stone-900">Nothing to buy yet.</p>
       <p class="mt-1 text-sm text-stone-600">
-        Pick something first — once the group agrees on a recipe, its ingredients
-        land here.
+        Pick something first — once the group agrees on a recipe, its
+        ingredients land here.
       </p>
     </Notice>
   {:else if recipe.ingredients.length === 0}
     <Notice>
       <p class="font-display text-stone-900">{recipe.title}</p>
-      <p class="mt-1 text-sm text-stone-600">No ingredients listed for it yet.</p>
+      <p class="mt-1 text-sm text-stone-600">
+        No ingredients listed for it yet.
+      </p>
     </Notice>
   {:else}
     {#if tickError}

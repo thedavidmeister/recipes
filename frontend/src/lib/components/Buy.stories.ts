@@ -315,5 +315,8 @@ export const NoIngredients: Story = {
 
 /** The list could not be loaded. */
 export const Error: Story = {
-  args: { status: "error", error: "The server didn't answer (502). Try again in a moment." },
+  args: {
+    status: "error",
+    error: "The server didn't answer (502). Try again in a moment.",
+  },
 };

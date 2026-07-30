@@ -304,7 +304,8 @@
       deciders = lobby.voters.length;
       started = lobby.started;
     } catch (e) {
-      lobbyError = e instanceof Error ? e.message : "Couldn't set the time cap.";
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't set the time cap.";
     }
   }
 

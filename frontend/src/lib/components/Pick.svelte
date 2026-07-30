@@ -83,122 +83,129 @@
 
 <div class="pt-32 pb-16">
   <Panel>
-  <header class="mb-6 flex items-center justify-between gap-4">
-    <p class="font-display flex items-center gap-2 text-stone-600">
-      <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"></span>
-      Pick
-    </p>
-    {#if shareUrl}
-      <button
-        onclick={() => onShare?.()}
-        class="rounded-pill font-display inline-flex items-center gap-2 border border-stone-200 bg-cream-50 px-4 py-2 text-sm font-medium text-stone-900 transition-colors hover:border-pesto-500"
-      >
-        {copied ? "Link copied" : "Invite"}
-      </button>
-    {/if}
-  </header>
-
-  {#if status === "error"}
-    <Alert>
-      <p class="font-display text-stone-900">Lost the connection.</p>
-      <p class="mt-1 text-sm text-stone-600">
-        {error ?? "Reload the page to rejoin the others."}
+    <header class="mb-6 flex items-center justify-between gap-4">
+      <p class="font-display flex items-center gap-2 text-stone-600">
+        <span class="bg-pesto-500 size-2.5 rounded-full" aria-hidden="true"
+        ></span>
+        Pick
       </p>
-    </Alert>
-  {:else if status === "connecting"}
-    <Notice>
-      <p class="font-display text-stone-900">Starting a pick…</p>
-      <p class="mt-1 text-sm text-stone-600">Catching up on the votes so far.</p>
-    </Notice>
-  {:else}
-    {#if status === "reconnecting"}
-      <p
-        class="rounded-pill mb-3 inline-flex items-center gap-2 bg-honey-100 px-3 py-1 text-sm text-stone-600"
-      >
-        <span class="size-2 rounded-full bg-honey-500" aria-hidden="true"></span>
-        Reconnecting…
-      </p>
-    {/if}
+      {#if shareUrl}
+        <button
+          onclick={() => onShare?.()}
+          class="rounded-pill font-display bg-cream-50 hover:border-pesto-500 inline-flex items-center gap-2 border border-stone-200 px-4 py-2 text-sm font-medium text-stone-900 transition-colors"
+        >
+          {copied ? "Link copied" : "Invite"}
+        </button>
+      {/if}
+    </header>
 
-    {#if !card}
-      <Notice>
-        <p class="font-display text-stone-900">Finding more recipes…</p>
+    {#if status === "error"}
+      <Alert>
+        <p class="font-display text-stone-900">Lost the connection.</p>
         <p class="mt-1 text-sm text-stone-600">
-          A pick keeps going until everyone agrees — the next card is on its way.
+          {error ?? "Reload the page to rejoin the others."}
+        </p>
+      </Alert>
+    {:else if status === "connecting"}
+      <Notice>
+        <p class="font-display text-stone-900">Starting a pick…</p>
+        <p class="mt-1 text-sm text-stone-600">
+          Catching up on the votes so far.
         </p>
       </Notice>
     {:else}
-      <article
-        class="rounded-card overflow-hidden border border-stone-200 bg-cream-100"
-      >
-        {#if card.image}
-          <img
-            src={card.image}
-            alt={card.title}
-            class="rounded-card aspect-video w-full object-cover"
-            loading="lazy"
-          />
-        {/if}
-        <div class="p-5">
-          <h2 class="font-display text-xl font-medium text-stone-900">
-            {card.title}
-          </h2>
-          <!-- Supporting information, not the headline: the meal is still the
-               title and the photo. The estimate sits beside the category/area on
-               the same quiet line, and is absent entirely when unknown. -->
-          {#if meta || estimate}
-            <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-stone-500">
-              {#if meta}<span>{meta}</span>{/if}
-              {#if estimate}
-                <span
-                  class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
-                  title={estimateHint}>{estimate}</span
-                >
-              {/if}
-            </p>
-          {/if}
-        </div>
-      </article>
-
-      {#if yesVoters.length}
-        <!-- Whose yes this already is. The tint carries the person and the name
-             carries the meaning: the colour is never the only signal, which is what
-             lets all six slots be used, pale ones included. -->
-        <p class="mt-4 text-xs text-stone-500">Already a yes for</p>
-        <ul class="mt-2 flex flex-wrap gap-2">
-          {#each yesVoters as v (v.telegram_user_id)}
-            <li
-              class="rounded-pill px-3 py-1 text-sm {userTint(
-                v.telegram_user_id,
-              )}"
-            >
-              <UserName user={v} />
-            </li>
-          {/each}
-        </ul>
+      {#if status === "reconnecting"}
+        <p
+          class="rounded-pill bg-honey-100 mb-3 inline-flex items-center gap-2 px-3 py-1 text-sm text-stone-600"
+        >
+          <span class="bg-honey-500 size-2 rounded-full" aria-hidden="true"
+          ></span>
+          Reconnecting…
+        </p>
       {/if}
 
-      <div class="mt-5 flex items-center justify-center gap-4">
-        <button
-          onclick={() => onVote?.(false)}
-          class="rounded-pill font-display border border-stone-200 bg-cream-50 px-8 py-3 font-medium text-stone-600 transition-colors hover:border-stone-400"
+      {#if !card}
+        <Notice>
+          <p class="font-display text-stone-900">Finding more recipes…</p>
+          <p class="mt-1 text-sm text-stone-600">
+            A pick keeps going until everyone agrees — the next card is on its
+            way.
+          </p>
+        </Notice>
+      {:else}
+        <article
+          class="rounded-card bg-cream-100 overflow-hidden border border-stone-200"
         >
-          Pass
-        </button>
-        <button
-          onclick={() => onVote?.(true)}
-          class="rounded-pill font-display bg-pesto-500 px-8 py-3 font-medium text-cream-50 transition-colors hover:bg-pesto-500/90"
-        >
-          Yes
-        </button>
-      </div>
-    {/if}
+          {#if card.image}
+            <img
+              src={card.image}
+              alt={card.title}
+              class="rounded-card aspect-video w-full object-cover"
+              loading="lazy"
+            />
+          {/if}
+          <div class="p-5">
+            <h2 class="font-display text-xl font-medium text-stone-900">
+              {card.title}
+            </h2>
+            <!-- Supporting information, not the headline: the meal is still the
+               title and the photo. The estimate sits beside the category/area on
+               the same quiet line, and is absent entirely when unknown. -->
+            {#if meta || estimate}
+              <p
+                class="mt-1 flex flex-wrap items-center gap-2 text-sm text-stone-500"
+              >
+                {#if meta}<span>{meta}</span>{/if}
+                {#if estimate}
+                  <span
+                    class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
+                    title={estimateHint}>{estimate}</span
+                  >
+                {/if}
+              </p>
+            {/if}
+          </div>
+        </article>
 
-    <footer class="mt-6 border-t border-stone-200 pt-4">
-      <p class="text-sm text-stone-500">
-        {participants} deciding · swipe to find something everyone likes
-      </p>
-    </footer>
-  {/if}
-</Panel>
+        {#if yesVoters.length}
+          <!-- Whose yes this already is. The tint carries the person and the name
+             carries the meaning: the colour is never the only signal, which is what
+             lets all six slots be used, pale ones included. -->
+          <p class="mt-4 text-xs text-stone-500">Already a yes for</p>
+          <ul class="mt-2 flex flex-wrap gap-2">
+            {#each yesVoters as v (v.telegram_user_id)}
+              <li
+                class="rounded-pill px-3 py-1 text-sm {userTint(
+                  v.telegram_user_id,
+                )}"
+              >
+                <UserName user={v} />
+              </li>
+            {/each}
+          </ul>
+        {/if}
+
+        <div class="mt-5 flex items-center justify-center gap-4">
+          <button
+            onclick={() => onVote?.(false)}
+            class="rounded-pill font-display bg-cream-50 border border-stone-200 px-8 py-3 font-medium text-stone-600 transition-colors hover:border-stone-400"
+          >
+            Pass
+          </button>
+          <button
+            onclick={() => onVote?.(true)}
+            class="rounded-pill font-display bg-pesto-500 text-cream-50 hover:bg-pesto-500/90 px-8 py-3 font-medium transition-colors"
+          >
+            Yes
+          </button>
+        </div>
+      {/if}
+
+      <footer class="mt-6 border-t border-stone-200 pt-4">
+        <p class="text-sm text-stone-500">
+          {participants} deciding · swipe to find something everyone likes
+        </p>
+      </footer>
+    {/if}
+  </Panel>
 </div>

@@ -54,9 +54,9 @@ describe("shoppingLines", () => {
   it("treats a whitespace-only name as no name", () => {
     // A reading whose item is blank would render as an unlabelled tickbox, and would
     // take an index, pushing every line after it onto the wrong tick.
-    expect(shoppingLines([ing("x", ""), ing("y", " \t "), ing("z", "z")])).toEqual([
-      { item: "z", amount: null, preparation: null, note: null },
-    ]);
+    expect(
+      shoppingLines([ing("x", ""), ing("y", " \t "), ing("z", "z")]),
+    ).toEqual([{ item: "z", amount: null, preparation: null, note: null }]);
   });
 
   it("keeps an unread recipe's list empty rather than inventing lines", () => {
