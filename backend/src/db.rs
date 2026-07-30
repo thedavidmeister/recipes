@@ -18,6 +18,28 @@
 
 use libsql::{Builder, Connection, Database};
 
+/// Version numbers deliberately left empty, and why each one is.
+///
+/// The ledger below is checked for holes (`migration_ledger_is_well_formed`), because
+/// a hole is nearly always a migration someone forgot to register — a `.sql` file that
+/// silently never runs. A hole that is *meant* has to be written down here, so the
+/// check stays sharp instead of being switched off.
+///
+/// A number in this list is **burnt, not free**: see the comment on 23 below. Filling
+/// one back in is the exact failure the runner cannot survive.
+///
+/// `cfg(test)` because only the check reads it — [`migrate`] iterates [`MIGRATIONS`]
+/// and has no use for a number with no SQL behind it. It still lives here rather than
+/// down in the test module, because it belongs to the ledger: a reservation that is not
+/// visible beside the list it applies to is a reservation nobody will honour.
+#[cfg(test)]
+const RESERVED: &[i64] = &[
+    // Claimed by work in flight on another branch (#96) while 21–23 were being
+    // written, then never used. It is below the production floor now, so it can
+    // never be filled.
+    20,
+];
+
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
 /// Append new migrations here as `NNNN_*.sql` files with the next integer.
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -258,6 +280,105 @@ mod tests {
         );
         // Local needs no token — asking for one would be theatre.
         assert!(resolve(Some("file::memory:"), None).is_ok());
+    }
+
+    /// **The migration ledger is a gate, not a convention (#176/5).**
+    ///
+    /// [`migrate`] applies by `MAX(version)`, so the ledger's *shape* decides whether
+    /// a migration ever runs at all, and every way of getting that shape wrong is
+    /// silent: the build is green, the tests pass, and the column simply is not there
+    /// in production. Hand-resolution on every stacked branch for a week is the
+    /// evidence that a comment was not enough. Four invariants, each for a real way
+    /// this has gone wrong:
+    ///
+    /// 1. **Strictly ascending.** A number out of order below the floor never applies.
+    /// 2. **The registered SQL is the file the number names.** Appending an entry by
+    ///    copying the line above it and editing only the version leaves two versions
+    ///    running one file — and the new migration never runs.
+    /// 3. **Every file is registered.** Writing `00NN_thing.sql` and not adding it to
+    ///    [`MIGRATIONS`] is a migration that does not exist; nothing else notices.
+    /// 4. **No undocumented hole.** A gap is nearly always (3). One that is deliberate
+    ///    goes in [`RESERVED`] with its reason, so the check stays on.
+    ///
+    /// What this *cannot* check is the one that needs production: that every new
+    /// version exceeds the highest already applied there. `_migrations` is the only
+    /// place that answer lives, so it belongs to the audit skill, which has the
+    /// read-only token.
+    #[test]
+    fn migration_ledger_is_well_formed() {
+        use std::collections::BTreeMap;
+
+        // 1. Strictly ascending.
+        for pair in MIGRATIONS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "migrations are applied in list order by MAX(version): {} then {} is \
+                 out of order, and the lower one would never apply",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+
+        // The `NNNN_name.sql` files on disk, keyed by their numeric prefix.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: BTreeMap<i64, (String, String)> = BTreeMap::new();
+        for entry in std::fs::read_dir(&dir).expect("backend/migrations must exist") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sql") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let version: i64 = name
+                .split('_')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| panic!("{name} must be named NNNN_description.sql"));
+            let sql = std::fs::read_to_string(&path).unwrap();
+            if let Some((other, _)) = on_disk.insert(version, (name.clone(), sql)) {
+                panic!("{other} and {name} both claim version {version}");
+            }
+        }
+
+        // 2. Each entry embeds the file its own number names — not the one above it.
+        for (version, sql) in MIGRATIONS {
+            let (name, on_disk_sql) = on_disk.get(version).unwrap_or_else(|| {
+                panic!("migration {version} is registered but has no NNNN_*.sql file")
+            });
+            assert_eq!(
+                sql, on_disk_sql,
+                "migration {version} is registered with SQL that is not {name} — an \
+                 entry copied from the line above it runs that file twice and this \
+                 one never"
+            );
+        }
+
+        // 3. Every file on disk is registered. An unregistered one never runs.
+        let registered: Vec<i64> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        for (version, (name, _)) in &on_disk {
+            assert!(
+                registered.contains(version),
+                "{name} is not in MIGRATIONS, so it never runs — add it, do not \
+                 rely on the file existing"
+            );
+        }
+
+        // 4. No hole that nobody wrote down.
+        let max = *registered.last().expect("MIGRATIONS is not empty");
+        for version in 1..=max {
+            assert!(
+                registered.contains(&version) || RESERVED.contains(&version),
+                "migration {version} is missing from MIGRATIONS and is not in \
+                 RESERVED — either register the file that was meant to be there, or \
+                 record why the number is empty"
+            );
+        }
+        for version in RESERVED {
+            assert!(
+                !registered.contains(version),
+                "migration {version} is registered *and* listed as RESERVED — the \
+                 reservation is stale and now hides a real hole"
+            );
+        }
     }
 
     #[tokio::test]

@@ -885,4 +885,240 @@ mod tests {
         upsert(&conn, &r, 2).await.unwrap();
         assert_eq!(read_sittings(&conn, "1").await, r#"["dinner"]"#);
     }
+
+    // --- Every column the schema declares, the sole writer fills (#161, #176/3) ---
+    //
+    // The two tests below are the generic form of a bug this repo shipped, and the
+    // reason they read the column list out of the live schema rather than from a
+    // hand-written list: the hand-written version is the version that failed.
+    // Migration 0014 added `recipes.equipment`, `derive` computed the reading, and
+    // `upsert` — the only writer of this table — never named the column, so the
+    // reading was recomputed and thrown away on every run for months and all 790 rows
+    // read `'[]'`. `fully_timed` (#171) came one review away from the same fate. A
+    // per-migration round-trip test catches this only when whoever adds the column
+    // remembers to write one; `PRAGMA table_info` puts the next column in scope the
+    // moment its migration lands, whether or not anybody thought about it.
+
+    /// Columns whose default is an *expression*, so "is it still at its default" is
+    /// not a meaningful question about them — the default computes a real value
+    /// rather than standing in for one the writer forgot.
+    ///
+    /// Pinned rather than merely detected, so a new expression-defaulted column has
+    /// to be exempted in a diff a human reads instead of quietly exempting itself.
+    const EXPRESSION_DEFAULTS: &[&str] = &[
+        // `(unixepoch())` — write time, correctly left to the schema on insert and set
+        // explicitly on update. Bookkeeping, not a derived value that could be
+        // computed and dropped.
+        "fetched_at",
+    ];
+
+    /// Whether a `dflt_value` is a constant the column *sits at* rather than an
+    /// expression that computes one.
+    ///
+    /// SQLite hands `DEFAULT (unixepoch())` back from `PRAGMA table_info` as
+    /// `unixepoch()` — the parentheses it was written with are gone — so "is it an
+    /// expression" has to be decided by what a literal looks like, not by punctuation.
+    fn is_literal(default: &str) -> bool {
+        let d = default.trim();
+        d.eq_ignore_ascii_case("null")
+            || d.parse::<f64>().is_ok()
+            || (d.starts_with('\'') && d.ends_with('\'') && d.len() >= 2)
+            || d.to_ascii_lowercase().starts_with("x'")
+    }
+
+    /// `(column, default)` for every column of `recipes`, straight from the live
+    /// schema. `None` means no `DEFAULT` clause, so the column's default is NULL.
+    async fn schema_columns(conn: &Connection) -> Vec<(String, Option<String>)> {
+        let mut rows = conn.query("PRAGMA table_info(recipes)", ()).await.unwrap();
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            out.push((
+                row.get::<String>(1).unwrap(),
+                row.get::<Option<String>>(4).unwrap(),
+            ));
+        }
+        assert!(
+            !out.is_empty(),
+            "PRAGMA table_info(recipes) returned nothing"
+        );
+        out
+    }
+
+    /// The whole stored row as `(column, value)`, each value rendered as the SQL
+    /// literal the schema would have written — so it compares directly against
+    /// `PRAGMA table_info`'s `dflt_value`, which is also SQL literal text.
+    async fn whole_row(conn: &Connection, id: &str) -> Vec<(String, String)> {
+        let mut rows = conn
+            .query(
+                "SELECT * FROM recipes WHERE source = 'themealdb' AND id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        let names: Vec<String> = (0..rows.column_count())
+            .map(|i| rows.column_name(i).unwrap().to_owned())
+            .collect();
+        let row = rows.next().await.unwrap().expect("the row must exist");
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let value = match row.get_value(i as i32).unwrap() {
+                    libsql::Value::Null => "NULL".to_owned(),
+                    libsql::Value::Integer(n) => n.to_string(),
+                    libsql::Value::Real(f) => f.to_string(),
+                    libsql::Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
+                    libsql::Value::Blob(b) => format!("x'{}'", hex::encode(b)),
+                };
+                (name, value)
+            })
+            .collect()
+    }
+
+    /// A recipe with something to say about **every** column of `recipes`: both
+    /// readings present and aligned, every step timed, every stated line weighable,
+    /// every nullable field supplied.
+    ///
+    /// When a new column makes this fixture insufficient the test below fails, and the
+    /// fix is to populate the column here. That is the forcing function, not an
+    /// obstacle: a column nothing can populate is a column nothing writes.
+    fn fully_populated() -> Recipe {
+        let mut r = weighed(500.0, 209.0, 4);
+        r.title = "Full".into();
+        r.image = Some("https://img.test/full.jpg".into());
+        r.category = Some("Starter".into());
+        r.area = Some("Thai".into());
+        r.tags = vec!["easy".into()];
+        r.instructions = "Boil it.".into();
+        r.steps = vec![cook_step(1, Some(60), &[]), cook_step(2, Some(120), &[1])];
+        r.equipment = vec![recipe_core::equipment::RequiredEquipment {
+            item: "saucepan".into(),
+        }];
+        r.source_url = Some("https://example.test/full".into());
+        r.video_url = Some("https://example.test/full.mp4".into());
+        // The meal-time reading (#191), which landed while this test was in flight —
+        // populated here because this very test refused to compile the gap away: it
+        // failed on `sittings` at its default the first time it met the column.
+        r.sittings = vec![recipe_core::Sitting::Lunch, recipe_core::Sitting::Dinner];
+        r
+    }
+
+    /// The same, populated **differently** in every column — so a column an update
+    /// fails to carry shows up as a value that did not move.
+    ///
+    /// The two flags go the other way here (one untimed step, one stated-but-unweighable
+    /// line), because they are the only columns whose populated value is a single bit:
+    /// "differently populated" for them means the opposite bit, and it covers the
+    /// direction [`fully_populated`] cannot.
+    fn differently_populated() -> Recipe {
+        let mut r = weighed(300.0, 90.0, 2);
+        r.title = "Other".into();
+        r.image = Some("https://img.test/other.jpg".into());
+        r.category = Some("Dessert".into());
+        r.area = Some("British".into());
+        r.tags = vec!["slow".into()];
+        r.instructions = "Bake it.".into();
+        // One step with no duration: a real total, but only a lower bound.
+        r.steps = vec![cook_step(1, Some(900), &[]), cook_step(2, None, &[1])];
+        r.equipment = vec![recipe_core::equipment::RequiredEquipment {
+            item: "oven".into(),
+        }];
+        // A second line stating a number nothing can weigh: the counted line still
+        // gives a total, but the total is only a floor.
+        r.ingredients.push(Ingredient {
+            name: "cinnamon".into(),
+            measure: Some("2 sticks".into()),
+            structured: Some(recipe_core::StructuredMeasure {
+                item: "cinnamon".into(),
+                amount: Some(recipe_core::Amount::Quantified {
+                    quantity: recipe_core::Quantity::Exact { value: 2.0 },
+                    unit: Some("stick".into()),
+                    size: None,
+                }),
+                preparation: None,
+                note: None,
+            }),
+        });
+        r.nutrition.push(recipe_core::FoodEnergy {
+            kcal_per_100g: 247.0,
+            grams_per_unit: None,
+        });
+        r.source_url = Some("https://example.test/other".into());
+        r.video_url = Some("https://example.test/other.mp4".into());
+        r.sittings = vec![recipe_core::Sitting::Breakfast, recipe_core::Sitting::Snack];
+        r
+    }
+
+    /// **The insert path names every column.** Write a recipe that has a value for
+    /// every column, then assert none came out still holding the default its migration
+    /// gave it. A column the sole writer never names is exactly the #161 shape: `'[]'`
+    /// (or NULL, or `0`) forever, on every row, invisibly.
+    #[tokio::test]
+    async fn upsert_fills_every_column_the_schema_declares() {
+        let conn = conn().await;
+        upsert(&conn, &fully_populated(), 7).await.unwrap();
+
+        let stored: std::collections::HashMap<String, String> =
+            whole_row(&conn, "1").await.into_iter().collect();
+
+        let mut exempt = Vec::new();
+        for (name, default) in schema_columns(&conn).await {
+            if default.as_deref().is_some_and(|d| !is_literal(d)) {
+                exempt.push(name);
+                continue;
+            }
+            let value = stored.get(&name).expect("every column is in the row");
+            // No DEFAULT clause means the column defaults to NULL.
+            let default = default.unwrap_or_else(|| "NULL".to_owned());
+            assert_ne!(
+                value, &default,
+                "recipes.{name} is still at its schema default ({default}) after the \
+                 sole writer wrote a recipe that has a value for it. `upsert` does not \
+                 name the column, so it is derived and thrown away on every run (#161) \
+                 — add it to the INSERT column list *and* to the ON CONFLICT SET."
+            );
+        }
+
+        assert_eq!(
+            exempt, EXPRESSION_DEFAULTS,
+            "a column with an expression default has appeared or gone. That exempts it \
+             from the check above, so the set is pinned: add it to EXPRESSION_DEFAULTS \
+             along with the reason its default computes a value rather than standing in \
+             for one the writer forgot."
+        );
+    }
+
+    /// **And so does the update path.** A column named in the INSERT but missing from
+    /// `ON CONFLICT DO UPDATE SET` is right exactly once — on the row's first write —
+    /// and stale for every derive after it. That is harder to notice than #161 was,
+    /// because the column is not empty, only old.
+    ///
+    /// Both writes are fully populated, so every merge-non-empty guard in the SET
+    /// passes and every column is *supposed* to move. Whatever did not move was not
+    /// carried.
+    #[tokio::test]
+    async fn upsert_carries_every_column_on_update_too() {
+        let conn = conn().await;
+        upsert(&conn, &fully_populated(), 7).await.unwrap();
+        let before: std::collections::HashMap<String, String> =
+            whole_row(&conn, "1").await.into_iter().collect();
+
+        upsert(&conn, &differently_populated(), 8).await.unwrap();
+
+        for (name, value) in whole_row(&conn, "1").await {
+            // The key is the key, and `fetched_at` is a clock both writes can read
+            // inside the same second.
+            if ["source", "id", "fetched_at"].contains(&name.as_str()) {
+                continue;
+            }
+            assert_ne!(
+                &value,
+                before.get(&name).expect("every column is in both rows"),
+                "recipes.{name} did not change when a wholly different recipe was \
+                 written over it — the column is missing from the ON CONFLICT SET, so \
+                 it keeps whatever the row's first write put there and no later derive \
+                 can correct it."
+            );
+        }
+    }
 }

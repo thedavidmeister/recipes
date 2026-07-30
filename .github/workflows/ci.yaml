@@ -45,6 +45,11 @@ jobs:
       # reaches past the tokens — raw hex, Tailwind's default palette, white/black,
       # arbitrary colours, a serif — or if a component ships without a story. A
       # system nobody enforces decays; this is the enforcement.
+      #
+      # `lint:env` joined them for the same reason and the same invisibility: a
+      # *value* import of a module that reads `$env` crashes every story of a
+      # component in Storybook, while check, build and even the visual fence stay
+      # green — the fence photographs the crash quite happily (#176).
       - run: nix develop -c npm --prefix frontend run lint
       # Unit tests for the SPA's pure modules. Storybook plus the visual fence
       # cover what renders; they cannot cover the arithmetic underneath, where a

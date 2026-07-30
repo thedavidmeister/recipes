@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "recipes-audit",
+  "displayName": "Recipes Audit",
+  "description": "The judgement half of this repo's gates (#176): the recurring defects that are type-correct, lint-clean, fully tested, green, and still describe something that is not true. Two skills because they have two different oracles — `audit-change` reviews a diff against the intent it claims and against the tree that moved under it, `audit-corpus` reviews the tree against production. Whatever could be a gate already is one, in CI; these are what is left. No version field, so it tracks the repo it ships in — an audit that lags the code it audits is worse than none.",
+  "author": {
+    "name": "thedavidmeister"
+  },
+  "homepage": "https://github.com/thedavidmeister/recipes",
+  "repository": "https://github.com/thedavidmeister/recipes",
+  "license": "MIT"
+}
