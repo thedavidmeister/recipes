@@ -1,5 +1,5 @@
 {
-  "sampled_at": "2026-07-28",
+  "sampled_at": "2026-07-30",
   "recipes": [
     {
       "why": "the base recipe — buy, cook, and the walk's first stop",
@@ -337,83 +337,129 @@
           "text": "Heat the oil in a large pot and fry the sliced onion until deep golden brown, then remove and set aside",
           "kind": "cook",
           "seconds": null,
-          "after": [0]
+          "after": [
+            0
+          ]
         },
         {
           "id": 6,
           "text": "Sauté the chopped garlic in the same pot for a minute",
           "kind": "cook",
           "seconds": 60,
-          "after": [5, 2]
+          "after": [
+            5,
+            2
+          ]
         },
         {
           "id": 7,
           "text": "Add the chopped tomatoes and cook until soft, about 5 minutes",
           "kind": "cook",
           "seconds": 300,
-          "after": [6, 1]
+          "after": [
+            6,
+            1
+          ]
         },
         {
           "id": 8,
           "text": "Return the fried onion to the pot, stir, then add the ginger paste and sauté well",
           "kind": "cook",
           "seconds": null,
-          "after": [7, 5]
+          "after": [
+            7,
+            5
+          ]
         },
         {
           "id": 9,
           "text": "Add the cumin seeds, half the coriander seeds and the chopped green chillies and stir",
           "kind": "cook",
           "seconds": null,
-          "after": [8, 3]
+          "after": [
+            8,
+            3
+          ]
         },
         {
           "id": 10,
           "text": "Add the turmeric and chilli powder and sauté well for 2 minutes",
           "kind": "cook",
           "seconds": 120,
-          "after": [9]
+          "after": [
+            9
+          ]
         },
         {
           "id": 11,
           "text": "Add the chicken, season with salt and cook covered over medium-low heat until almost cooked through, about 15 minutes",
           "kind": "cook",
           "seconds": 900,
-          "after": [10]
+          "after": [
+            10
+          ]
         },
         {
           "id": 12,
           "text": "Add the beaten yogurt, keeping the heat low so it doesn't split",
           "kind": "cook",
           "seconds": null,
-          "after": [11, 4]
+          "after": [
+            11,
+            4
+          ]
         },
         {
           "id": 13,
           "text": "Sprinkle in the remaining coriander seeds and half the dried fenugreek leaves and mix well",
           "kind": "cook",
           "seconds": null,
-          "after": [12]
+          "after": [
+            12
+          ]
         },
         {
           "id": 14,
           "text": "Add the cream and mix well",
           "kind": "cook",
           "seconds": null,
-          "after": [13]
+          "after": [
+            13
+          ]
         },
         {
           "id": 15,
           "text": "Sprinkle with the remaining kasuri methi and garam masala to serve",
           "kind": "prep",
           "seconds": null,
-          "after": [14]
+          "after": [
+            14
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "wok"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "plate"
+        },
+        {
+          "item": "whisk"
+        }
+      ],
       "source_url": null,
       "video_url": "https://www.youtube.com/watch?v=IO0issT0Rmc",
-      "total_seconds": 1380
+      "total_seconds": 1380,
+      "kcal": 4208,
+      "kcal_complete": true,
+      "servings": 6
     },
     {
       "why": "walk stop 2",
@@ -423,7 +469,10 @@
       "image": "https://www.themealdb.com/images/media/meals/vwrpps1503068729.jpg",
       "category": "Chicken",
       "area": "Japanese",
-      "tags": ["Curry", "Meat"],
+      "tags": [
+        "Curry",
+        "Meat"
+      ],
       "ingredients": [
         {
           "name": "chicken breast",
@@ -756,63 +805,84 @@
           "text": "Heat oil in a saucepan and cook the onion and garlic until softened",
           "kind": "cook",
           "seconds": null,
-          "after": [1, 2]
+          "after": [
+            1,
+            2
+          ]
         },
         {
           "id": 6,
           "text": "Stir in the carrots and cook over low heat for 10-12 minutes",
           "kind": "cook",
           "seconds": 720,
-          "after": [3, 5]
+          "after": [
+            3,
+            5
+          ]
         },
         {
           "id": 7,
           "text": "Add the flour and curry powder and cook for 1 minute",
           "kind": "cook",
           "seconds": 60,
-          "after": [6]
+          "after": [
+            6
+          ]
         },
         {
           "id": 8,
           "text": "Gradually stir in the stock, honey, soy sauce, and bay leaf, and bring to the boil",
           "kind": "cook",
           "seconds": null,
-          "after": [7]
+          "after": [
+            7
+          ]
         },
         {
           "id": 9,
           "text": "Reduce the heat and simmer for 20 minutes until thickened",
           "kind": "cook",
           "seconds": 1200,
-          "after": [8]
+          "after": [
+            8
+          ]
         },
         {
           "id": 10,
           "text": "Stir in the garam masala",
           "kind": "cook",
           "seconds": null,
-          "after": [9]
+          "after": [
+            9
+          ]
         },
         {
           "id": 11,
           "text": "Sieve the curry sauce and keep it warm on low heat",
           "kind": "cook",
           "seconds": null,
-          "after": [10]
+          "after": [
+            10
+          ]
         },
         {
           "id": 12,
           "text": "Season the chicken breasts with salt and pepper",
           "kind": "prep",
           "seconds": null,
-          "after": [0]
+          "after": [
+            0
+          ]
         },
         {
           "id": 13,
           "text": "Coat the chicken in flour, then beaten egg, then breadcrumbs",
           "kind": "prep",
           "seconds": null,
-          "after": [12, 4]
+          "after": [
+            12,
+            4
+          ]
         },
         {
           "id": 14,
@@ -826,27 +896,57 @@
           "text": "Fry the chicken until golden brown, about 3-4 minutes each side",
           "kind": "cook",
           "seconds": 240,
-          "after": [13, 14]
+          "after": [
+            13,
+            14
+          ]
         },
         {
           "id": 16,
           "text": "Drain the chicken on kitchen paper",
           "kind": "prep",
           "seconds": null,
-          "after": [15]
+          "after": [
+            15
+          ]
         },
         {
           "id": 17,
           "text": "Pour the curry sauce over the chicken and serve with rice",
           "kind": "cook",
           "seconds": null,
-          "after": [16, 11]
+          "after": [
+            16,
+            11
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "sieve"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "frying pan"
+        }
+      ],
       "source_url": "http://allrecipes.co.uk/recipe/29578/chicken-katsu-curry.aspx",
       "video_url": "https://www.youtube.com/watch?v=MWzxDFRtVbc",
-      "total_seconds": 1980
+      "total_seconds": 1980,
+      "kcal": 4000,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "walk stop 3",
@@ -856,7 +956,10 @@
       "image": "https://www.themealdb.com/images/media/meals/wvpsxx1468256321.jpg",
       "category": "Chicken",
       "area": "Japanese",
-      "tags": ["Meat", "Casserole"],
+      "tags": [
+        "Meat",
+        "Casserole"
+      ],
       "ingredients": [
         {
           "name": "soy sauce",
@@ -1055,7 +1158,9 @@
           "text": "Remove the lid and cook briefly once boiling",
           "kind": "cook",
           "seconds": 60,
-          "after": [2]
+          "after": [
+            2
+          ]
         },
         {
           "id": 4,
@@ -1069,42 +1174,57 @@
           "text": "Add the cornstarch mixture to the saucepan and stir to combine",
           "kind": "cook",
           "seconds": null,
-          "after": [3, 4]
+          "after": [
+            3,
+            4
+          ]
         },
         {
           "id": 6,
           "text": "Cook until the sauce starts to thicken, then remove from heat",
           "kind": "cook",
           "seconds": null,
-          "after": [5]
+          "after": [
+            5
+          ]
         },
         {
           "id": 7,
           "text": "Place the chicken breasts in the prepared pan",
           "kind": "prep",
           "seconds": null,
-          "after": [1]
+          "after": [
+            1
+          ]
         },
         {
           "id": 8,
           "text": "Pour a cup of the sauce over the chicken",
           "kind": "cook",
           "seconds": null,
-          "after": [6, 7]
+          "after": [
+            6,
+            7
+          ]
         },
         {
           "id": 9,
           "text": "Bake the chicken until cooked through",
           "kind": "cook",
           "seconds": 2100,
-          "after": [0, 8]
+          "after": [
+            0,
+            8
+          ]
         },
         {
           "id": 10,
           "text": "Shred the chicken in the dish using two forks",
           "kind": "cook",
           "seconds": null,
-          "after": [9]
+          "after": [
+            9
+          ]
         },
         {
           "id": 11,
@@ -1118,48 +1238,84 @@
           "text": "Add the cooked vegetables and rice to the casserole dish with the chicken",
           "kind": "cook",
           "seconds": null,
-          "after": [10, 11]
+          "after": [
+            10,
+            11
+          ]
         },
         {
           "id": 13,
           "text": "Add most of the remaining sauce, reserving a little to drizzle over when serving",
           "kind": "cook",
           "seconds": null,
-          "after": [12, 6]
+          "after": [
+            12,
+            6
+          ]
         },
         {
           "id": 14,
           "text": "Gently toss everything together in the casserole dish",
           "kind": "cook",
           "seconds": null,
-          "after": [13]
+          "after": [
+            13
+          ]
         },
         {
           "id": 15,
           "text": "Return to the oven and cook",
           "kind": "cook",
           "seconds": 900,
-          "after": [14]
+          "after": [
+            14
+          ]
         },
         {
           "id": 16,
           "text": "Let stand before serving",
           "kind": "cook",
           "seconds": 300,
-          "after": [15]
+          "after": [
+            15
+          ]
         },
         {
           "id": 17,
           "text": "Drizzle each serving with the remaining sauce",
           "kind": "cook",
           "seconds": null,
-          "after": [16]
+          "after": [
+            16
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "oven"
+        },
+        {
+          "item": "baking dish"
+        },
+        {
+          "item": "pot"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "fork"
+        },
+        {
+          "item": "spoon"
+        }
+      ],
       "source_url": null,
       "video_url": "https://www.youtube.com/watch?v=4aZr5hZXP_s",
-      "total_seconds": 3360
+      "total_seconds": 3360,
+      "kcal": 1800,
+      "kcal_complete": true,
+      "servings": 6
     },
     {
       "why": "walk stop 4 — the long one (past the hour)",
@@ -1169,7 +1325,9 @@
       "image": "https://www.themealdb.com/images/media/meals/tvttqv1504640475.jpg",
       "category": "Beef",
       "area": "Thai",
-      "tags": ["Curry"],
+      "tags": [
+        "Curry"
+      ],
       "ingredients": [
         {
           "name": "Peanuts",
@@ -1433,21 +1591,27 @@
           "text": "Roast the peanuts on a baking tray for 5 minutes until golden brown",
           "kind": "cook",
           "seconds": 300,
-          "after": [3]
+          "after": [
+            3
+          ]
         },
         {
           "id": 5,
           "text": "When cool enough to handle, roughly chop the peanuts",
           "kind": "prep",
           "seconds": null,
-          "after": [4]
+          "after": [
+            4
+          ]
         },
         {
           "id": 6,
           "text": "Reduce the oven to 180°C/160°C fan/gas 4",
           "kind": "prep",
           "seconds": null,
-          "after": [4]
+          "after": [
+            4
+          ]
         },
         {
           "id": 7,
@@ -1461,34 +1625,67 @@
           "text": "Stir in the beef and fry until well coated and sealed",
           "kind": "cook",
           "seconds": null,
-          "after": [0, 7]
+          "after": [
+            0,
+            7
+          ]
         },
         {
           "id": 9,
           "text": "Stir in the rest of the coconut milk, water, potatoes, onion, lime leaves, cinnamon, tamarind, sugar, fish sauce, and most of the peanuts, then bring to a simmer",
           "kind": "cook",
           "seconds": null,
-          "after": [1, 5, 8]
+          "after": [
+            1,
+            5,
+            8
+          ]
         },
         {
           "id": 10,
           "text": "Cover and cook in the oven for 2 hours until the beef is tender",
           "kind": "cook",
           "seconds": 7200,
-          "after": [6, 9]
+          "after": [
+            6,
+            9
+          ]
         },
         {
           "id": 11,
           "text": "Sprinkle with the sliced chilli and remaining peanuts, then serve with jasmine rice",
           "kind": "cook",
           "seconds": null,
-          "after": [10, 2, 5]
+          "after": [
+            10,
+            2,
+            5
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "baking tray"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "casserole dish"
+        }
+      ],
       "source_url": "https://www.bbcgoodfood.com/recipes/420631/beef-massaman-curry",
       "video_url": "https://www.youtube.com/watch?v=mVxgZSCU9_g",
-      "total_seconds": 7500
+      "total_seconds": 7500,
+      "kcal": 3902,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "walk stop 5",
@@ -1498,7 +1695,10 @@
       "image": "https://www.themealdb.com/images/media/meals/sytuqu1511553755.jpg",
       "category": "Beef",
       "area": "British",
-      "tags": ["Meat", "Pie"],
+      "tags": [
+        "Meat",
+        "Pie"
+      ],
       "ingredients": [
         {
           "name": "Beef",
@@ -1803,91 +2003,125 @@
           "text": "Heat a large casserole until hot and add half the oil",
           "kind": "cook",
           "seconds": null,
-          "after": [0]
+          "after": [
+            0
+          ]
         },
         {
           "id": 6,
           "text": "Fry enough beef to cover the bottom of the casserole until browned on each side, then remove and set aside",
           "kind": "cook",
           "seconds": null,
-          "after": [5, 4]
+          "after": [
+            5,
+            4
+          ]
         },
         {
           "id": 7,
           "text": "Repeat with the remaining oil and beef",
           "kind": "cook",
           "seconds": null,
-          "after": [5, 4]
+          "after": [
+            5,
+            4
+          ]
         },
         {
           "id": 8,
           "text": "Return the beef to the pan and add the wine, cooking until the liquid has reduced by half",
           "kind": "cook",
           "seconds": null,
-          "after": [6, 7]
+          "after": [
+            6,
+            7
+          ]
         },
         {
           "id": 9,
           "text": "Add the stock, onion, carrots, thyme and mustard, and season with salt and pepper",
           "kind": "cook",
           "seconds": null,
-          "after": [8, 1, 2]
+          "after": [
+            8,
+            1,
+            2
+          ]
         },
         {
           "id": 10,
           "text": "Cover with a lid and cook in the oven",
           "kind": "cook",
           "seconds": 7200,
-          "after": [9]
+          "after": [
+            9
+          ]
         },
         {
           "id": 11,
           "text": "Remove from the oven, check the seasoning and set aside to cool",
           "kind": "cook",
           "seconds": null,
-          "after": [10]
+          "after": [
+            10
+          ]
         },
         {
           "id": 12,
           "text": "Remove the thyme",
           "kind": "cook",
           "seconds": null,
-          "after": [11]
+          "after": [
+            11
+          ]
         },
         {
           "id": 13,
           "text": "Preheat the oven to 200C/400F/Gas 6",
           "kind": "prep",
           "seconds": null,
-          "after": [12]
+          "after": [
+            12
+          ]
         },
         {
           "id": 14,
           "text": "Transfer the beef to a pie dish, brush the rim with the beaten egg yolks and lay the pastry over the top",
           "kind": "cook",
           "seconds": null,
-          "after": [12, 3]
+          "after": [
+            12,
+            3
+          ]
         },
         {
           "id": 15,
           "text": "Brush the top of the pastry with more beaten egg",
           "kind": "cook",
           "seconds": null,
-          "after": [14, 3]
+          "after": [
+            14,
+            3
+          ]
         },
         {
           "id": 16,
           "text": "Trim the pastry so there is just enough excess to crimp the edges",
           "kind": "cook",
           "seconds": null,
-          "after": [15]
+          "after": [
+            15
+          ]
         },
         {
           "id": 17,
           "text": "Bake until the pastry is golden-brown and cooked through",
           "kind": "cook",
           "seconds": 1800,
-          "after": [16, 13]
+          "after": [
+            16,
+            13
+          ]
         },
         {
           "id": 18,
@@ -1901,27 +2135,62 @@
           "text": "Add the beans and cook until just tender",
           "kind": "cook",
           "seconds": 300,
-          "after": [18]
+          "after": [
+            18
+          ]
         },
         {
           "id": 20,
           "text": "Drain the beans and toss with the butter, then season with black pepper",
           "kind": "cook",
           "seconds": null,
-          "after": [19]
+          "after": [
+            19
+          ]
         },
         {
           "id": 21,
           "text": "Serve a spoonful of pie on each plate with the green beans alongside",
           "kind": "cook",
           "seconds": null,
-          "after": [17, 20]
+          "after": [
+            17,
+            20
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "casserole dish"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "pie dish"
+        },
+        {
+          "item": "pastry brush"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "colander"
+        }
+      ],
       "source_url": "https://www.bbc.co.uk/food/recipes/beef_and_mustard_pie_58002",
       "video_url": "https://www.youtube.com/watch?v=nMyBC9staMU",
-      "total_seconds": 9000
+      "total_seconds": 9000,
+      "kcal": 5389,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "the unread card — total_seconds is null in the corpus",
@@ -2106,34 +2375,63 @@
           "text": "Rinse the noodles under cold water and drain thoroughly",
           "kind": "cook",
           "seconds": null,
-          "after": [2]
+          "after": [
+            2
+          ]
         },
         {
           "id": 4,
           "text": "Melt the peanut butter, coconut milk, sweet chilli sauce and half the spring onions in a saucepan, loosening with water",
           "kind": "cook",
           "seconds": null,
-          "after": [0]
+          "after": [
+            0
+          ]
         },
         {
           "id": 5,
           "text": "Mix the noodles, cucumber and beansprouts in a serving dish",
           "kind": "cook",
           "seconds": null,
-          "after": [3, 1]
+          "after": [
+            3,
+            1
+          ]
         },
         {
           "id": 6,
           "text": "Top with the prawns, drizzle over the peanut sauce and scatter over the remaining spring onions",
           "kind": "cook",
           "seconds": null,
-          "after": [5, 4]
+          "after": [
+            5,
+            4
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "colander"
+        },
+        {
+          "item": "serving dish"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        }
+      ],
       "source_url": "https://www.bbcgoodfood.com/recipes/bang-bang-prawn-salad",
       "video_url": "https://www.youtube.com/watch?v=Na-6-lzs2wU",
-      "total_seconds": null
+      "total_seconds": null,
+      "kcal": 1356,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "the longest title in the corpus, for the wrapping story",
@@ -2483,28 +2781,37 @@
           "text": "Combine the onion, celery, cilantro, and parsley in a large pot",
           "kind": "prep",
           "seconds": null,
-          "after": [0, 1]
+          "after": [
+            0,
+            1
+          ]
         },
         {
           "id": 4,
           "text": "Stir in the turmeric, cumin, paprika, ginger, cayenne pepper, salt, and pepper",
           "kind": "prep",
           "seconds": null,
-          "after": [3]
+          "after": [
+            3
+          ]
         },
         {
           "id": 5,
           "text": "Place the chicken thighs on top and drizzle with olive oil",
           "kind": "cook",
           "seconds": null,
-          "after": [4]
+          "after": [
+            4
+          ]
         },
         {
           "id": 6,
           "text": "Cover and simmer over low heat until the chicken is tender",
           "kind": "cook",
           "seconds": 2400,
-          "after": [5]
+          "after": [
+            5
+          ]
         },
         {
           "id": 7,
@@ -2525,41 +2832,76 @@
           "text": "Transfer the chicken mixture to an oven-safe tagine or casserole dish",
           "kind": "cook",
           "seconds": null,
-          "after": [6]
+          "after": [
+            6
+          ]
         },
         {
           "id": 10,
           "text": "Add the sweet potato and carrots and cover with a lid or foil",
           "kind": "cook",
           "seconds": null,
-          "after": [9, 2]
+          "after": [
+            9,
+            2
+          ]
         },
         {
           "id": 11,
           "text": "Bake until the sweet potato is soft",
           "kind": "cook",
           "seconds": 2400,
-          "after": [8, 10]
+          "after": [
+            8,
+            10
+          ]
         },
         {
           "id": 12,
           "text": "Add the drained raisins and prunes",
           "kind": "cook",
           "seconds": null,
-          "after": [11, 7]
+          "after": [
+            11,
+            7
+          ]
         },
         {
           "id": 13,
           "text": "Continue baking, covered, until the raisins and prunes are heated through",
           "kind": "cook",
           "seconds": 600,
-          "after": [12]
+          "after": [
+            12
+          ]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "pot"
+        },
+        {
+          "item": "casserole dish"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        }
+      ],
       "source_url": "https://www.allrecipes.com/recipe/258873/tajine-de-poulet-aux-carottes-et-patates-douces-chicken-and-sweet-potato-tagine/",
       "video_url": "https://www.youtube.com/watch?v=thf-JDXoTVg",
-      "total_seconds": 5400
+      "total_seconds": 5400,
+      "kcal": 1595,
+      "kcal_complete": true,
+      "servings": 4
     }
   ]
 }
