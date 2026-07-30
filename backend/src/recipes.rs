@@ -886,7 +886,6 @@ mod tests {
         assert_eq!(read_sittings(&conn, "1").await, r#"["dinner"]"#);
     }
 
-
     // --- Every column the schema declares, the sole writer fills (#161, #176/3) ---
     //
     // The two tests below are the generic form of a bug this repo shipped, and the
@@ -997,6 +996,10 @@ mod tests {
         }];
         r.source_url = Some("https://example.test/full".into());
         r.video_url = Some("https://example.test/full.mp4".into());
+        // The meal-time reading (#191), which landed while this test was in flight —
+        // populated here because this very test refused to compile the gap away: it
+        // failed on `sittings` at its default the first time it met the column.
+        r.sittings = vec![recipe_core::Sitting::Lunch, recipe_core::Sitting::Dinner];
         r
     }
 
@@ -1042,6 +1045,7 @@ mod tests {
         });
         r.source_url = Some("https://example.test/other".into());
         r.video_url = Some("https://example.test/other.mp4".into());
+        r.sittings = vec![recipe_core::Sitting::Breakfast, recipe_core::Sitting::Snack];
         r
     }
 
