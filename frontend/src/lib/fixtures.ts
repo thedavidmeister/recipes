@@ -47,20 +47,16 @@ type CorpusRow = Recipe & {
    * The nutrition reading's three app-facing columns (#162) — `recipes.kcal`, whether
    * that total is complete, and the servings the card divides it by.
    *
-   * **Optional, and that is a statement about the committed sample, not about the
-   * corpus.** `corpus-sample.json` was dumped on 2026-07-28, before #177 added these
-   * columns, so the file holds no key for them at all and every fixture built from it
-   * reads them as absent. Absent is a real, correct state — the badge renders nothing
-   * for an unread recipe — so the stories stay honest; they simply do not yet declare
-   * the *read* states. Production carries a reading for all 790 recipes, so refreshing
-   * the sample (`node scripts/sample-corpus.mjs`, which now selects these columns) is
-   * what lights the badge in Storybook, and the diff is the drift, exactly as #157
-   * intended. Typing them as required would be the lie: it would let a fixture hand a
-   * calorie figure to a story when the file it claims to mirror holds none.
+   * Required, like `total_seconds`, because the sample carries them for every row: the
+   * badge is rendered from all three at once, and no `??` default stands behind them on
+   * purpose. A fallback would let a half-refreshed sample render a whole-recipe total as
+   * a per-serving figure while looking perfectly fine on screen; the honest failure for
+   * a missing column is the loud one. `fixtures.test.ts` checks at runtime what the cast
+   * asserts here.
    */
-  kcal?: number | null;
-  kcal_complete?: boolean;
-  servings?: number | null;
+  kcal: number | null;
+  kcal_complete: boolean;
+  servings: number | null;
 };
 
 /**
@@ -97,16 +93,17 @@ function card(id: string): RecipeCard {
     // is a floor and the badge really does read `23 min+`. `fullyTimedCard` is the
     // other state — what these become as the re-read reaches them.
     fully_timed: false,
-    // The nutrition reading (#162), straight off the sample and **not defaulted to
-    // anything else**. The committed sample predates the columns, so these are absent
-    // today and the calorie badge is correctly not there: an unread recipe has no
-    // calorie figure, and inventing one to fill the space is exactly the #157 failure
-    // (a plausible number the corpus never held, with display logic then fitted to
-    // it). Refresh the sample and the badge appears here, in every deck story at once,
-    // carrying the corpus's own numbers.
-    kcal: r.kcal ?? null,
-    kcal_complete: r.kcal_complete ?? false,
-    servings: r.servings ?? null,
+    // The nutrition reading (#162), straight off the sample — the whole-recipe total,
+    // whether it is complete, and the servings the badge divides by. Passed through
+    // verbatim and never defaulted: these are the numbers production holds, and a
+    // fixture that reshaped any of them would be asserting a calorie count no reading
+    // ever made (#157). Measured, and the mirror image of `fully_timed` above: every
+    // sampled row's total *is* complete, so the deck's badges read `~701 kcal a
+    // serving`. A recipe whose reading left a line unweighable would read
+    // `701 kcal+ a serving`, and no sampled row is one — see `Pick.stories.ts`.
+    kcal: r.kcal,
+    kcal_complete: r.kcal_complete,
+    servings: r.servings,
   };
 }
 
@@ -336,11 +333,14 @@ export function fullyTimedCard(): RecipeCard {
     area: null,
     total_seconds: 1140,
     fully_timed: true,
-    // Left unread (#162). This card is hand-written because the state it declares does
-    // not exist in the corpus yet, but its *values* are still the live record's, and
-    // nobody here has read this recipe's calories — production has a figure, and it is
-    // not this file's to guess. An invented one would assert a calorie count no
-    // reading ever made, which is #157 exactly. It arrives with the sample refresh.
+    // Left unread (#162), and it is the only card here that is. This one is
+    // hand-written because the state it declares (`fully_timed`) does not exist in the
+    // corpus, so 53541 is not in the sample — and the sample is the only place a real
+    // calorie figure comes from. Production holds one for this recipe; it is not this
+    // file's to guess, and an invented one would assert a count no reading ever made
+    // (#157). So this card carries the time badge alone, which is also the honest
+    // rendering of the unread nutrition state. Adding 53541 to `WANTED` in
+    // `scripts/sample-corpus.mjs` and re-running it is what fills these in.
     kcal: null,
     kcal_complete: false,
     servings: null,

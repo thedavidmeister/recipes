@@ -44,14 +44,10 @@ const rows = sample.recipes as {
   instructions: string;
   steps: unknown;
   total_seconds: number | null;
-  // Optional because the committed sample predates them (#162 / #177): it was dumped
-  // on 2026-07-28 and the nutrition columns landed after, so today these keys are
-  // simply absent. `sample-corpus.mjs` selects them, so a refresh fills them in — and
-  // the tests below are written to hold in both worlds, which is what makes them a
-  // check on the refresh rather than a snapshot of this file's current staleness.
-  kcal?: number | null;
-  kcal_complete?: boolean;
-  servings?: number | null;
+  // The nutrition reading (#162), carried by every sampled row.
+  kcal: number | null;
+  kcal_complete: boolean;
+  servings: number | null;
 }[];
 
 function sampled(id: string) {
@@ -227,9 +223,9 @@ describe("the walk fixture", () => {
   it("deals no calorie figure the corpus sample does not hold", () => {
     for (const stop of stops) {
       const r = sampled(stop.recipe.id);
-      expect(stop.recipe.kcal).toBe(r.kcal ?? null);
-      expect(stop.recipe.servings).toBe(r.servings ?? null);
-      expect(stop.recipe.kcal_complete).toBe(r.kcal_complete ?? false);
+      expect(stop.recipe.kcal).toBe(r.kcal);
+      expect(stop.recipe.servings).toBe(r.servings);
+      expect(stop.recipe.kcal_complete).toBe(r.kcal_complete);
     }
   });
 
@@ -247,6 +243,23 @@ describe("the walk fixture", () => {
         "number",
       );
       expect(r.servings).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * The runtime half of the now-required nutrition columns on `CorpusRow` — the same
+   * job the `total_seconds` check above does. A sample re-dumped by a script that had
+   * quietly lost a column from its `SELECT` would otherwise reach a story as
+   * `undefined` and render as an unread recipe: a badge that vanished corpus-wide and
+   * looked exactly like an honest absence (the #161 failure, in fixture clothing).
+   */
+  it("carries all three nutrition columns on every row", () => {
+    for (const r of rows) {
+      expect(r.kcal === null || typeof r.kcal === "number").toBe(true);
+      expect(r.servings === null || typeof r.servings === "number").toBe(true);
+      expect(typeof r.kcal_complete, `${r.title} kcal_complete`).toBe(
+        "boolean",
+      );
     }
   });
 });

@@ -19,6 +19,12 @@
  * repo-root `.env` where `PUBLIC_TURSO_URL` / `PUBLIC_TURSO_TOKEN` (read-only) live.
  *
  *     nix develop -c node frontend/scripts/sample-corpus.mjs
+ *     nix develop -c pre-commit run --all-files    # then format what it wrote
+ *
+ * The second line is not optional. `JSON.stringify(…, 2)` breaks every short array
+ * over three lines and rainix's prettier collapses them back, so a sample committed
+ * straight out of this script fails CI's whole-tree hook check on whitespace alone —
+ * a red build that says nothing about the data. Formatting is a no-op on the values.
  *
  * It also prints the corpus aggregates, because `healthStats()` in `fixtures.ts` is
  * an aggregate snapshot rather than a record — nothing stable to derive from — so it
