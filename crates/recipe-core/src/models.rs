@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::equipment::RequiredEquipment;
+use crate::meal::Sitting;
 use crate::measure::StructuredMeasure;
 use crate::nutrition::{self, FoodEnergy, RecipeEnergy};
 use crate::step::StructuredStep;
@@ -97,6 +98,19 @@ pub struct Recipe {
     /// `None` only until the worker has read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub servings: Option<u32>,
+    /// When this dish is eaten (#191) — the set of sittings it suits, attached at derive
+    /// from the `meal_time_structures` capture.
+    ///
+    /// **A set, not a label.** Most dishes suit more than one sitting (a chicken curry is
+    /// lunch or dinner; a sandwich is lunch or a snack), so a single word would be wrong
+    /// on its face and would make the filter it exists for useless.
+    ///
+    /// Empty until the meal-time worker has read the recipe, and empty means **unread** —
+    /// the reading refuses an empty set on the way in, because every dish is eaten at
+    /// some time. [`crate::meal::fit`] is what reads it, and what rules that an unread
+    /// recipe is not restricted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sittings: Vec<Sitting>,
     /// Canonical URL of the recipe on its origin site, when known.
     pub source_url: Option<String>,
     pub video_url: Option<String>,
@@ -209,6 +223,7 @@ mod tests {
             equipment: vec![],
             nutrition: vec![],
             servings: None,
+            sittings: vec![],
             source_url: None,
             video_url: None,
         }
@@ -301,5 +316,27 @@ mod tests {
         let back: Recipe = serde_json::from_str(&json).unwrap();
         assert!(back.nutrition.is_empty());
         assert_eq!(back.servings, None);
+    }
+
+    /// The meal-time reading (#191) holds the same contract: omitted while unread, so
+    /// the 790 rows already in Turso do not churn, and a row stored before the field
+    /// existed still reads back as unread rather than failing to deserialize.
+    #[test]
+    fn an_unread_sitting_reading_is_omitted_and_absent_deserializes() {
+        let mut recipe = recipe_with_steps(vec![]);
+        let json = serde_json::to_string(&recipe).unwrap();
+        assert!(
+            !json.contains("sittings"),
+            "an un-read recipe must not write the key: {json}"
+        );
+        let back: Recipe = serde_json::from_str(&json).unwrap();
+        assert!(back.sittings.is_empty(), "absence reads back as unread");
+
+        // And a reading round-trips as the lowercase words the corpus stores.
+        recipe.sittings = vec![crate::meal::Sitting::Lunch, crate::meal::Sitting::Dinner];
+        let json = serde_json::to_string(&recipe).unwrap();
+        assert!(json.contains(r#""sittings":["lunch","dinner"]"#), "{json}");
+        let back: Recipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sittings, recipe.sittings);
     }
 }

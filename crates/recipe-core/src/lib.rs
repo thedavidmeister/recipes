@@ -17,6 +17,7 @@ pub mod step;
 pub mod themealdb;
 
 pub use adapters::{adapter_for, Adapter, IngestError};
+pub use meal::{MealFit, Sitting};
 pub use measure::{Amount, Quantity, Size, StructuredMeasure};
 pub use models::{Ingredient, Recipe};
 pub use nutrition::{FoodEnergy, RecipeEnergy};
