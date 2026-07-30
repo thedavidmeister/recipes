@@ -172,6 +172,51 @@ pub fn is_admin(state: &AppState, telegram_user_id: &str) -> bool {
         .is_some_and(|admin| admin == telegram_user_id)
 }
 
+/// The chat the bot can reach the admin in, or `None` where this deployment has
+/// nobody to tell (#183).
+///
+/// **The same id, not a second variable.** In a Telegram one-to-one chat the chat id
+/// *is* the user's id, so the admin already configured for the health dashboard is
+/// already an address. A separate `ADMIN_TELEGRAM_CHAT_ID` would be a second identity
+/// for one person, free to drift out of step with the first, and a drifted alarm
+/// address is a silent one.
+///
+/// A bot cannot open a conversation (`Forbidden: bot can't initiate conversation with
+/// a user`), so an arbitrary id would be unreachable — but this one is not arbitrary:
+/// the way anyone learns their Telegram id here is `GET /api/me`, which requires a
+/// session, which is minted by the bot in that very chat. Being the admin means having
+/// messaged the bot.
+///
+/// [`is_admin`] compares ids as strings, so an id that is not a number gates the
+/// dashboard perfectly well and cannot be messaged. That is a config typo, and the
+/// alarm says so loudly rather than degrading into silence.
+pub fn admin_chat_id(state: &AppState) -> Option<i64> {
+    resolve_admin_chat(state.admin_id.as_deref())
+}
+
+/// The rule [`admin_chat_id`] applies, apart from the state that carries it — the
+/// [`CookieConfig::parse`] split, and for the same reason: a rule about what a
+/// configured value means should be checkable without building a process around it.
+///
+/// **Positive only.** Telegram user ids are positive; a negative chat id is a group or
+/// a channel. An alarm addressed to a group is a broadcast, which this feature
+/// explicitly is not — an operational message about the corpus goes to the operator,
+/// not to everyone who happens to be in a room with the bot.
+fn resolve_admin_chat(configured: Option<&str>) -> Option<i64> {
+    let configured = configured?;
+    match configured.parse::<i64>() {
+        Ok(chat_id) if chat_id > 0 => Some(chat_id),
+        _ => {
+            tracing::error!(
+                "ADMIN_TELEGRAM_USER_ID is `{configured}`, which is not a personal Telegram \
+                 id — it is the positive numeric id from GET /api/me, never a username and \
+                 never a group. Nothing can be sent to the admin until it is fixed."
+            );
+            None
+        }
+    }
+}
+
 /// How the session cookie is scoped.
 #[derive(Debug, Clone)]
 pub struct CookieConfig {
@@ -751,7 +796,7 @@ pub async fn webhook(
     }
 
     if !is_login_command(&text) {
-        reply(
+        send(
             &state,
             chat.id,
             "Send /login to sign in, or /kitcheninvite for a link to your kitchen.",
@@ -761,7 +806,7 @@ pub async fn webhook(
     }
 
     let link = mint_completion(&state, &from).await?;
-    reply(
+    send(
         &state,
         chat.id,
         &format!(
@@ -788,7 +833,7 @@ async fn kitchen_invite_reply(
     from: &TelegramUser,
 ) -> Result<(), AppError> {
     if !is_private_chat(chat) {
-        reply(
+        send(
             state,
             chat.id,
             "Not here — an invite is a live key to your kitchen, and anyone reading this group would have it. Message me directly for one.",
@@ -807,7 +852,7 @@ async fn kitchen_invite_reply(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let Some((kitchen, token, _expires_at)) = minted else {
-        reply(
+        send(
             state,
             chat.id,
             "You have no kitchen to invite anyone to yet.",
@@ -817,7 +862,7 @@ async fn kitchen_invite_reply(
     };
 
     let base = state.telegram.frontend_base_url.trim_end_matches('/');
-    reply(
+    send(
         state,
         chat.id,
         &format!(
@@ -875,16 +920,28 @@ async fn mint_completion(state: &AppState, user: &TelegramUser) -> Result<String
     ))
 }
 
-/// Best-effort reply. A failed courtesy message must not fail a login already
-/// minted, so this logs and moves on.
-async fn reply(state: &AppState, chat_id: i64, text: &str) {
+/// Send a message as the bot to one chat, and say whether it left. Best-effort: it
+/// logs and never propagates, because a failed courtesy message must not fail a login
+/// already minted, and a failed alarm must not 500 the check that raised it.
+///
+/// **The answer is load-bearing for the alarm (#183) and ignored by the login path.**
+/// A run is marked reported only once its message is actually out, so that a lost
+/// message costs a repeat rather than a silence — repeating is annoying, and silence
+/// is the bug the alarm exists to end.
+///
+/// **A refusal is not a delivery.** Telegram answers `Forbidden: bot can't initiate
+/// conversation with a user`, a revoked token, or an unknown chat with an HTTP error
+/// carrying a JSON body — which `reqwest` hands back as `Ok`, because the *request*
+/// succeeded. Reading only the transport, as this used to, would mark a run told when
+/// nobody was told and lose the alarm for good. Status is what says delivered.
+pub(crate) async fn send(state: &AppState, chat_id: i64, text: &str) -> bool {
     let url = format!(
         "https://api.telegram.org/bot{}/sendMessage",
         state.telegram.bot_token
     );
     // Deliberately not the SSRF-guarded client: that exists to fetch
     // attacker-influenced URLs, and this is a fixed first-party endpoint.
-    if let Err(e) = reqwest::Client::new()
+    let sent = reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({
             "chat_id": chat_id,
@@ -892,10 +949,30 @@ async fn reply(state: &AppState, chat_id: i64, text: &str) {
             "disable_web_page_preview": true
         }))
         .send()
-        .await
-    {
-        tracing::warn!("could not reply to chat {chat_id}: {e}");
+        .await;
+    match sent {
+        Ok(response) if delivered(response.status()) => true,
+        Ok(response) => {
+            let status = response.status();
+            // The body carries Telegram's own `description`, which is the only thing
+            // that distinguishes "wrong token" from "that chat has never opened".
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!("telegram refused a message to chat {chat_id}: {status} {body}");
+            false
+        }
+        Err(e) => {
+            tracing::warn!("could not reach telegram for chat {chat_id}: {e}");
+            false
+        }
     }
+}
+
+/// Did Telegram take the message? Split out of [`send`] so the rule is checkable
+/// without a network, because it is the rule a network test would be written for: a
+/// refusal arrives as a perfectly successful HTTP round trip, and reading only the
+/// transport is what would let an unsent alarm be marked told.
+fn delivered(status: StatusCode) -> bool {
+    status.is_success()
 }
 
 /// Delete expired logins and sessions. Housekeeping only — both are refused on
@@ -1289,6 +1366,65 @@ mod tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             1,
             "a live session must survive the sweep"
+        );
+    }
+
+    /// Who the run alarm (#183) can be sent to, from what is configured. Nobody is a
+    /// perfectly good answer — the alarm degrades to a log — but *the wrong somebody*
+    /// is not, so everything that is not one person's own chat resolves to `None`.
+    #[test]
+    fn an_admin_chat_is_one_persons_own_chat_or_nobody() {
+        assert_eq!(resolve_admin_chat(Some("4242")), Some(4242));
+        assert_eq!(
+            resolve_admin_chat(None),
+            None,
+            "no admin configured is nobody, never a default and never everybody"
+        );
+        assert_eq!(
+            resolve_admin_chat(Some("thedavidmeister")),
+            None,
+            "a username is not an id — it is also reassignable, which is why it is not identity here"
+        );
+        assert_eq!(
+            resolve_admin_chat(Some("-1001234567890")),
+            None,
+            "a negative id is a group or channel, and this alarm is never a broadcast"
+        );
+        assert_eq!(resolve_admin_chat(Some("0")), None, "nor is zero a person");
+        assert_eq!(
+            resolve_admin_chat(Some("42 42")),
+            None,
+            "and a half-parsed id is not half an address"
+        );
+    }
+
+    /// **A refusal arrives as a successful HTTP round trip.** Telegram answers a bot
+    /// that may not write to a chat, or a revoked token, with an error status and a
+    /// JSON body — the request itself worked. Only the status says delivered, and the
+    /// run alarm marks a run reported on this answer, so reading it wrongly is how an
+    /// alarm gets marked told with nobody told.
+    #[test]
+    fn only_a_success_status_counts_as_delivered() {
+        assert!(delivered(StatusCode::OK));
+        assert!(
+            !delivered(StatusCode::FORBIDDEN),
+            "`bot can't initiate conversation with a user` is not a delivery"
+        );
+        assert!(
+            !delivered(StatusCode::UNAUTHORIZED),
+            "a revoked bot token is not a delivery"
+        );
+        assert!(
+            !delivered(StatusCode::BAD_REQUEST),
+            "`chat not found` is not a delivery"
+        );
+        assert!(
+            !delivered(StatusCode::TOO_MANY_REQUESTS),
+            "a rate limit is not a delivery"
+        );
+        assert!(
+            !delivered(StatusCode::INTERNAL_SERVER_ERROR),
+            "telegram having a bad minute is not a delivery"
         );
     }
 }

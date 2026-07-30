@@ -1,0 +1,48 @@
+-- Remember which runs have already been complained about (#183), so a dead run is
+-- reported once instead of once per check.
+--
+-- ## Numbering: why 25
+--
+-- `db.rs` applies by MAX(version), so a number at or below one already applied on
+-- production never runs at all. Production `_migrations` is at 24; 20 is a hole that
+-- 21–24 have already overtaken and which can never be filled. The next number above
+-- everything — including anything unmerged on another branch — is the only choice that
+-- is safe whichever deploys first.
+--
+-- ## What this column is, and what it is emphatically not
+--
+-- #182 made `runs.status` true: `completed` / `partial` / `failed`, chosen from what
+-- the run actually did. #183 is that nothing reads it. A check now does
+-- (`backend/src/run_alerts.rs`), and a check that speaks up every time it runs is a
+-- check somebody mutes — so it has to remember.
+--
+-- `reported_at` is that memory, and it is **additive**. It records a new fact about
+-- *us* — "somebody was told about this run" — beside the row's account of what
+-- happened. It never touches `status` or `finished_at`. That separation is the whole
+-- point: #182 ruled that an un-closed row must not be swept to a terminal status,
+-- because *nothing ever closed me* is a different fact from *something closed me and
+-- it went wrong*, and there is no honest wall clock to sweep by (Render and a CLI box
+-- have clock skew, which is why the DB-assigned `id` is the arbiter). Marking a row
+-- reported must not become sweeping it by the back door, so this is a separate column
+-- and the alerting path issues no other write to this table.
+--
+-- NULL means nobody has been told yet, which is where all 223+ existing rows start.
+-- The first check after this deploys will therefore find every historically dead run
+-- at once — around 22 rows that never closed, plus whatever `failed` has accumulated
+-- since #182 — say so in one message, and then go quiet. That backlog is correct: it
+-- is the silence #183 describes, being broken once.
+--
+-- ## Why a column and not a high-water mark
+--
+-- The obvious cheaper design is one number: the highest run id already reported. It is
+-- wrong here, and not marginally. Run 100 is still `running` and not yet old enough to
+-- be called dead; run 101 starts and completes. A watermark at 101 buries 100 forever,
+-- exactly when 100 turns out to be the run that died — and the runs nobody can hear
+-- from are the ones this whole feature exists for. Reported-ness is per run because
+-- deadness is discovered per run, out of id order.
+ALTER TABLE runs ADD COLUMN reported_at INTEGER;
+
+-- The check reads `WHERE reported_at IS NULL AND (status <> 'completed' OR …)`, i.e.
+-- the small unreported tail of a table that only grows. Without this it is a full scan
+-- of every run ever recorded, on a schedule, forever.
+CREATE INDEX IF NOT EXISTS runs_unreported ON runs (reported_at, status);

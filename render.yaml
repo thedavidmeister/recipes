@@ -52,6 +52,27 @@ services:
         # Optional, unlike the secrets above: leave it unset and the service
         # still serves — only /api/ingest closes (503), so the corpus goes stale
         # rather than the site going down. Unset is closed, never open.
+        #
+        # It also gates POST /api/runs/check (#183), the scheduled read of the runs
+        # table, which is a second job in the same workflow on the same key.
+        sync: false
+      # --- The operator (#183) ----------------------------------------------
+      - key: ADMIN_TELEGRAM_USER_ID
+        # The admin's NUMERIC Telegram id (GET /api/me while signed in), never a
+        # username — usernames can be released and reclaimed by somebody else.
+        #
+        # One value, two jobs, and the same person by construction: it gates the
+        # admin health dashboard, and it is where the run alarm sends its message.
+        # In a one-to-one chat the chat id IS the user id, so whoever can read the
+        # dashboard is already an address the bot may write to — and being the admin
+        # means having messaged the bot, which is what makes it deliverable (a bot
+        # cannot open a conversation). A second variable for the chat would be one
+        # person with two addresses, free to drift, and a drifted alarm is a silent
+        # one.
+        #
+        # Optional like INGEST_API_KEY: unset, the admin views 403 for everyone and
+        # the run check logs its alarm instead of sending it, loudly. The service
+        # never stops over it, and there is no broadcast — one id, or nobody.
         sync: false
       # --- Ingredient enrichment (#11, #59) ---------------------------------
       # Enrichment runs OFF this service: an out-of-band worker (the recipes-enrich
