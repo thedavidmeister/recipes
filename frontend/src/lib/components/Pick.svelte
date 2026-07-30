@@ -26,7 +26,8 @@
     status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
-    /** How many people are in this pick (distinct voters). */
+    /** How many a recipe has to win over — the plan's roster, not who has swiped so
+     * far (#181). One when you are the only one in the plan. */
     participants?: number;
     /** Who has already said yes to this card. */
     yesVoters?: Voter[];
