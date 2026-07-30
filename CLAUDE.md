@@ -37,6 +37,34 @@ diagram in [README.md](./README.md).
   recipe, written by the off-service worker), and **`recipes`** (derive — the
   view the app reads). Dev env + CI via **rainix** (`nix develop`).
 
+## Rulings are specs — read this before designing anything
+
+The human designs this product. A ruling they state once — in an issue, a PR
+comment, or chat — is a **binding spec** for all work, including work already in
+flight. It supersedes any prior precedent in this repo for its dimension. Never
+re-argue it, never soften it, never build the alternative "to compare", never
+present it back as an open question. If new information seems to conflict,
+implement the ruling and report the information in one line. An artifact that
+contradicts a ruling is defective no matter how well argued its comments are.
+
+**Data gaps are data entry.** When a feature looks broken because data is absent
+(an unread enrichment, a missing category, an empty corpus slice), the fix lives
+on the data side — run the worker, add a source, fix the scraper. NEVER widen
+app logic, invent fallbacks, or deal guesses to paper over missing data. An
+empty deck, a NULL, an absent badge that honestly reflects the data IS correct
+behaviour, and its visibility is the pressure that gets the data entered. This
+was violated once by dealing unread recipes into meal rounds "so the deck isn't
+empty"; the human rejected it in the strongest terms. Do not re-derive it.
+
+Standing rulings agents have re-derived wrongly before:
+
+- A meal round serves **only** recipes explicitly read as that meal (#192/#193).
+  Unread = excluded, exactly like the kitchen bound treats unread equipment.
+- Never classify from absence — "not labelled `Dessert`" is not "a dinner".
+- A vocabulary option must have corpus data behind it (#185 removed `drink`).
+- An estimate states its completeness honestly (`fully_timed`, `kcal_complete`);
+  a floor renders as `25 min+`, never `~25 min`.
+
 ## Ingestion is server-driven; the client has no access to it (#49)
 
 **There is no search, and the client does not decide what enters the corpus.** A
@@ -177,6 +205,50 @@ equipment names (#81); and the whole cascade — the pull's left join, the count
 check, the `run_id` guard, the targeted re-derive — is keyed that way. A
 per-food table can still be **derived** from these readings later, which is more
 than a per-food capture would have given.
+
+## When a dish is eaten is read, not inferred (#191)
+
+The fifth enrichment (`meal_time_structures`, migration 0024) is the one that
+makes a control work. A plan asks **"which meal"**, and nothing the corpus
+_states_ can answer it: there is no `Lunch`, `Dinner` or `Snack` category at
+all, and `Breakfast` is 19 of 790. #188 narrowed a meal round as far as stated
+data allows — it drops the 264 dishes the corpus says accompany a meal — and
+that exclusion is identical for all four words.
+
+- **The reading is a set of sittings**, per recipe, from
+  `breakfast`/`lunch`/`dinner`/ `snack`: a chicken curry is `{lunch, dinner}`, a
+  roast is `{dinner}`. A single label would be wrong on its face, since most
+  dishes suit more than one sitting.
+- **It is the same type the lobby uses.** `session::MealType` **is**
+  `recipe_core::meal::Sitting`, not a lookalike beside it, so the walk's bound
+  is literally `sittings.contains(&meal)` — no mapping, and so no second chance
+  to disagree about what "dinner" means.
+- **An empty set is refused on the way in.** Every dish is eaten at some time,
+  so an empty reading is a failed reading, not a fact about the food (#158 on
+  durations, #162 on servings, #81 on an empty equipment list). That refusal is
+  what lets `[]` mean _unread_ everywhere downstream.
+
+**A meal round serves only explicit matches (#192, ruled).** `meal::fit` answers
+`Suits`, `Wrong` or `Unread`, and the walk deals **only `Suits`**. An unread
+dish is in no meal round — the same treatment the kitchen bound gives an unread
+equipment reading, and for the same reason: a deck must never contain a guess,
+and missing data is a scraper/enrichment gap whose fix is reading the corpus,
+never widening the filter. Two things follow, and both should be said out loud
+rather than discovered:
+
+- **Deploying creates no rows** — the reading is produced off the service by a
+  worker somebody runs (#59). Meal rounds are therefore **empty until the
+  `enrich-meal-times` worker has read the corpus**; running the worker is the
+  act that delivers the feature. Ingest keeps adding unread recipes, and each
+  stays out of every round until read.
+- **There is no switch to forget.** The rule is per recipe: each recipe joins
+  the decks its reading names the moment it lands, and the corpus being read IS
+  the rollout.
+
+The stated-accompaniment rule (#184) still runs first and still wins: a trifle
+read as `{dinner}` is correct and is still not the dinner. #147's per-addition
+rounds are what will deal it, and they read this same table from the other
+direction.
 
 ## Boot degrades, it does not die (#146)
 

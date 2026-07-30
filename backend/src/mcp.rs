@@ -23,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::enrich_api::client;
 use crate::equipment_api::client as equipment_client;
+use crate::meal_time_api::client as meal_time_client;
 use crate::nutrition_api::client as nutrition_client;
 use crate::step_api::client as step_client;
 
@@ -97,6 +98,25 @@ struct NutritionPushParams {
     /// quantity it already holds and sums. `grams_per_unit` is omitted for any line the
     /// pull marked `weighable`. Pass a native JSON array; a JSON-encoded string of one
     /// is also accepted.
+    readings: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MealTimePullParams {
+    /// Maximum recipes to return. Omit for the server's default page size; the
+    /// worker loops until the queue is empty regardless.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MealTimePushParams {
+    /// The meal-time readings: a JSON array with one entry per recipe, each
+    /// `{ "source", "id", "sittings": ["lunch", "dinner"] }`. `sittings` is a **set** of
+    /// the four words breakfast/lunch/dinner/snack — every sitting the dish suits, not
+    /// just the likeliest one — and it may not be empty, because every dish is eaten at
+    /// some time. Order does not matter; the app stores it canonically. Pass a native
+    /// JSON array; a JSON-encoded string of one is also accepted.
     readings: serde_json::Value,
 }
 
@@ -249,6 +269,47 @@ impl Enricher {
     }
 
     #[tool(
+        name = "meal_times_pull",
+        description = "Get the recipes that still need a reading of when they are eaten. \
+                       Returns a JSON array of {source, id, title, category, area, \
+                       instructions, ingredients:[name]}; an empty array means the queue \
+                       is drained."
+    )]
+    async fn meal_times_pull(
+        &self,
+        Parameters(MealTimePullParams { limit }): Parameters<MealTimePullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match meal_time_client::pull_pending(limit).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "meal_times_pull failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
+        name = "meal_times_push",
+        description = "Submit meal-time readings: each recipe's set of sittings, from \
+                       breakfast, lunch, dinner and snack. Give every sitting the dish \
+                       suits — a curry is lunch AND dinner — never just the likeliest \
+                       one, and never an empty set: every dish is eaten at some time, so \
+                       the app refuses one. The app validates each (recipe exists, \
+                       non-empty, no repeats), stores it, and re-derives. Returns \
+                       {accepted, derived, rejected}."
+    )]
+    async fn meal_times_push(
+        &self,
+        Parameters(MealTimePushParams { readings }): Parameters<MealTimePushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match meal_time_client::push_readings(readings).await {
+            Ok(body) => Ok(CallToolResult::success(vec![ContentBlock::text(body)])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "meal_times_push failed: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(
         name = "step_pull",
         description = "Get the recipes that still need a structured reading of their \
                        method. Returns a JSON array of {source, id, instructions, \
@@ -293,11 +354,12 @@ impl ServerHandler for Enricher {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Recipe corpus enrichment (#59): four queues — ingredient lines, \
-                 methods, required equipment, and nutrition. Pull the recipes that still \
-                 need a reading, read them, push the readings back. The app validates \
-                 and writes; these tools never touch the database. The model reads and \
-                 estimates; the app does every piece of arithmetic."
+                "Recipe corpus enrichment (#59): five queues — ingredient lines, \
+                 methods, required equipment, nutrition, and when a dish is eaten. Pull \
+                 the recipes that still need a reading, read them, push the readings \
+                 back. The app validates and writes; these tools never touch the \
+                 database. The model reads and estimates; the app does every piece of \
+                 arithmetic."
                     .to_string(),
             )
     }

@@ -247,6 +247,7 @@ mod tests {
             equipment: Vec::new(),
             nutrition: Vec::new(),
             servings: None,
+            sittings: Vec::new(),
             source_url: None,
             video_url: None,
         };

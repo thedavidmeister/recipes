@@ -163,6 +163,7 @@ mod tests {
                 // would be a fixture asserting a calorie count no source ever gave.
                 nutrition: Vec::new(),
                 servings: None,
+                sittings: Vec::new(),
                 source_url: None,
                 video_url: None,
             },

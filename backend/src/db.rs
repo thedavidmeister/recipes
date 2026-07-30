@@ -93,6 +93,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
         23,
         include_str!("../migrations/0023_nutrition_structures.sql"),
     ),
+    // 24 for the same reason 23 was not 20: production `_migrations` is at 23, so the
+    // next number above everything — including anything unmerged elsewhere — is the only
+    // one guaranteed to apply whichever branch deploys first.
+    (
+        24,
+        include_str!("../migrations/0024_meal_time_structures.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.
@@ -390,6 +397,7 @@ mod tests {
             "raw_imports",
             "ingredient_structures",
             "nutrition_structures",
+            "meal_time_structures",
             "runs",
             "users",
             "login_completions",

@@ -157,35 +157,52 @@ struct TallyRow {
 /// Which meal a plan is for (#114): the strongest filter there is on what belongs
 /// in the deck — nobody swipes pancakes and a lamb roast in the same session.
 ///
-/// The full vocabulary is two tiers, and the tier is the type. This enum is the
+/// **The same type the corpus is read into** ([`recipe_core::meal::Sitting`], #191), not
+/// a lookalike beside it. That reading answers "when is this dish eaten" with a set of
+/// these words, and the walk's bound is then literally `sittings.contains(&meal)` — no
+/// mapping, and so no second chance to disagree about what "dinner" means. The
+/// vocabulary used to say a coming meal-type reading "can share the same words"; sharing
+/// the type is how it does.
+///
+/// The full vocabulary is two tiers, and the tier is the type. This one is the
 /// **primary** tier — the meals you sit down to: breakfast, lunch, dinner, a
-/// snack. The **secondary** tier ([`MealAddition`]: dessert, side, drink) is the
-/// things that come *with* a meal. Splitting them into two types is what makes
+/// snack. The **secondary** tier ([`MealAddition`]: dessert, side) is the things
+/// that come *with* a meal. Splitting them into two types is what makes
 /// the invalid states unrepresentable: a plan's meal type simply cannot be
 /// "dessert" (it would claim the whole session for something that accompanies
 /// it), and a chosen addition cannot be "dinner" — serde refuses both at the
 /// wire, no handler checks anything.
 ///
 /// A **fixed vocabulary**, not free text: unlike ingredients this is a small
-/// closed set, so a picker over it can be exhaustive and stable, and the coming
-/// meal-type reading of the corpus can share the same words (the union of both
-/// tiers). Serde owns the wire form — always the lowercase name, and an unknown
-/// or wrongly-cased value is rejected at deserialization, so no handler ever
-/// holds a word outside its tier. The browser sentence-cases for display; the
-/// wire and the database stay lowercase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MealType {
-    Breakfast,
-    Lunch,
-    Dinner,
-    Snack,
-}
+/// closed set, so a picker over it can be exhaustive and stable. Serde owns the wire
+/// form — always the lowercase name, and an unknown or wrongly-cased value is rejected
+/// at deserialization, so no handler ever holds a word outside its tier. The browser
+/// sentence-cases for display; the wire and the database stay lowercase.
+pub type MealType = recipe_core::meal::Sitting;
 
-/// A secondary choice on a plan (#114): something that comes *with* the meal —
-/// dessert, a side, drinks — never the meal itself. See [`MealType`] for the
-/// two-tier split; this is the tier a plan can carry **several** of, alongside
-/// exactly one meal.
+/// A plan that names no meal is for dinner — the meal a group most plausibly
+/// plans together. The same word migration 0016 backfills, so an unstated choice
+/// and a pre-migration row read identically. Not time-of-day inference: it is one
+/// fixed word, and the host changes it in the lobby if it is wrong.
+///
+/// A constant here rather than a `Default` on the type, because it is a decision about
+/// **a plan** and not about the vocabulary: a *dish* has no default sitting, and giving
+/// the shared type one would let a reading quietly default to dinner instead of being
+/// refused as empty (#191).
+pub const DEFAULT_MEAL_TYPE: MealType = MealType::Dinner;
+
+/// A secondary choice on a plan (#114): something that comes *with* the meal — a
+/// dessert, a side — never the meal itself. See [`MealType`] for the two-tier
+/// split; this is the tier a plan can carry **several** of, alongside exactly one
+/// meal.
+///
+/// **Every word here is one the corpus states about a recipe**: 166 recipes are
+/// a `Dessert` and 84 are a `Side`. `Drink` was a third variant and is not one
+/// any more (#185) — no source we ingest carries drinks (0 categories, 0 tags
+/// across 790 recipes), so a host could toggle it and there was nothing in the
+/// world for it to mean. That is not a claim that a drink is not part of a meal;
+/// it is that nothing we read supplies one. A drinks adapter puts the variant
+/// back, with data behind it.
 ///
 /// Chosen additions are recorded on the session and shown in the lobby, so the
 /// room knows dinner comes with dessert. Whether a chosen addition one day gets
@@ -197,21 +214,16 @@ pub enum MealType {
 pub enum MealAddition {
     Dessert,
     Side,
-    Drink,
 }
 
 impl MealAddition {
     /// Every addition, in canonical order — the order stored, and the order the
     /// picker shows.
-    pub const ALL: [MealAddition; 3] = [
-        MealAddition::Dessert,
-        MealAddition::Side,
-        MealAddition::Drink,
-    ];
+    pub const ALL: [MealAddition; 2] = [MealAddition::Dessert, MealAddition::Side];
 }
 
 /// The canonical form of a chosen-additions list: each addition at most once, in
-/// vocabulary order. The list means a *set* — "dessert and drinks" — so a double
+/// vocabulary order. The list means a *set* — "dessert and a side" — so a double
 /// tap or a reordered client must not mint a different plan.
 fn normalize_additions(input: &[MealAddition]) -> Vec<MealAddition> {
     MealAddition::ALL
@@ -219,40 +231,6 @@ fn normalize_additions(input: &[MealAddition]) -> Vec<MealAddition> {
         .copied()
         .filter(|a| input.contains(a))
         .collect()
-}
-
-/// A plan that names no meal is for dinner — the meal a group most plausibly
-/// plans together. The same word migration 0016 backfills, so an unstated choice
-/// and a pre-migration row read identically. Not time-of-day inference: the
-/// default is one fixed word, and the host changes it in the lobby if it is wrong.
-impl Default for MealType {
-    fn default() -> Self {
-        MealType::Dinner
-    }
-}
-
-impl MealType {
-    /// The lowercase canonical form — what the wire carries and the DB stores.
-    fn as_str(self) -> &'static str {
-        match self {
-            MealType::Breakfast => "breakfast",
-            MealType::Lunch => "lunch",
-            MealType::Dinner => "dinner",
-            MealType::Snack => "snack",
-        }
-    }
-
-    /// The inverse of [`Self::as_str`], for reading a stored row back. `None` for
-    /// anything outside the vocabulary — the caller decides how loud to be.
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "breakfast" => MealType::Breakfast,
-            "lunch" => MealType::Lunch,
-            "dinner" => MealType::Dinner,
-            "snack" => MealType::Snack,
-            _ => return None,
-        })
-    }
 }
 
 // ---- HTTP handlers ---------------------------------------------------------
@@ -268,11 +246,11 @@ pub struct CreateBody {
     #[serde(default)]
     kitchen_id: Option<String>,
     /// Which meal this plans (#114). Optional — an unstated choice is dinner
-    /// ([`MealType::default`]) and the host can change it in the lobby.
+    /// ([`DEFAULT_MEAL_TYPE`]) and the host can change it in the lobby.
     #[serde(default)]
     meal_type: Option<MealType>,
-    /// What comes with it (#114) — dessert, a side, drinks. Optional; none is a
-    /// plain meal, and the host can add them in the lobby.
+    /// What comes with it (#114) — a dessert, a side. Optional; none is a plain
+    /// meal, and the host can add them in the lobby.
     #[serde(default)]
     additions: Vec<MealAddition>,
     /// The plan's total-time cap in seconds (#80); `null` = no cap ("Any"). Not
@@ -365,7 +343,7 @@ pub async fn create(
                 &user.telegram_user_id,
                 body.filter.as_deref(),
                 body.kitchen_id.as_deref(),
-                body.meal_type.unwrap_or_default(),
+                body.meal_type.unwrap_or(DEFAULT_MEAL_TYPE),
                 &body.additions,
                 body.max_total_seconds,
             )
@@ -751,7 +729,7 @@ pub struct AdditionsBody {
 }
 
 /// `POST /api/session/{channel}/additions` — the host names what comes with the
-/// meal: dessert, a side, drinks.
+/// meal: a dessert, a side.
 ///
 /// Same guards as [`set_meal_type`], for the same reason — host only, and only
 /// while the lobby is open; once people are voting, the terms of the plan must
@@ -1526,12 +1504,12 @@ async fn set_time_cap(
     Ok(written > 0)
 }
 
-/// Everything about a plan that bounds the walk it deals (#80, #82).
+/// Everything about a plan that bounds the walk it deals (#80, #82, #184).
 ///
 /// One struct and one read, rather than a query per facet: the walk resolves the whole
-/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen)
-/// would otherwise be another round trip on the pick page's hot path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// bound from the channel on every call, and each facet (#80's cap, #82's kitchen,
+/// #184's meal) would otherwise be another round trip on the pick page's hot path.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBounds {
     /// The total-time cap in seconds (#80); `None` = "Any".
     pub max_total_seconds: Option<i64>,
@@ -1539,6 +1517,30 @@ pub struct PlanBounds {
     /// (#82); `None` for a plan started outside a kitchen. Unconditional — there is no
     /// flag, because a meal planned in a kitchen is cooked in that kitchen.
     pub kitchen_id: Option<String>,
+    /// Which meal this plan is for (#114). The pick's one round deals *the meal*, so
+    /// the walk keeps that round clear of dishes the corpus states are accompaniments
+    /// (#184) — the choice a host makes in the lobby reaching the deck at last.
+    ///
+    /// Not an `Option`: migration 0016 made the column `NOT NULL DEFAULT 'dinner'` and
+    /// the create handler applies the same default, so every plan is for some meal.
+    pub meal_type: MealType,
+}
+
+/// The bounds of a plan that named nothing: no cap, no kitchen, and the meal every plan
+/// is born for.
+///
+/// Written out rather than derived, because [`MealType`] is the corpus's vocabulary
+/// (#191) and a *dish* has no default sitting — only a plan does. Deriving `Default`
+/// would have needed one on the shared type, where it could quietly stand in for a
+/// reading that should have been refused as empty.
+impl Default for PlanBounds {
+    fn default() -> Self {
+        PlanBounds {
+            max_total_seconds: None,
+            kitchen_id: None,
+            meal_type: DEFAULT_MEAL_TYPE,
+        }
+    }
 }
 
 /// A session's bounds, for the walk: `Ok(None)` is an unknown session, `Ok(Some(..))`
@@ -1548,7 +1550,7 @@ pub struct PlanBounds {
 pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Option<PlanBounds>> {
     let mut rows = conn
         .query(
-            "SELECT max_total_seconds, kitchen_id
+            "SELECT max_total_seconds, kitchen_id, meal_type
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1556,9 +1558,17 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
+    // Same ruling as [`load_lobby`]: every writer of this column validates against the
+    // vocabulary, so a stored word outside it is corruption. Fail loud rather than
+    // quietly fall back to the default and deal a deck bounded by a meal nobody chose.
+    let meal_raw: String = row.get(2)?;
+    let meal_type = MealType::parse(&meal_raw).ok_or_else(|| {
+        anyhow::anyhow!("pick_sessions.meal_type outside the vocabulary: {meal_raw:?}")
+    })?;
     Ok(Some(PlanBounds {
         max_total_seconds: row.get(0)?,
         kitchen_id: row.get(1)?,
+        meal_type,
     }))
 }
 
@@ -2401,17 +2411,20 @@ mod tests {
     }
 
     /// An unstated choice is dinner, twice over and identically: the create handler
-    /// fills `None` with [`MealType::default`], and migration 0016 backfills rows
+    /// fills `None` with [`DEFAULT_MEAL_TYPE`], and migration 0016 backfills rows
     /// that predate the column with the same word — so a pre-#114 plan and a
     /// caller who named nothing read the same.
     #[tokio::test]
     async fn an_unstated_meal_type_is_dinner() {
-        assert_eq!(MealType::default(), MealType::Dinner);
+        assert_eq!(DEFAULT_MEAL_TYPE, MealType::Dinner);
 
         // A body naming no meal deserializes, and resolves to the default —
         // exactly what the create handler does with it.
         let body: CreateBody = serde_json::from_str("{}").unwrap();
-        assert_eq!(body.meal_type.unwrap_or_default(), MealType::Dinner);
+        assert_eq!(
+            body.meal_type.unwrap_or(DEFAULT_MEAL_TYPE),
+            MealType::Dinner
+        );
 
         // A row written without the columns — the shape of every plan that existed
         // before migration 0016 — reads back as a plain dinner via the column
@@ -2467,7 +2480,7 @@ mod tests {
     #[test]
     fn the_two_tiers_partition_the_vocabulary() {
         let primary = ["breakfast", "lunch", "dinner", "snack"];
-        let secondary = ["dessert", "side", "drink"];
+        let secondary = ["dessert", "side"];
         for word in primary {
             let q = format!("{word:?}");
             assert!(serde_json::from_str::<MealType>(&q).is_ok(), "{word}");
@@ -2495,6 +2508,10 @@ mod tests {
     /// made-up word, the right word in the wrong case, or the *other* tier's word —
     /// never reaches a handler, on create or on change. "dessert" as a meal type is
     /// the ruling made fixture: an addition *to* a meal is not a meal.
+    ///
+    /// "drink" is the same check for a word that *left* the vocabulary (#185): a
+    /// client built against the old list is refused rather than quietly storing a
+    /// word nothing downstream can fill.
     #[test]
     fn a_word_outside_the_tier_is_rejected() {
         for bad in [
@@ -2505,6 +2522,7 @@ mod tests {
             r#"{"meal_type":"drink"}"#,
             r#"{"additions":["dinner"]}"#,
             r#"{"additions":["Dessert"]}"#,
+            r#"{"additions":["drink"]}"#,
             r#"{"additions":["dessert","nonsense"]}"#,
         ] {
             assert!(serde_json::from_str::<CreateBody>(bad).is_err(), "{bad}");
@@ -2514,6 +2532,7 @@ mod tests {
         }
         for bad in [
             r#"{"additions":["dinner"]}"#,
+            r#"{"additions":["drink"]}"#,
             r#"{"additions":["dessert","nonsense"]}"#,
         ] {
             assert!(serde_json::from_str::<AdditionsBody>(bad).is_err(), "{bad}");
@@ -2533,9 +2552,9 @@ mod tests {
             None,
             MealType::Dinner,
             &[
-                MealAddition::Drink,
+                MealAddition::Side,
                 MealAddition::Dessert,
-                MealAddition::Drink,
+                MealAddition::Side,
             ],
             None,
         )
@@ -2544,8 +2563,8 @@ mod tests {
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(
             view.additions,
-            vec![MealAddition::Dessert, MealAddition::Drink],
-            "once each, dessert before drink"
+            vec![MealAddition::Dessert, MealAddition::Side],
+            "once each, dessert before side"
         );
     }
 
@@ -2717,7 +2736,7 @@ mod tests {
         assert!(!update_meal_type(&conn, "c", MealType::Breakfast)
             .await
             .unwrap());
-        assert!(!update_additions(&conn, "c", &[MealAddition::Drink])
+        assert!(!update_additions(&conn, "c", &[MealAddition::Side])
             .await
             .unwrap());
 
@@ -2767,8 +2786,57 @@ mod tests {
             Some(PlanBounds {
                 max_total_seconds: Some(7200),
                 kitchen_id: None,
+                meal_type: MealType::Dinner,
             })
         );
+    }
+
+    /// The walk's read carries which meal the plan is for (#114/#184), so the deck a
+    /// host is dealt is bounded by the answer they gave in the lobby — the whole point
+    /// of asking. Every word of the vocabulary survives the round trip: the column is
+    /// text, so a bad write and a bad read look identical from the walk's side.
+    #[tokio::test]
+    async fn plan_bounds_carry_the_plans_meal() {
+        let conn = conn().await;
+        for meal in [
+            MealType::Breakfast,
+            MealType::Lunch,
+            MealType::Dinner,
+            MealType::Snack,
+        ] {
+            let channel = format!("plan-{}", meal.as_str());
+            create_session(&conn, &channel, "alice", None, None, meal, &[], None)
+                .await
+                .unwrap();
+            assert_eq!(
+                plan_bounds(&conn, &channel).await.unwrap(),
+                Some(PlanBounds {
+                    max_total_seconds: None,
+                    kitchen_id: None,
+                    meal_type: meal,
+                }),
+                "a {meal:?} plan bounds its walk to {meal:?}"
+            );
+        }
+    }
+
+    /// A stored word outside the vocabulary is corruption, and the bounds read fails
+    /// loud rather than falling back to the default — the same ruling `load_lobby`
+    /// already makes. Falling back would be worse here than in the lobby: the lobby at
+    /// least shows the wrong word, while a silently-defaulted bound deals a deck for a
+    /// meal nobody chose and says nothing.
+    #[tokio::test]
+    async fn plan_bounds_refuse_a_corrupt_meal_type() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO pick_sessions (channel_id, created_by, meal_type)
+             VALUES ('c', 'alice', 'brunch')",
+            (),
+        )
+        .await
+        .unwrap();
+        let err = plan_bounds(&conn, "c").await.unwrap_err().to_string();
+        assert!(err.contains("brunch"), "the bad word is named: {err}");
     }
 
     // ---- the kitchen limit (#82) -------------------------------------------
@@ -2818,6 +2886,7 @@ mod tests {
             Some(PlanBounds {
                 max_total_seconds: None,
                 kitchen_id: Some(kid),
+                meal_type: MealType::Dinner,
             })
         );
         assert_eq!(
@@ -3699,7 +3768,7 @@ mod tests {
             None,
             None,
             MealType::Breakfast,
-            &[MealAddition::Drink],
+            &[MealAddition::Side],
             Some(1800),
         )
         .await
@@ -3719,7 +3788,7 @@ mod tests {
         assert_eq!(view.host, "bob");
         assert_eq!(view.voters.len(), 2);
         assert_eq!(view.meal_type, MealType::Breakfast, "the plan is unchanged");
-        assert_eq!(view.additions, vec![MealAddition::Drink]);
+        assert_eq!(view.additions, vec![MealAddition::Side]);
         assert_eq!(view.max_total_seconds, Some(1800));
 
         // And it keeps handing on, so a plan can never be left hostless.

@@ -19,6 +19,8 @@
 //!   recipe-backend steps push               POST step DAGs (from stdin) to the app
 //!   recipe-backend nutrition pull [--limit N] GET the app's pending nutrition (#162)
 //!   recipe-backend nutrition push            POST nutrition readings (from stdin)
+//!   recipe-backend meal-times pull [--limit N] GET the app's pending sittings (#191)
+//!   recipe-backend meal-times push           POST meal-time readings (from stdin)
 //!   recipe-backend mcp                       MCP stdio server: enrich/step pull/push tools
 
 mod admin;
@@ -35,6 +37,8 @@ mod error;
 mod ingest;
 mod kitchens;
 mod mcp;
+mod meal_time_api;
+mod meal_times;
 mod nutrition;
 mod nutrition_api;
 mod proxy;
@@ -245,6 +249,11 @@ pub fn app(state: AppState) -> Router {
         // worker is infrastructure, and the app is what writes the corpus.
         .route("/enrich/nutrition/pending", get(nutrition_api::pending))
         .route("/enrich/nutrition/results", post(nutrition_api::results))
+        // The meal-time queue (#191): when each dish is eaten, so a plan's round can be
+        // the meal it asked for. Machine-gated like the rest — the worker is
+        // infrastructure, and the app is what validates and writes the corpus.
+        .route("/enrich/meal-times/pending", get(meal_time_api::pending))
+        .route("/enrich/meal-times/results", post(meal_time_api::results))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -529,6 +538,29 @@ async fn main() -> anyhow::Result<()> {
             _ => {
                 eprintln!(
                     "usage: recipe-backend nutrition pull [--limit N] | recipe-backend nutrition push"
+                );
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+
+    // The meal-time queue's worker side (#191) — same shape again, another path.
+    if std::env::args().nth(1).as_deref() == Some("meal-times") {
+        match std::env::args().nth(2).as_deref() {
+            Some("pull") => {
+                let args: Vec<String> = std::env::args().collect();
+                let limit = args
+                    .iter()
+                    .position(|a| a == "--limit")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                meal_time_api::client::pull(limit).await?;
+            }
+            Some("push") => meal_time_api::client::push().await?,
+            _ => {
+                eprintln!(
+                    "usage: recipe-backend meal-times pull [--limit N] | recipe-backend meal-times push"
                 );
                 std::process::exit(2);
             }
@@ -1225,6 +1257,224 @@ mod tests {
         assert_eq!(pending.as_array().unwrap().len(), 0);
     }
 
+    fn meal_times_pending_req(auth: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("GET")
+            .uri("/api/enrich/meal-times/pending");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    fn meal_times_results_req(auth: Option<&str>, body: &str) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/enrich/meal-times/results")
+            .header("content-type", "application/json");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        b.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    /// The meal-time queue sits behind the same machine gate as every other worker
+    /// endpoint (#191): no key, no entry, and a valid session does not open it either.
+    #[tokio::test]
+    async fn meal_time_endpoints_require_the_api_key_not_a_session() {
+        let (app, conn) = test_app().await;
+        for req in [
+            meal_times_pending_req(None),
+            meal_times_results_req(None, r#"{"model":"m","readings":[]}"#),
+        ] {
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/enrich/meal-times/pending")
+                    .header("cookie", format!("recipes_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session must not open the meal-time queue"
+        );
+    }
+
+    /// End to end through the router (#191/#192), and the acceptance for the whole
+    /// issue: a worker pulls a dish, pushes the sittings it suits, and the dish joins
+    /// exactly the decks the reading names.
+    ///
+    /// The recipe is a roast. Before the reading, **no** plan deals it — a meal round
+    /// serves only explicit matches, and nothing has been read (ruled in #192; the
+    /// same day-one state as the whole corpus). After a reading of `["dinner"]`, the
+    /// dinner plan deals it and the breakfast plan still does not. **That is the
+    /// control finally meaning something**, and it happens without a single word of
+    /// model code in this service.
+    #[tokio::test]
+    async fn a_meal_time_reading_changes_which_plan_is_dealt_the_dish() {
+        let (app, conn) = test_app().await;
+        conn.execute(
+            "INSERT INTO raw_imports (source, id, raw, source_url) VALUES ('themealdb','1',?1,?2)",
+            libsql::params![
+                r#"{"meals":[{"idMeal":"1","strMeal":"Sunday roast","strInstructions":"Roast it for three hours.","strIngredient1":"Beef","strMeasure1":"2 kg","strCategory":"Beef"}]}"#,
+                "https://www.themealdb.com/api/json/v1/1/lookup.php?i=1"
+            ],
+        )
+        .await
+        .unwrap();
+        derive::derive(&conn, None, 1).await.unwrap();
+
+        let auth = "Bearer test-ingest-key";
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        // Two plans, one for breakfast and one for dinner. Neither deals the roast yet:
+        // unread means no meal round, which is the whole corpus the day this lands.
+        for (channel, meal) in [("b", "breakfast"), ("d", "dinner")] {
+            conn.execute(
+                "INSERT INTO pick_sessions (channel_id, created_by, meal_type, max_total_seconds)
+                 VALUES (?1, '4242', ?2, NULL)",
+                libsql::params![channel, meal],
+            )
+            .await
+            .unwrap();
+        }
+        let dealt = |app: Router, channel: &'static str, cookie: String| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/walk?channel={channel}"))
+                        .header("cookie", cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let walk: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            walk["stops"].as_array().unwrap().len()
+        };
+        for channel in ["b", "d"] {
+            assert_eq!(
+                dealt(app.clone(), channel, cookie.clone()).await,
+                0,
+                "unread, so no meal round deals the roast ({channel})"
+            );
+        }
+
+        // The worker pulls it, with everything the reading needs.
+        let res = app
+            .clone()
+            .oneshot(meal_times_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 1);
+        assert_eq!(pending[0]["title"], "Sunday roast");
+        assert_eq!(pending[0]["category"], "Beef");
+        assert_eq!(pending[0]["ingredients"][0], "Beef");
+
+        // …and pushes the sittings it suits.
+        let submit = r#"{"model":"claude-opus-4-8","readings":[{"source":"themealdb","id":"1","sittings":["dinner"]}]}"#;
+        let res = app
+            .clone()
+            .oneshot(meal_times_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["accepted"], 1);
+        assert_eq!(report["derived"], 1, "the reading reached the derived view");
+
+        // The deck changes, which is the whole issue.
+        assert_eq!(
+            dealt(app.clone(), "b", cookie.clone()).await,
+            0,
+            "a roast is not a breakfast, and now the corpus says so"
+        );
+        assert_eq!(
+            dealt(app.clone(), "d", cookie).await,
+            1,
+            "and the dinner plan still deals it"
+        );
+
+        // And the recipe leaves the queue.
+        let res = app
+            .oneshot(meal_times_pending_req(Some(auth)))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 0);
+    }
+
+    /// An empty set is refused at the app's front door, not stored — the reading's one
+    /// hard rule (#191), proven through the router rather than only at the unit below
+    /// it. The recipe stays in the queue and comes back next pull.
+    #[tokio::test]
+    async fn a_meal_time_push_refuses_an_empty_set() {
+        let (app, conn) = test_app().await;
+        conn.execute(
+            "INSERT INTO recipes (source, id, title) VALUES ('themealdb','1','Toast')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let auth = "Bearer test-ingest-key";
+        let submit = r#"{"model":"m","readings":[{"source":"themealdb","id":"1","sittings":[]}]}"#;
+        let res = app
+            .clone()
+            .oneshot(meal_times_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["accepted"], 0);
+        assert!(report["rejected"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("every dish is eaten at some time"));
+
+        // A word outside the vocabulary never gets as far as a rejection report: serde
+        // refuses the body, so the request is a 4xx and nothing is read at all.
+        let submit =
+            r#"{"model":"m","readings":[{"source":"themealdb","id":"1","sittings":["brunch"]}]}"#;
+        let res = app
+            .oneshot(meal_times_results_req(Some(auth), submit))
+            .await
+            .unwrap();
+        assert!(
+            res.status().is_client_error(),
+            "a word outside the vocabulary is refused at the wire, got {}",
+            res.status()
+        );
+    }
+
     /// A blank model is a bad request, not a silently-stored placeholder (CodeRabbit).
     #[tokio::test]
     async fn enrich_results_rejects_a_blank_model() {
@@ -1503,14 +1753,14 @@ mod tests {
             .oneshot(json_post(
                 &format!("/api/session/{channel}/additions"),
                 Some(&cookie),
-                r#"{"additions":["drink","dessert"]}"#,
+                r#"{"additions":["side","dessert"]}"#,
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
             body_json(res).await["additions"],
-            serde_json::json!(["dessert", "drink"])
+            serde_json::json!(["dessert", "side"])
         );
     }
 
@@ -1527,7 +1777,7 @@ mod tests {
             .oneshot(json_post(
                 "/api/session",
                 Some(&cookie),
-                r#"{"meal_type":"snack","additions":["drink"]}"#,
+                r#"{"meal_type":"snack","additions":["dessert"]}"#,
             ))
             .await
             .unwrap();
@@ -1549,7 +1799,7 @@ mod tests {
             .unwrap();
         let body = body_json(res).await;
         assert_eq!(body["meal_type"], "snack");
-        assert_eq!(body["additions"], serde_json::json!(["drink"]));
+        assert_eq!(body["additions"], serde_json::json!(["dessert"]));
     }
 
     /// The vocabulary is closed server-side: a meal outside it is refused at the
@@ -1884,9 +2134,12 @@ mod tests {
             ("slow", Some(3600i64)),
             ("unknown", None),
         ] {
+            // Read for the plan's default meal (dinner): the bound under test is the
+            // cap, and a meal round deals only explicit matches (#192), so the meal
+            // filter is satisfied uniformly first.
             conn.execute(
-                "INSERT INTO recipes (source, id, title, total_seconds)
-                 VALUES ('t', ?1, ?1, ?2)",
+                "INSERT INTO recipes (source, id, title, total_seconds, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, secs],
             )
             .await
@@ -1926,6 +2179,94 @@ mod tests {
             !ids.contains("slow"),
             "an hour is over the default and goes: {ids:?}"
         );
+    }
+
+    /// End to end through the router (#184/#192): the meal a host chose in the lobby
+    /// reaches the deck, and the round deals **only what is explicitly read as that
+    /// meal**. A stated accompaniment is refused whatever its reading says, an unread
+    /// dish is in no round, and a dish read for another sitting stays out.
+    ///
+    /// This is the whole wire — create with a meal, `resolve_bounds` reading it off the
+    /// plan, `load_corpus` acting on it — which the unit tests in `walk` cannot see:
+    /// they call `load_corpus` with a `Bounds` they built themselves, so a
+    /// `resolve_bounds` that dropped the meal on the floor would leave every one of
+    /// them green while the product dealt dinners to a breakfast.
+    #[tokio::test]
+    async fn the_meal_a_plan_chose_bounds_the_walk_it_deals() {
+        let (app, conn) = test_app().await;
+        // No estimates, so the born-in cap (#163) cannot be what excludes anything
+        // here — an un-estimated recipe stays under any cap (#80). `sittings` is the
+        // reading each case needs: read-as-breakfast, read-as-dinner-only, unread,
+        // and a stated accompaniment that is refused even when read.
+        for (id, category, sittings) in [
+            ("trifle", "Dessert", "[\"dinner\"]"),
+            ("chips", "Side", "[\"lunch\"]"),
+            ("soup", "Starter", "[]"),
+            ("pancakes", "Breakfast", "[\"breakfast\"]"),
+            ("stew", "Beef", "[\"lunch\",\"dinner\"]"),
+            ("porridge", "Miscellaneous", "[\"breakfast\",\"snack\"]"),
+            ("blank", "Beef", "[]"),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, category, sittings)
+                 VALUES ('t', ?1, ?1, ?2, ?3)",
+                libsql::params![id, category, sittings],
+            )
+            .await
+            .unwrap();
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"meal_type":"breakfast"}"#,
+            ))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stops = body_json(res).await["stops"].clone();
+        let ids: std::collections::HashSet<String> = stops
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        for stated in ["trifle", "chips", "soup"] {
+            assert!(
+                !ids.contains(stated),
+                "the corpus states {stated} accompanies a meal, so the round refuses it \
+                 even when its reading names a sitting: {ids:?}"
+            );
+        }
+        for wrong_or_unread in ["stew", "blank"] {
+            assert!(
+                !ids.contains(wrong_or_unread),
+                "{wrong_or_unread} is not read as a breakfast, so a breakfast round \
+                 refuses it (#192 — only explicit matches): {ids:?}"
+            );
+        }
+        for breakfast in ["pancakes", "porridge"] {
+            assert!(
+                ids.contains(breakfast),
+                "{breakfast} is read as a breakfast, so the breakfast round deals it: {ids:?}"
+            );
+        }
     }
 
     /// A nonsense cap — zero, negative, longer than a day — is refused at create.
@@ -2047,8 +2388,10 @@ mod tests {
             ("unknown", None),
         ] {
             conn.execute(
-                "INSERT INTO recipes (source, id, title, total_seconds)
-                 VALUES ('t', ?1, ?1, ?2)",
+                // Read for the plan's default meal: the bound under test is the cap,
+                // and a meal round deals only explicit matches (#192).
+                "INSERT INTO recipes (source, id, title, total_seconds, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, secs],
             )
             .await
@@ -2176,7 +2519,11 @@ mod tests {
             ("unread", "[]"),
         ] {
             conn.execute(
-                "INSERT INTO recipes (source, id, title, equipment) VALUES ('t', ?1, ?1, ?2)",
+                // `unread` here means unread *equipment* — every row carries a sittings
+                // reading, because the bound under test is the kitchen and a meal round
+                // deals only explicit matches (#192).
+                "INSERT INTO recipes (source, id, title, equipment, sittings)
+                 VALUES ('t', ?1, ?1, ?2, '[\"dinner\"]')",
                 libsql::params![id, equipment],
             )
             .await

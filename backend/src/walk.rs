@@ -36,10 +36,12 @@ use axum::{
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 use recipe_core::equipment::{capability, Capability, RequiredEquipment};
-use recipe_core::Ingredient;
+use recipe_core::meal::{course, fit, Course, MealFit};
+use recipe_core::{Ingredient, Sitting};
 use recipe_walk::{FixtureGraph, IngredientId, RecipeGraph, RecipeId, TabuWeighted, Walk};
 use serde::{Deserialize, Serialize};
 
+use crate::session::MealType;
 use crate::{error::AppError, AppState};
 
 /// How many stops a walk has when the caller does not say. Long enough to feel
@@ -53,12 +55,12 @@ const MAX_LEN: usize = 30;
 pub struct WalkParams {
     /// Requested number of stops, clamped to `1..=MAX_LEN`. Absent → [`DEFAULT_LEN`].
     len: Option<usize>,
-    /// The pick session this walk feeds (#80, #82). Present, the session's bounds — its
-    /// time cap, and what its kitchen can make — bound the corpus walked; an unknown
-    /// channel is refused rather than read as "unbounded". Absent, the walk is over the
-    /// whole corpus, as ever. It scopes the walk to the plan's bounds — it is not an
-    /// access check (the session gate already authenticated the caller, and a bound is
-    /// a filter, not a secret).
+    /// The pick session this walk feeds (#80, #82, #184). Present, the session's bounds
+    /// — its time cap, what its kitchen can make, and the meal it is for — bound the
+    /// corpus walked; an unknown channel is refused rather than read as "unbounded".
+    /// Absent, the walk is over the whole corpus, as ever. It scopes the walk to the
+    /// plan's bounds — it is not an access check (the session gate already
+    /// authenticated the caller, and a bound is a filter, not a secret).
     channel: Option<String>,
 }
 
@@ -274,6 +276,64 @@ struct Bounds {
     /// empty set: the two would behave in opposite ways (an empty set excludes
     /// everything), and only one of them is ever true (see [`resolve_bounds`]).
     owned_equipment: Option<BTreeSet<String>>,
+    /// The meal this walk is dealing (#114/#184). `Some` whenever a channel names a
+    /// plan — the pick runs one round and that round is the meal — so the deck is kept
+    /// clear of dishes the corpus states are accompaniments. `None` is a walk with no
+    /// plan behind it, which is not a meal round and sees the whole corpus.
+    meal_type: Option<MealType>,
+}
+
+/// Would a plan for `meal` deal this dish **as the meal itself** (#184, #191)?
+///
+/// Two questions, in order, because they are answered by two different kinds of thing.
+///
+/// # 1. Is it the meal at all, or something that comes with one? (#184, stated)
+///
+/// The pick's one round is the meal round, and #114's vocabulary already rules that a
+/// dessert or a side is a thing that comes *with* a meal rather than the meal a plan
+/// is for. So a dish whose source states it is one — [`Course::Accompaniment`] — is not
+/// in the deck a host asked for when they answered "which meal". That is a claim the
+/// corpus really made (`Dessert` 166, `Side` 84, `Starter` 14 of 790), and it is the same
+/// for all four meal words.
+///
+/// A `category` that names a protein or a style says nothing at all, and a stated
+/// `Breakfast` is still not acted on **here** — deciding a breakfast dish is not a dinner
+/// is a judgement, and judgements now belong to the reading below rather than to a word a
+/// source filed the dish under. Both stay, which is [`Capability::Unread`]'s ruling (#82).
+///
+/// # 2. Is this dish eaten at this sitting? (#191, read)
+///
+/// This is the question #184 could not answer and this filter exists for. The corpus
+/// carries no `Lunch`, `Dinner` or `Snack` category at all, so nothing it *states* can
+/// tell the four meal words apart; [`recipe_core::meal::fit`] reads the meal-time
+/// reading instead — a set of sittings per recipe, produced off the service — and a dish
+/// whose set does not contain this meal is out of the round. **A roast finally stays out
+/// of a breakfast.**
+///
+/// [`MealFit::Unread`] is **excluded**, by ruling (#192/#193): a meal round serves only
+/// what explicitly matches the filter, and a dish nobody has read does not explicitly
+/// match anything. Missing data is a scraper/enrichment gap — the fix is reading the
+/// corpus, never loosening the filter. This is the same treatment the kitchen bound
+/// below gives an unread equipment reading, for the same written reason: containment is
+/// a proof, and admitting unread recipes beside it would mix a proof with a guess.
+///
+/// The cost is stated rather than hidden: until the `enrich-meal-times` worker has read
+/// a recipe, no meal round deals it, and on the day this lands that is the whole corpus
+/// — every meal round is empty until the worker runs. Running the worker is the act
+/// that delivers the feature; ingest adding new recipes keeps them out of every round
+/// until they are read, which is exactly the explicit-only behaviour asked for.
+fn deals_as_the_meal(meal: Sitting, category: Option<&str>, sittings: &[Sitting]) -> bool {
+    if course(category) == Course::Accompaniment {
+        // Stated to accompany a meal, so never the meal — whichever meal is planned, and
+        // whatever its sittings say. A trifle is eaten after dinner; that does not make
+        // it the dinner, and #147's rounds are where it gets dealt.
+        return false;
+    }
+    match fit(sittings, meal) {
+        MealFit::Suits => true,
+        MealFit::Wrong => false,
+        MealFit::Unread => false,
+    }
 }
 
 /// Load the whole normalized corpus into a [`Corpus`]. One query; the ingredients
@@ -344,10 +404,37 @@ struct Bounds {
 /// over a JSON array — plus the empty-means-unread ruling — is a judgement that belongs
 /// in one tested place ([`recipe_core::equipment::capability`]), shared with #83, rather
 /// than re-encoded in a `json_each` subquery that could drift from it.
+///
+/// # The meal (#184, #191)
+///
+/// A plan is *for* a meal, and until #184 landed that choice reached the heading and
+/// nothing else — a breakfast plan was dealt the same 790 recipes a dinner plan was.
+/// A walk behind a channel is now a **meal round**, and two things keep it to the meal:
+///
+/// - a dish the corpus **states** is an accompaniment (`Dessert`, `Side`, `Starter` —
+///   264 of 790) is not in it, whichever meal was asked for (#184/#114);
+/// - a dish the meal-time **reading** says is eaten at other sittings is not in it
+///   either (#191) — the first thing in the corpus that can tell a breakfast from a
+///   dinner, since no category the corpus carries ever could.
+///
+/// **An unread recipe is still dealt**, which is [`Capability::Unread`]'s ruling (#82)
+/// and, on the day this lands, the difference between a working deck and an empty one:
+/// nothing has been read yet, because the reading is produced off the service by a
+/// worker somebody runs (#59). The consequence, stated plainly: **until the corpus is
+/// read a dinner plan still deals dishes nobody has said are dinners** — the same deck
+/// #184 left, minus whatever has been read since. It tightens per recipe, with no flag to
+/// switch. See [`recipe_core::meal::fit`].
+///
+/// This filters in Rust for the same reason the kitchen bound does: reading one flat
+/// field for two different kinds of claim, ruling on what silence means, and ruling on
+/// what an absent reading means are judgements that belong in one tested place
+/// ([`recipe_core::meal`]) — which #147's per-addition rounds will read from the opposite
+/// direction — rather than an `IN` list and a `json_each` subquery inlined here that
+/// could drift from them.
 async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Result<Corpus> {
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment
+            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings
              FROM recipes
              WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
             libsql::params![bounds.max_total_seconds],
@@ -371,6 +458,27 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
             // the step worker has not reached is `0`, which is the truth about it.
             fully_timed: row.get::<i64>(7)? != 0,
         };
+        // The meal bound (#184, #191). Before the ingredients are parsed, because a dish
+        // that is not in this round has no reason to be read at all.
+        if let Some(meal) = bounds.meal_type {
+            // `sittings` is our own serialization, NOT NULL DEFAULT '[]' — so the same
+            // split as the ingredients and equipment below: a column-read error is
+            // structural and propagates, an unparseable value degrades this one recipe.
+            // It degrades to *unread*, which is the reading that restricts nothing, so a
+            // corrupt row stays in the deck rather than silently vanishing from a plan.
+            let json = row.get::<String>(10)?;
+            let sittings: Vec<Sitting> = serde_json::from_str(&json).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "recipe {}/{} has unparseable sittings JSON, treating as unread: {e}",
+                    card.source,
+                    card.id
+                );
+                Vec::new()
+            });
+            if !deals_as_the_meal(meal, card.category.as_deref(), &sittings) {
+                continue;
+            }
+        }
         // The ingredients column is our own serialization — NOT NULL DEFAULT '[]',
         // written only by ingest — so the two ways to fail here are not the same.
         // A column-read error is *structural*: the column is gone or the wrong
@@ -467,12 +575,16 @@ async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bound
     Ok(Bounds {
         max_total_seconds: plan.max_total_seconds,
         owned_equipment,
+        // A channel names a plan, and the pick's one round deals that plan's meal, so a
+        // channelled walk is always a meal round (#184). `None` — the unbounded,
+        // channel-less walk — is the only walk that is not one.
+        meal_type: Some(plan.meal_type),
     })
 }
 
 /// `GET /api/walk?len=<n>&channel=<pick>` — a fresh variety-first walk over the
-/// corpus, bounded to the pick session's time cap (#80) and to what its kitchen can
-/// make (#82) whenever a channel is named.
+/// corpus, bounded to the pick session's time cap (#80), to what its kitchen can make
+/// (#82), and to the meal it is for (#184) whenever a channel is named.
 ///
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
@@ -833,15 +945,23 @@ mod tests {
     fn capped(seconds: i64) -> Bounds {
         Bounds {
             max_total_seconds: Some(seconds),
-            owned_equipment: None,
+            ..Bounds::default()
         }
     }
 
     /// Bounded to a kitchen holding exactly `items` (#82).
     fn owning(items: &[&str]) -> Bounds {
         Bounds {
-            max_total_seconds: None,
             owned_equipment: Some(items.iter().map(|i| (*i).to_owned()).collect()),
+            ..Bounds::default()
+        }
+    }
+
+    /// Bounded to a plan's meal round (#184) and nothing else.
+    fn planning(meal: MealType) -> Bounds {
+        Bounds {
+            meal_type: Some(meal),
+            ..Bounds::default()
         }
     }
 
@@ -1021,6 +1141,7 @@ mod tests {
                     .map(str::to_owned)
                     .collect(),
             ),
+            ..Bounds::default()
         };
         let corpus = load_corpus(&conn, &bounds).await.unwrap();
         assert_eq!(
@@ -1051,6 +1172,349 @@ mod tests {
 
         let all = load_corpus(&conn, &Bounds::default()).await.unwrap();
         assert!(ids(&all).contains(&"simple"));
+    }
+
+    // ---- the meal bound (#184) ---------------------------------------------
+
+    /// A corpus shaped for the meal bound: one recipe per thing a `category` can state.
+    /// The three accompaniment words the corpus uses, the one sitting it states, a
+    /// category that names a protein and says nothing about the meal, and the two ways
+    /// to say nothing at all.
+    async fn meal_conn() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        for (id, category) in [
+            ("trifle", Some("Dessert")),
+            ("chips", Some("Side")),
+            ("soup", Some("Starter")),
+            // The source's own spelling reaches the column unnormalised, so the rule
+            // has to fold case here rather than trust the corpus to be tidy.
+            ("brownie", Some("dessert")),
+            ("pancakes", Some("Breakfast")),
+            ("stew", Some("Beef")),
+            ("blank", Some("   ")),
+            ("uncategorised", None),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, category)
+                 VALUES ('test', ?1, ?1, ?2)",
+                libsql::params![id, category],
+            )
+            .await
+            .unwrap();
+        }
+        conn
+    }
+
+    /// **The fix** (#184): a plan's round deals the meal, so a dish the corpus *states*
+    /// accompanies one is not in the deck. `Dessert`, `Side` and `Starter` are the
+    /// three words it uses, whatever case they arrive in.
+    #[tokio::test]
+    async fn a_meal_round_refuses_a_stated_accompaniment() {
+        let conn = meal_conn().await;
+        let corpus = load_corpus(&conn, &planning(MealType::Dinner))
+            .await
+            .unwrap();
+        for refused in ["trifle", "chips", "soup", "brownie"] {
+            assert!(
+                !ids(&corpus).contains(&refused),
+                "the corpus states {refused} accompanies a meal: {:?}",
+                ids(&corpus)
+            );
+        }
+    }
+
+    /// **The ruling that does most of the work** (#82's `Capability::Unread`, applied
+    /// to the other reading): a recipe the corpus says nothing about stays in.
+    ///
+    /// This is the whole difference between the filter that landed and the one that
+    /// looked obvious. `Beef` is a claim about beef, not a claim that a dish is dinner
+    /// — and by the same coin it is not a claim that the dish *is* anything a meal
+    /// round could serve. A meal round serves only what explicitly matches the filter
+    /// (#192), so a recipe the corpus says nothing about is in no meal round at all:
+    /// missing data is a scraper/enrichment gap, and the fix is reading the corpus,
+    /// never widening the deck to cover for it.
+    #[tokio::test]
+    async fn a_recipe_the_corpus_says_nothing_about_is_in_no_meal_round() {
+        let conn = meal_conn().await;
+        let corpus = load_corpus(&conn, &planning(MealType::Dinner))
+            .await
+            .unwrap();
+        assert!(
+            ids(&corpus).is_empty(),
+            "nothing here is read, so nothing explicitly matches a dinner: {:?}",
+            ids(&corpus)
+        );
+    }
+
+    /// A stated `Breakfast` **category is not a sittings reading**. The filter serves
+    /// explicit matches of the reading only, so even the 19 recipes the source files
+    /// under `Breakfast` wait for the worker like everything else — one rule, no side
+    /// door. (Whether derive should seed a sitting from a stated category is a design
+    /// question for the human; until ruled, a category neither admits nor excludes a
+    /// meal — it only names accompaniments.)
+    #[tokio::test]
+    async fn a_stated_breakfast_category_is_not_a_reading() {
+        let conn = meal_conn().await;
+        for meal in [
+            MealType::Breakfast,
+            MealType::Lunch,
+            MealType::Dinner,
+            MealType::Snack,
+        ] {
+            let corpus = load_corpus(&conn, &planning(meal)).await.unwrap();
+            assert!(
+                !ids(&corpus).contains(&"pancakes"),
+                "unread, so no {meal:?} plan deals it — not even breakfast"
+            );
+        }
+    }
+
+    /// **An unread corpus deals an empty meal round**, and that is what the day this
+    /// lands looks like — stated plainly rather than discovered. The requirement is
+    /// explicit meals (#192); nothing unread explicitly matches anything, so the deck
+    /// is empty until the `enrich-meal-times` worker has read the corpus. Running the
+    /// worker is the act that delivers the feature; deploying this is not it.
+    #[tokio::test]
+    async fn an_unread_corpus_deals_an_empty_meal_round() {
+        let conn = meal_conn().await;
+        for meal in Sitting::ALL {
+            let corpus = load_corpus(&conn, &planning(meal)).await.unwrap();
+            assert!(
+                ids(&corpus).is_empty(),
+                "a {meal:?} plan over an unread corpus deals nothing: {:?}",
+                ids(&corpus)
+            );
+        }
+    }
+
+    /// A walk with no plan behind it is not a meal round, so it still sees everything —
+    /// nothing about #184 narrows a caller that named no channel.
+    #[tokio::test]
+    async fn a_walk_with_no_plan_still_sees_accompaniments() {
+        let conn = meal_conn().await;
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec![
+                "blank",
+                "brownie",
+                "chips",
+                "pancakes",
+                "soup",
+                "stew",
+                "trifle",
+                "uncategorised"
+            ]
+        );
+    }
+
+    /// The three bounds compose: over-cap recipes go by time, un-makeable ones by
+    /// equipment, stated accompaniments by the meal — and only what survives all three
+    /// is dealt.
+    #[tokio::test]
+    async fn the_meal_bound_composes_with_the_time_cap_and_the_kitchen() {
+        let conn = meal_conn().await;
+        // Everything a dinner: the bounds under test are time, kitchen and
+        // accompaniment, so the sittings reading is satisfied uniformly first.
+        for id in ["blank", "pancakes", "stew", "uncategorised"] {
+            read_as(&conn, id, &[Sitting::Dinner]).await;
+        }
+        conn.execute(
+            "UPDATE recipes SET total_seconds = 900, equipment = '[{\"item\":\"knife\"}]'",
+            (),
+        )
+        .await
+        .unwrap();
+        // `stew` is slow, `uncategorised` needs a tool this kitchen lacks, `trifle` is
+        // a stated dessert. `pancakes` and `blank` survive all three.
+        conn.execute(
+            "UPDATE recipes SET total_seconds = 7200 WHERE id = 'stew'",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "UPDATE recipes SET equipment = '[{\"item\":\"blowtorch\"}]' WHERE id = 'uncategorised'",
+            (),
+        )
+        .await
+        .unwrap();
+        let bounds = Bounds {
+            max_total_seconds: Some(1800),
+            owned_equipment: Some([String::from("knife")].into_iter().collect()),
+            meal_type: Some(MealType::Dinner),
+        };
+        let corpus = load_corpus(&conn, &bounds).await.unwrap();
+        assert_eq!(ids(&corpus), vec!["blank", "pancakes"]);
+    }
+
+    // ---- the meal-time reading (#191) --------------------------------------
+
+    /// Store a reading against one of [`meal_conn`]'s recipes — the row `derive` would
+    /// have written from `meal_time_structures`.
+    async fn read_as(conn: &libsql::Connection, id: &str, sittings: &[Sitting]) {
+        conn.execute(
+            "UPDATE recipes SET sittings = ?2 WHERE id = ?1",
+            libsql::params![id, serde_json::to_string(sittings).unwrap()],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// **The whole point of #191.** A dish read as a dinner is not dealt to a breakfast,
+    /// and one read as breakfast-or-snack is not dealt to a dinner. Nothing the corpus
+    /// *states* could do this — there is no `Dinner` category — so this is the first
+    /// thing in the app that tells the four meal words apart.
+    #[tokio::test]
+    async fn a_read_dish_is_dealt_only_to_the_sittings_it_names() {
+        let conn = meal_conn().await;
+        read_as(&conn, "stew", &[Sitting::Dinner]).await;
+        read_as(&conn, "pancakes", &[Sitting::Breakfast, Sitting::Snack]).await;
+
+        let breakfast = load_corpus(&conn, &planning(MealType::Breakfast))
+            .await
+            .unwrap();
+        assert!(
+            !ids(&breakfast).contains(&"stew"),
+            "a roast finally stays out of a breakfast: {:?}",
+            ids(&breakfast)
+        );
+        assert!(ids(&breakfast).contains(&"pancakes"));
+
+        let dinner = load_corpus(&conn, &planning(MealType::Dinner))
+            .await
+            .unwrap();
+        assert!(ids(&dinner).contains(&"stew"));
+        assert!(
+            !ids(&dinner).contains(&"pancakes"),
+            "and a breakfast dish read as one stays out of a dinner: {:?}",
+            ids(&dinner)
+        );
+
+        // A dish read for several sittings is dealt to each of them, which is why the
+        // reading is a set: one label would have had to pick.
+        let snack = load_corpus(&conn, &planning(MealType::Snack))
+            .await
+            .unwrap();
+        assert!(ids(&snack).contains(&"pancakes"));
+    }
+
+    /// **The ruling, at the surface (#192).** Only what is explicitly read for this
+    /// meal is dealt. An unread dish sits in no meal round — not "every round until we
+    /// know better" — and each recipe joins the decks the moment its reading lands.
+    /// Ingest works the same way: a freshly scraped recipe is in no round until read,
+    /// which is exactly the explicit-only behaviour asked for.
+    #[tokio::test]
+    async fn an_unread_dish_is_dealt_to_no_meal_round() {
+        let conn = meal_conn().await;
+        read_as(&conn, "stew", &[Sitting::Dinner]).await;
+
+        for meal in Sitting::ALL {
+            let corpus = load_corpus(&conn, &planning(meal)).await.unwrap();
+            for unread in ["blank", "uncategorised", "pancakes"] {
+                assert!(
+                    !ids(&corpus).contains(&unread),
+                    "{unread} has no reading, so no {meal:?} plan deals it"
+                );
+            }
+            assert_eq!(
+                ids(&corpus).contains(&"stew"),
+                meal == Sitting::Dinner,
+                "the one recipe that has been read is dealt exactly where its reading says"
+            );
+        }
+    }
+
+    /// The inverse of [`an_unread_corpus_deals_an_empty_meal_round`]:
+    /// once the corpus is read, the four decks are genuinely different. This is the
+    /// requirement — a plan for a meal shows recipes that are explicitly that meal — and
+    /// it is met by reading the corpus, not by deploying this.
+    #[tokio::test]
+    async fn a_read_corpus_finally_tells_the_four_meals_apart() {
+        let conn = meal_conn().await;
+        read_as(&conn, "pancakes", &[Sitting::Breakfast]).await;
+        read_as(&conn, "stew", &[Sitting::Lunch, Sitting::Dinner]).await;
+        read_as(&conn, "blank", &[Sitting::Snack]).await;
+        read_as(&conn, "uncategorised", &[Sitting::Dinner]).await;
+
+        for (meal, expected) in [
+            (MealType::Breakfast, "pancakes"),
+            (MealType::Lunch, "stew"),
+            (MealType::Dinner, "stew,uncategorised"),
+            (MealType::Snack, "blank"),
+        ] {
+            let deck = ids(&load_corpus(&conn, &planning(meal)).await.unwrap()).join(",");
+            assert_eq!(deck, expected, "the {meal:?} deck");
+        }
+    }
+
+    /// The two rules compose in the right order: a stated accompaniment is out of the
+    /// meal round **whatever** its reading says. A trifle is eaten after dinner, and
+    /// reading it as `["dinner"]` is correct — it still is not the dinner, and #147's
+    /// per-addition rounds are what will deal it. Pinned so a reading can never
+    /// re-admit what #114's vocabulary ruled out.
+    #[tokio::test]
+    async fn a_reading_cannot_put_an_accompaniment_back_in_the_meal_round() {
+        let conn = meal_conn().await;
+        read_as(&conn, "trifle", &[Sitting::Dinner]).await;
+        read_as(&conn, "chips", &[Sitting::Lunch, Sitting::Dinner]).await;
+
+        let corpus = load_corpus(&conn, &planning(MealType::Dinner))
+            .await
+            .unwrap();
+        for refused in ["trifle", "chips"] {
+            assert!(
+                !ids(&corpus).contains(&refused),
+                "the corpus states {refused} accompanies a meal: {:?}",
+                ids(&corpus)
+            );
+        }
+    }
+
+    /// A corrupt reading degrades to **unread**, which restricts nothing, so the recipe
+    /// is *unread*, never *wrong*: under #192 both are out of a meal round, but only
+    /// unread is repaired by the next read — and the recipe stays in the corpus (a
+    /// plan-less walk still deals it), so nothing silently vanishes from the product.
+    #[tokio::test]
+    async fn an_unparseable_reading_degrades_to_unread_not_to_wrong() {
+        let conn = meal_conn().await;
+        conn.execute(
+            "UPDATE recipes SET sittings = 'not json' WHERE id = 'stew'",
+            (),
+        )
+        .await
+        .unwrap();
+        // Corrupt is *unread*, and unread is in no meal round (#192) — same outcome,
+        // different fact: a re-read repairs it, where `Wrong` would be a stored claim.
+        for meal in Sitting::ALL {
+            let corpus = load_corpus(&conn, &planning(meal)).await.unwrap();
+            assert!(
+                !ids(&corpus).contains(&"stew"),
+                "a corrupt reading is unread, and unread is in no {meal:?} round"
+            );
+        }
+        // It is degraded, not lost: a walk with no plan behind it still deals it.
+        let all = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert!(
+            ids(&all).contains(&"stew"),
+            "still in the corpus: {:?}",
+            ids(&all)
+        );
+    }
+
+    /// A walk with no plan behind it is not a meal round at all, so a reading narrows
+    /// nothing there either — the channel-less walk still sees the whole corpus.
+    #[tokio::test]
+    async fn a_walk_with_no_plan_ignores_the_reading() {
+        let conn = meal_conn().await;
+        read_as(&conn, "stew", &[Sitting::Dinner]).await;
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert_eq!(ids(&corpus).len(), 8, "every seeded recipe");
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?
