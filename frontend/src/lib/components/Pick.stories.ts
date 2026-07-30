@@ -120,5 +120,8 @@ export const LinkCopied: Story = {
 
 /** The room could not be reached. */
 export const Error: Story = {
-  args: { status: "error", error: "Couldn't reach the others (502). Reload the page to rejoin." },
+  args: {
+    status: "error",
+    error: "Couldn't reach the others (502). Reload the page to rejoin.",
+  },
 };

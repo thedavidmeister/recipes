@@ -329,19 +329,20 @@
         name always rides along, because a dot was never the identity.
       </p>
       <p class="mt-3 text-stone-600">
-        Two weights, and the split is the rule: the solid <em>-500</em> is a mark
-        beside a name, the <em>-100</em> is the wash on a <em>row</em> that person
-        has claimed — a shopping line they got, a yes already cast. Ink never
-        changes colour, and never sits on the solid: no one text tone is legible
-        on both the palest slot and the darkest. And the colour is never what says
-        <em>chosen</em> — a checked box, a pressed pill, a struck-through line
-        say that. That is what makes all six usable on anyone.
+        Two weights, and the split is the rule: the solid <em>-500</em> is a
+        mark beside a name, the <em>-100</em> is the wash on a <em>row</em> that
+        person has claimed — a shopping line they got, a yes already cast. Ink
+        never changes colour, and never sits on the solid: no one text tone is
+        legible on both the palest slot and the darkest. And the colour is never
+        what says
+        <em>chosen</em> — a checked box, a pressed pill, a struck-through line say
+        that. That is what makes all six usable on anyone.
       </p>
       <p class="mt-3 text-stone-600">
         A <em>button</em> is never washed, and never wears somebody's border. It
-        is a button before it is anybody's, so it keeps the one button language —
-        cream surface, cocoa outline — and says whose it is with the dot alone,
-        exactly as <em>Start</em> does.
+        is a button before it is anybody's, so it keeps the one button language
+        — cream surface, cocoa outline — and says whose it is with the dot
+        alone, exactly as <em>Start</em> does.
       </p>
       <div class="mt-6 flex flex-wrap items-center gap-3">
         {#each USER_COLOURS as c (c.token)}

@@ -18,7 +18,6 @@
     queryFn: listKitchens,
   }));
 
-
   let actionError = $state<string | null>(null);
 
   // A shareable invite is a `?join=<token>` link: redeem it once on arrival, drop the
@@ -38,7 +37,8 @@
         await goto(`/kitchens/${k.id}`);
       })
       .catch((e) => {
-        actionError = e instanceof Error ? e.message : "Couldn't join that kitchen.";
+        actionError =
+          e instanceof Error ? e.message : "Couldn't join that kitchen.";
       });
   });
 </script>

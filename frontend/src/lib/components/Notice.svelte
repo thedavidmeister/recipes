@@ -11,6 +11,6 @@
   let { children }: { children: Snippet } = $props();
 </script>
 
-<div class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center">
+<div class="rounded-card bg-cream-100 border border-stone-200 p-8 text-center">
   {@render children()}
 </div>

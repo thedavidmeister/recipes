@@ -41,24 +41,24 @@
 
 <div class="pt-6">
   {#if error}
-    <div class="rounded-card border border-paprika-500/30 bg-paprika-100 p-6">
+    <div class="rounded-card border-paprika-500/30 bg-paprika-100 border p-6">
       <p class="font-display text-stone-900">Couldn't start a pick.</p>
       <p class="mt-1 text-sm text-stone-600">{error}</p>
       <button
         onclick={start}
-        class="mt-4 text-sm font-medium text-paprika-500 underline hover:text-stone-900"
+        class="text-paprika-500 mt-4 text-sm font-medium underline hover:text-stone-900"
       >
         Try again
       </button>
     </div>
   {:else}
     <div
-      class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center"
+      class="rounded-card bg-cream-100 border border-stone-200 p-8 text-center"
     >
       <p
         class="font-display flex items-center justify-center gap-2 text-stone-900"
       >
-        <span class="size-2.5 rounded-full bg-pesto-500" aria-hidden="true"
+        <span class="bg-pesto-500 size-2.5 rounded-full" aria-hidden="true"
         ></span>
         Starting a pick…
       </p>

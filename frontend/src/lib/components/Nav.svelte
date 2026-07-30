@@ -32,10 +32,34 @@
     line: string;
     dot: string;
   }[] = [
-    { id: "pick", label: "pick", ring: "border-pesto-500 ring-pesto-500/20", line: "bg-pesto-500", dot: "border-pesto-500 bg-pesto-500" },
-    { id: "buy", label: "buy", ring: "border-plum-500 ring-plum-500/20", line: "bg-plum-500", dot: "border-plum-500 bg-plum-500" },
-    { id: "cook", label: "cook", ring: "border-paprika-500 ring-paprika-500/20", line: "bg-paprika-500", dot: "border-paprika-500 bg-paprika-500" },
-    { id: "joy", label: "joy", ring: "border-honey-500 ring-honey-500/20", line: "bg-honey-500", dot: "border-honey-500 bg-honey-500" },
+    {
+      id: "pick",
+      label: "pick",
+      ring: "border-pesto-500 ring-pesto-500/20",
+      line: "bg-pesto-500",
+      dot: "border-pesto-500 bg-pesto-500",
+    },
+    {
+      id: "buy",
+      label: "buy",
+      ring: "border-plum-500 ring-plum-500/20",
+      line: "bg-plum-500",
+      dot: "border-plum-500 bg-plum-500",
+    },
+    {
+      id: "cook",
+      label: "cook",
+      ring: "border-paprika-500 ring-paprika-500/20",
+      line: "bg-paprika-500",
+      dot: "border-paprika-500 bg-paprika-500",
+    },
+    {
+      id: "joy",
+      label: "joy",
+      ring: "border-honey-500 ring-honey-500/20",
+      line: "bg-honey-500",
+      dot: "border-honey-500 bg-honey-500",
+    },
   ];
 
   const index = $derived(
@@ -70,7 +94,9 @@
          colour, so the whole trail matches the dot you are on. -->
     {#if index > 0}
       <div
-        class="absolute top-[7px] h-0.5 transition-[width] duration-300 {stops[index].line}"
+        class="absolute top-[7px] h-0.5 transition-[width] duration-300 {stops[
+          index
+        ].line}"
         style="left: {TRACK_LEFT}%; width: {travelled}%"
         aria-hidden="true"
       ></div>

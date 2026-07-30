@@ -18,7 +18,7 @@
   type="button"
   onclick={onToggle}
   aria-pressed={playing}
-  class="rounded-pill fixed bottom-6 right-6 z-20 flex items-center gap-2 px-4 py-3 text-sm font-medium
+  class="rounded-pill fixed right-6 bottom-6 z-20 flex items-center gap-2 px-4 py-3 text-sm font-medium
   {playing
     ? 'bg-cocoa-500 text-cream-50'
     : 'bg-cream-50 text-espresso-800 ring-cream-300 ring-1'}"

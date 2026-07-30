@@ -53,7 +53,8 @@ export async function completeLogin(c: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ c }),
   });
-  if (res.status === 401) throw new Error("That link is expired or already used.");
+  if (res.status === 401)
+    throw new Error("That link is expired or already used.");
   if (!res.ok) throw new Error(`Couldn't sign you in (${res.status}).`);
 }
 

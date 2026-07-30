@@ -48,14 +48,17 @@
   }
 
   // The prep lane (mise en place) and the cooking stages, off the step DAG.
-  const prep = $derived(recipe ? recipe.steps.filter((s) => s.kind === "prep") : []);
+  const prep = $derived(
+    recipe ? recipe.steps.filter((s) => s.kind === "prep") : [],
+  );
   const stages = $derived(recipe ? cookStages(recipe.steps) : []);
 </script>
 
 <div class="pt-6">
   <header class="mb-6">
     <p class="font-display flex items-center gap-2 text-stone-600">
-      <span class="size-2.5 rounded-full bg-paprika-500" aria-hidden="true"></span>
+      <span class="bg-paprika-500 size-2.5 rounded-full" aria-hidden="true"
+      ></span>
       Cook
     </p>
   </header>
@@ -68,14 +71,17 @@
       </p>
     </Alert>
   {:else if status === "pending"}
-    <div class="rounded-card mb-5 aspect-video w-full bg-stone-100" aria-hidden="true"></div>
+    <div
+      class="rounded-card mb-5 aspect-video w-full bg-stone-100"
+      aria-hidden="true"
+    ></div>
     <div class="rounded-pill h-6 w-56 bg-stone-100" aria-hidden="true"></div>
   {:else if !recipe}
     <Notice>
       <p class="font-display text-stone-900">Nothing to cook yet.</p>
       <p class="mt-1 text-sm text-stone-600">
-        Pick something first — once the group agrees on a recipe, the method shows
-        up here.
+        Pick something first — once the group agrees on a recipe, the method
+        shows up here.
       </p>
     </Notice>
   {:else}
@@ -94,7 +100,9 @@
     {#if recipe.ingredients.length}
       <ul class="mt-4 flex flex-wrap gap-2">
         {#each recipe.ingredients as ing, i (i)}
-          <li class="rounded-pill border border-stone-200 bg-cream-100 px-3 py-1 text-sm text-stone-600">
+          <li
+            class="rounded-pill bg-cream-100 border border-stone-200 px-3 py-1 text-sm text-stone-600"
+          >
             {ing.item}{#if amountOf(ing)}<span class="text-stone-400">
                 · {amountOf(ing)}</span
               >{/if}
@@ -104,18 +112,24 @@
     {/if}
 
     {#if recipe.steps.length === 0}
-      <p class="mt-8 text-stone-500">No method for this one yet — just the ingredients.</p>
+      <p class="mt-8 text-stone-500">
+        No method for this one yet — just the ingredients.
+      </p>
     {:else}
       {#if prep.length}
         <!-- Prep — mise en place, done ahead and in parallel. -->
-        <h2 class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600">
-          <span class="size-2 rounded-full bg-paprika-500" aria-hidden="true"></span>
+        <h2
+          class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600"
+        >
+          <span class="bg-paprika-500 size-2 rounded-full" aria-hidden="true"
+          ></span>
           Prep
         </h2>
         <ul class="flex flex-col gap-3">
           {#each prep as step (step.id)}
             <li class="flex flex-wrap items-center gap-3">
-              <span class="font-display flex-1 text-stone-900">{step.text}</span>
+              <span class="font-display flex-1 text-stone-900">{step.text}</span
+              >
               {@render timer(step)}
             </li>
           {/each}
@@ -125,20 +139,21 @@
       <!-- The method — the emphasis of `cook`, as stages; a stage of more than one
            step runs in parallel. -->
       <h2 class="font-display mt-8 mb-4 flex items-center gap-2 text-stone-600">
-        <span class="size-2 rounded-full bg-paprika-500" aria-hidden="true"></span>
+        <span class="bg-paprika-500 size-2 rounded-full" aria-hidden="true"
+        ></span>
         Method
       </h2>
       <ol class="flex flex-col gap-5">
         {#each stages as stage, i (stage.depth)}
           <li class="flex gap-4">
             <span
-              class="font-display flex size-8 flex-none items-center justify-center rounded-full border-2 border-paprika-500 text-sm font-medium text-paprika-500"
+              class="font-display border-paprika-500 text-paprika-500 flex size-8 flex-none items-center justify-center rounded-full border-2 text-sm font-medium"
             >
               {i + 1}
             </span>
             <div class="flex-1">
               {#if stage.steps.length > 1}
-                <p class="mb-2 text-sm text-paprika-500">At the same time</p>
+                <p class="text-paprika-500 mb-2 text-sm">At the same time</p>
               {/if}
               <ul class="flex flex-col gap-3">
                 {#each stage.steps as step (step.id)}
@@ -164,7 +179,7 @@
     {@const t = timers[step.id]}
     {#if t?.done}
       <span
-        class="rounded-pill flex-none bg-paprika-500 px-3 py-1 text-sm font-medium text-cream-50"
+        class="rounded-pill bg-paprika-500 text-cream-50 flex-none px-3 py-1 text-sm font-medium"
       >
         Done · time's up
       </span>
@@ -177,7 +192,7 @@
       </button>
     {:else if t}
       <span
-        class="rounded-pill flex-none bg-paprika-100 px-3 py-1 text-sm font-medium text-paprika-500 tabular-nums"
+        class="rounded-pill bg-paprika-100 text-paprika-500 flex-none px-3 py-1 text-sm font-medium tabular-nums"
       >
         {formatClock(t.remaining)}
       </span>
@@ -191,7 +206,7 @@
     {:else}
       <button
         type="button"
-        class="rounded-pill flex-none border border-paprika-500 px-3 py-1 text-sm font-medium text-paprika-500"
+        class="rounded-pill border-paprika-500 text-paprika-500 flex-none border px-3 py-1 text-sm font-medium"
         onclick={() => onStartTimer?.(step.id)}
       >
         Start {formatClock(step.seconds)}

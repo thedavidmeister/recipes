@@ -35,13 +35,13 @@
   }
 
   let { status, kitchens = [], error, actionError }: Props = $props();
-
 </script>
 
 <div class="pt-48 pb-16">
   <Panel>
     <p class="font-display flex items-center gap-2 text-stone-600">
-      <span class="size-2.5 rounded-full bg-cocoa-500" aria-hidden="true"></span>
+      <span class="bg-cocoa-500 size-2.5 rounded-full" aria-hidden="true"
+      ></span>
       Kitchens
     </p>
 
@@ -53,7 +53,7 @@
       <div class="mt-4"><Skeleton /></div>
     {:else}
       {#if actionError}
-        <p role="alert" class="mt-3 text-sm text-paprika-500">{actionError}</p>
+        <p role="alert" class="text-paprika-500 mt-3 text-sm">{actionError}</p>
       {/if}
 
       {#snippet picker(items: KitchenSummary[])}
@@ -62,13 +62,15 @@
             {#each items as k (k.id)}
               <li>
                 <RowLink href="/kitchens/{k.id}">
-          <span class="flex items-baseline gap-2">
+                  <span class="flex items-baseline gap-2">
                     {k.name}
                     {#if k.is_primary}
-                      <span class="text-xs text-stone-500">yours by default</span>
+                      <span class="text-xs text-stone-500"
+                        >yours by default</span
+                      >
                     {/if}
                   </span>
-        </RowLink>
+                </RowLink>
               </li>
             {/each}
           </ul>

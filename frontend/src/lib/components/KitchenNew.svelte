@@ -40,7 +40,9 @@
 
 <div class="pt-48 pb-16">
   <Panel>
-    <h1 class="font-display text-2xl font-medium text-stone-900">New kitchen</h1>
+    <h1 class="font-display text-2xl font-medium text-stone-900">
+      New kitchen
+    </h1>
 
     <form class="mt-6 flex flex-col gap-3" onsubmit={create}>
       <label class="text-xs text-stone-500" for="kitchen-name">
@@ -50,16 +52,16 @@
         id="kitchen-name"
         bind:value={name}
         placeholder="Home"
-        class="rounded-card border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
+        class="rounded-card bg-cream-100 border border-stone-200 px-4 py-3 text-stone-900"
       />
 
       {#if error}
-        <p role="alert" class="text-sm text-paprika-500">{error}</p>
+        <p role="alert" class="text-paprika-500 text-sm">{error}</p>
       {/if}
 
       <div>
         <Button type="submit" disabled={saving} dot="cocoa">
-        {saving ? "Creating…" : "Create kitchen"}
+          {saving ? "Creating…" : "Create kitchen"}
         </Button>
       </div>
     </form>

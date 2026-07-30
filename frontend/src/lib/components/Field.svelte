@@ -21,5 +21,5 @@
   {id}
   {placeholder}
   bind:value
-  class="rounded-card border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
+  class="rounded-card bg-cream-100 border border-stone-200 px-4 py-3 text-stone-900"
 />

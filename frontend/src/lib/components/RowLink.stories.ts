@@ -17,5 +17,9 @@ export const Default: Story = {
 
 /** With a count, which is most of what these rows have to say. */
 export const WithCount: Story = {
-  args: { href: "/kitchens/k1/equipment", trailing: "4", children: text("Equipment") },
+  args: {
+    href: "/kitchens/k1/equipment",
+    trailing: "4",
+    children: text("Equipment"),
+  },
 };

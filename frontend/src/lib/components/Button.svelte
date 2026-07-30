@@ -70,7 +70,9 @@
 {#if href}
   <a {href} class={classes}>
     {#if dot}
-      <span class="size-2.5 flex-none rounded-full {DOTS[dot]}" aria-hidden="true"
+      <span
+        class="size-2.5 flex-none rounded-full {DOTS[dot]}"
+        aria-hidden="true"
       ></span>
     {/if}
     {@render children()}
@@ -78,7 +80,9 @@
 {:else}
   <button {type} {disabled} {onclick} class={classes}>
     {#if dot}
-      <span class="size-2.5 flex-none rounded-full {DOTS[dot]}" aria-hidden="true"
+      <span
+        class="size-2.5 flex-none rounded-full {DOTS[dot]}"
+        aria-hidden="true"
       ></span>
     {/if}
     {@render children()}

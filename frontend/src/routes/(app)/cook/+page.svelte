@@ -27,7 +27,6 @@
     staleTime: Infinity,
   }));
 
-
   // Running timers: step id → deadline (unix ms), plus which have already fired.
   // `now` ticks each second so the countdowns re-derive.
   let deadlines = $state<Deadlines>({});

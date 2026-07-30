@@ -48,7 +48,10 @@
   // is the *admin* gate and stays on the page as `forbidden`.)
   const queryClient = useQueryClient();
   $effect(() => {
-    if (health.query.error instanceof ApiError && health.query.error.status === 401) {
+    if (
+      health.query.error instanceof ApiError &&
+      health.query.error.status === 401
+    ) {
       queryClient.invalidateQueries({ queryKey: ["session"] });
     }
   });

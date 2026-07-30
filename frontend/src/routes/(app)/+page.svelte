@@ -25,9 +25,14 @@
 </script>
 
 <div class="pt-6">
-  <div class="rounded-card border border-stone-200 bg-cream-100 p-8 text-center">
-    <p class="font-display flex items-center justify-center gap-2 text-stone-900">
-      <span class="bg-cocoa-500 size-2.5 rounded-full" aria-hidden="true"></span>
+  <div
+    class="rounded-card bg-cream-100 border border-stone-200 p-8 text-center"
+  >
+    <p
+      class="font-display flex items-center justify-center gap-2 text-stone-900"
+    >
+      <span class="bg-cocoa-500 size-2.5 rounded-full" aria-hidden="true"
+      ></span>
       {list.isError ? "Couldn't open your kitchen." : "Opening your kitchen…"}
     </p>
   </div>

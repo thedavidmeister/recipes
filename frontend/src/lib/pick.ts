@@ -388,10 +388,13 @@ export async function setPlanCap(
   channel: string,
   cap: number | null,
 ): Promise<Lobby> {
-  const res = await apiFetch(`/api/session/${encodeURIComponent(channel)}/cap`, {
-    method: "POST",
-    body: JSON.stringify({ max_total_seconds: cap }),
-  });
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/cap`,
+    {
+      method: "POST",
+      body: JSON.stringify({ max_total_seconds: cap }),
+    },
+  );
   if (!res.ok) throw lobbyFailed(res.status, "set the time cap");
   return (await res.json()) as Lobby;
 }

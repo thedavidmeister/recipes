@@ -215,11 +215,41 @@ export function healthStats(over: Partial<HealthStats> = {}): HealthStats {
     // one — `enrich_steps` and `enrich_equipment` are pipeline stages the old
     // fixture had never heard of.
     recent_runs: [
-      { id: 245, kind: "ingest", status: "running", started_at: 1_785_214_894, finished_at: null },
-      { id: 244, kind: "ingest", status: "running", started_at: 1_785_129_309, finished_at: null },
-      { id: 243, kind: "derive", status: "completed", started_at: 1_785_046_724, finished_at: 1_785_046_726 },
-      { id: 242, kind: "enrich_equipment", status: "completed", started_at: 1_785_046_721, finished_at: 1_785_046_724 },
-      { id: 241, kind: "derive", status: "completed", started_at: 1_785_046_620, finished_at: 1_785_046_623 },
+      {
+        id: 245,
+        kind: "ingest",
+        status: "running",
+        started_at: 1_785_214_894,
+        finished_at: null,
+      },
+      {
+        id: 244,
+        kind: "ingest",
+        status: "running",
+        started_at: 1_785_129_309,
+        finished_at: null,
+      },
+      {
+        id: 243,
+        kind: "derive",
+        status: "completed",
+        started_at: 1_785_046_724,
+        finished_at: 1_785_046_726,
+      },
+      {
+        id: 242,
+        kind: "enrich_equipment",
+        status: "completed",
+        started_at: 1_785_046_721,
+        finished_at: 1_785_046_724,
+      },
+      {
+        id: 241,
+        kind: "derive",
+        status: "completed",
+        started_at: 1_785_046_620,
+        finished_at: 1_785_046_623,
+      },
     ],
     running: 22,
     ...over,
@@ -291,7 +321,12 @@ function readings(): StructuredMeasure[] {
 /** The consensus recipe's ingredients, for the buy list (the base recipe fixture). */
 export function buyRecipe(): BuyRecipe {
   const r = recipe();
-  return { source: r.source, id: r.id, title: r.title, ingredients: readings() };
+  return {
+    source: r.source,
+    id: r.id,
+    title: r.title,
+    ingredients: readings(),
+  };
 }
 
 /**

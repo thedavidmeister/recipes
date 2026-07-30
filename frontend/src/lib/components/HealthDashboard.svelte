@@ -53,7 +53,9 @@
 <div class="pt-6">
   <header class="mb-6 flex items-center gap-2">
     <span class="bg-pesto-500 size-2.5 rounded-full" aria-hidden="true"></span>
-    <h1 class="font-display text-lg font-semibold text-stone-900">Corpus health</h1>
+    <h1 class="font-display text-lg font-semibold text-stone-900">
+      Corpus health
+    </h1>
   </header>
 
   {#if status === "error"}
@@ -82,7 +84,12 @@
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {@render tile("Recipes", stats.recipes.toLocaleString(), "", false)}
       {@render tile("Raw imports", stats.raw.toLocaleString(), "", false)}
-      {@render tile("Enriched", stats.enriched.toLocaleString(), `${pct}%`, false)}
+      {@render tile(
+        "Enriched",
+        stats.enriched.toLocaleString(),
+        `${pct}%`,
+        false,
+      )}
       {@render tile(
         "Running",
         stats.running.toLocaleString(),
@@ -146,10 +153,12 @@
             <tbody>
               {#each stats.recent_runs as run (run.id)}
                 <tr class="border-t border-stone-100">
-                  <td class="pr-3 py-1.5 text-stone-500 tabular-nums">{run.id}</td>
-                  <td class="pr-3 py-1.5 text-stone-900">{run.kind}</td>
-                  <td class="pr-3 py-1.5">{@render badge(run.status)}</td>
-                  <td class="pr-3 py-1.5 text-stone-600 tabular-nums">
+                  <td class="py-1.5 pr-3 text-stone-500 tabular-nums"
+                    >{run.id}</td
+                  >
+                  <td class="py-1.5 pr-3 text-stone-900">{run.kind}</td>
+                  <td class="py-1.5 pr-3">{@render badge(run.status)}</td>
+                  <td class="py-1.5 pr-3 text-stone-600 tabular-nums">
                     {fmt(run.started_at)}
                   </td>
                   <td class="py-1.5 text-stone-600 tabular-nums">

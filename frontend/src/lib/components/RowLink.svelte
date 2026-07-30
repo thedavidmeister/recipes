@@ -20,8 +20,10 @@
 
 <a
   {href}
-  class="rounded-card font-display flex items-center justify-between border border-stone-200 bg-cream-100 px-4 py-3 text-stone-900"
+  class="rounded-card font-display bg-cream-100 flex items-center justify-between border border-stone-200 px-4 py-3 text-stone-900"
 >
   {@render children()}
-  <span class="text-sm text-stone-400">{trailing === undefined ? "→" : `${trailing} →`}</span>
+  <span class="text-sm text-stone-400"
+    >{trailing === undefined ? "→" : `${trailing} →`}</span
+  >
 </a>
