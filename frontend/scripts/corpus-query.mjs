@@ -36,8 +36,15 @@ if (!sql) {
 }
 
 // One statement, and a reading one. Not a security boundary — the token is already
-// read-only — but a refusal beats discovering the intent was wrong from the result.
-if (!/^\s*(select|pragma|explain|with)\b/i.test(sql)) {
+// read-only — but a refusal beats discovering the intent was wrong from the result,
+// and it must FAIL CLOSED: `WITH doomed AS (…) DELETE …` and `PRAGMA user_version = 7`
+// both write, so neither a WITH prefix nor PRAGMA can be waved through on its first
+// word. Only SELECT and EXPLAIN lead a statement, and no write verb may appear
+// anywhere in it — over-blocking a SELECT that merely quotes a word like "delete" is
+// an acceptable cost for a tool whose whole claim is that it cannot write.
+const WRITE_VERB =
+  /\b(insert|update|delete|replace|drop|alter|create|pragma|vacuum|attach|detach|reindex)\b/i;
+if (!/^\s*(select|explain|with)\b/i.test(sql) || WRITE_VERB.test(sql)) {
   console.error(
     `corpus-query: refusing ${
       JSON.stringify(sql.split(/\s+/)[0])
@@ -85,10 +92,18 @@ if (!url || !token) {
 const rows = (await createClient({ url, authToken: token }).execute(sql)).rows;
 
 // BigInt is what libsql hands back for INTEGER, and JSON.stringify throws on it.
+// Number() silently rounds past 2^53, and ids/run_ids are exactly the columns that
+// could get there — so anything unsafe is printed as a string rather than a lie.
 console.log(
   JSON.stringify(
     rows.map((r) => Object.fromEntries(Object.entries(r))),
-    (_k, v) => (typeof v === "bigint" ? Number(v) : v),
+    (_k, v) =>
+      typeof v === "bigint"
+        ? (v <= BigInt(Number.MAX_SAFE_INTEGER) &&
+            v >= -BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(v)
+          : v.toString())
+        : v,
     2,
   ),
 );

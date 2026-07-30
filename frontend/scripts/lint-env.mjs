@@ -102,6 +102,8 @@ function resolve(spec, from) {
       `${base}.js`,
       `${base}.svelte`,
       join(base, "index.ts"),
+      join(base, "index.js"),
+      join(base, "index.svelte"),
     ]
   ) {
     if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;

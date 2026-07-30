@@ -162,9 +162,9 @@ not in it — so the ids are self-checking against the **snapshot**. What this
 skill adds is whether the snapshot still matches **reality**, and whether
 anything bypassed it:
 
-- Re-run `sample-corpus.mjs`. **The diff is the drift.** No diff means the
-  fixtures are still true; a diff means a story has been rendering a recipe that
-  has since changed.
+- Re-run `sample-corpus.mjs`. A diff identifies drift in snapshot-backed fixture
+  values. **No diff does not validate hand-typed ids or fields** — those bypass
+  the snapshot by construction — so always run the bypass scan below as well.
 - Grep the fixtures and stories for any recipe id or field value that does
   **not** go through `row()`/`card()` — a hand-typed card, a hand-typed
   `total_seconds`, an id built inline. Each one is either a documented exception
