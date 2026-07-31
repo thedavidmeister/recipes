@@ -104,6 +104,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // next number above everything — including anything unmerged elsewhere — is the only
     // one guaranteed to apply whichever branch deploys first.
     (25, include_str!("../migrations/0025_run_reported.sql")),
+    // 26 was chosen while 25 was still unmerged on #199's branch, by that same rule:
+    // the next number above *everything*. #199 has since landed, so the two sit in
+    // order with no hole between them and neither had to be renumbered — which is what
+    // taking the top number rather than the next free one buys.
+    (26, include_str!("../migrations/0026_pick_decision.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
