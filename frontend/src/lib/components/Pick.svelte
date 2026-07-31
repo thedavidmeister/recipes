@@ -4,6 +4,7 @@
   import Panel from "./Panel.svelte";
   import UserName from "./UserName.svelte";
   import { userTint } from "$lib/colour";
+  import { waitingOnOthers } from "$lib/deal";
   import { formatEstimate } from "$lib/steps";
   import type { Voter } from "$lib/pick";
   import type { PickStatus, RecipeCard } from "$lib/types";
@@ -30,6 +31,17 @@
     participants?: number;
     /** Who has already said yes to this card. */
     yesVoters?: Voter[];
+    /**
+     * Whether this person has answered every recipe the plan can currently deal them
+     * (#202), so an empty deck is **finished** rather than loading.
+     *
+     * A prop of its own rather than another [`PickStatus`], because it is not a phase of
+     * the connection like the others — it is a fact about the deal, and it is true or
+     * false independently of every one of them. As a status it would have had to lose a
+     * race with `reconnecting`, which would put "Finding more recipes…" back in front of
+     * exactly the person this state exists for.
+     */
+    finished?: boolean;
     error?: string;
     /** The shareable link that invites others into this pick. */
     shareUrl?: string;
@@ -43,6 +55,7 @@
     card,
     participants = 1,
     yesVoters = [],
+    finished = false,
     error,
     shareUrl,
     copied = false,
@@ -124,7 +137,20 @@
         </p>
       {/if}
 
-      {#if !card}
+      {#if !card && finished}
+        <!-- An empty deck, for the other reason: everything this plan can deal you has
+             been answered (see the `finished` prop). Waiting on the others is a real
+             state and it says so, rather than hunting for a card that is not coming.
+             Not an error and nothing to do, so it wears the same quiet Notice the other
+             empty states wear, with the roster it is waiting on named under it the way
+             the footer already names it. -->
+        <Notice>
+          <p class="font-display text-stone-900">You've answered everything.</p>
+          <p class="mt-1 text-sm text-stone-600">
+            {waitingOnOthers(participants)}
+          </p>
+        </Notice>
+      {:else if !card}
         <Notice>
           <p class="font-display text-stone-900">Finding more recipes…</p>
           <p class="mt-1 text-sm text-stone-600">

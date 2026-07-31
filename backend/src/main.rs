@@ -2614,6 +2614,76 @@ mod tests {
         assert_eq!(walked(&app, &cookie, &channel).await.len(), 3);
     }
 
+    /// End to end through the router (#202): a member's deal skips what **that member**
+    /// has already answered in **this** plan, and nobody else's deal moves.
+    ///
+    /// The unit tests in `walk` cannot see this. They hand `load_corpus` a `Bounds` they
+    /// built themselves, so a `resolve_bounds` that took the voter from the query string
+    /// — or dropped it — would leave every one of them green while the product dealt each
+    /// member somebody else's remainder. That is the gap
+    /// `the_meal_a_plan_chose_bounds_the_walk_it_deals` exists to close for #184; here
+    /// the id comes from the session cookie and from nothing else, which is the claim.
+    ///
+    /// The vote rows are written directly: a swipe travels over the socket (#20), and
+    /// what is under test is the *deal*, not the write — the same way the tests above
+    /// write a reading rather than running the enrich worker.
+    #[tokio::test]
+    async fn a_walk_skips_what_this_member_answered_and_leaves_everyone_else_whole() {
+        let (app, conn) = test_app().await;
+        for id in ["stew", "risotto", "curry"] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, sittings)
+                 VALUES ('t', ?1, ?1, '[\"dinner\"]')",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        }
+        let mel = format!(
+            "recipes_session={}",
+            auth::issue_test_session(&conn, "4242").await
+        );
+        let kit = format!(
+            "recipes_session={}",
+            auth::issue_test_session(&conn, "9317").await
+        );
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&mel), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            walked(&app, &mel, &channel).await.len(),
+            3,
+            "nothing answered yet, so the whole round is dealt"
+        );
+
+        // Mel answers one of them.
+        conn.execute(
+            "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+             VALUES (?1, 't', 'stew', '4242', 1)",
+            libsql::params![channel.clone()],
+        )
+        .await
+        .unwrap();
+
+        let hers = walked(&app, &mel, &channel).await;
+        assert!(
+            !hers.contains("stew") && hers.len() == 2,
+            "her deal continues where she left off: {hers:?}"
+        );
+        let his = walked(&app, &kit, &channel).await;
+        assert_eq!(
+            his.len(),
+            3,
+            "kit answered nothing, so kit is still dealt everything: {his:?}"
+        );
+    }
+
     /// A walk naming a session that does not exist is refused — never silently
     /// walked uncapped, which would hand a mistyped channel the whole corpus.
     #[tokio::test]

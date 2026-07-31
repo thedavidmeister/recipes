@@ -31,7 +31,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use axum::{
     extract::{Query, State},
-    Json,
+    Extension, Json,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
@@ -41,6 +41,7 @@ use recipe_core::{Ingredient, Sitting};
 use recipe_walk::{FixtureGraph, IngredientId, RecipeGraph, RecipeId, TabuWeighted, Walk};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::CurrentUser;
 use crate::session::MealType;
 use crate::{error::AppError, AppState};
 
@@ -55,12 +56,17 @@ const MAX_LEN: usize = 30;
 pub struct WalkParams {
     /// Requested number of stops, clamped to `1..=MAX_LEN`. Absent → [`DEFAULT_LEN`].
     len: Option<usize>,
-    /// The pick session this walk feeds (#80, #82, #184). Present, the session's bounds
-    /// — its time cap, what its kitchen can make, and the meal it is for — bound the
-    /// corpus walked; an unknown channel is refused rather than read as "unbounded".
-    /// Absent, the walk is over the whole corpus, as ever. It scopes the walk to the
-    /// plan's bounds — it is not an access check (the session gate already
-    /// authenticated the caller, and a bound is a filter, not a secret).
+    /// The pick session this walk feeds (#80, #82, #184, #202). Present, the session's
+    /// bounds — its time cap, what its kitchen can make, the meal it is for, and what
+    /// the caller has already answered in it — bound the corpus walked; an unknown
+    /// channel is refused rather than read as "unbounded". Absent, the walk is over the
+    /// whole corpus, as ever. It scopes the walk to the plan's bounds — it is not an
+    /// access check (the session gate already authenticated the caller, and a bound is a
+    /// filter, not a secret).
+    ///
+    /// It is the only half of the deal's key the client supplies. The other half — who
+    /// is asking — comes from the session (#202), so no query string can deal a client
+    /// somebody else's remainder.
     channel: Option<String>,
 }
 
@@ -281,6 +287,28 @@ struct Bounds {
     /// clear of dishes the corpus states are accompaniments. `None` is a walk with no
     /// plan behind it, which is not a meal round and sees the whole corpus.
     meal_type: Option<MealType>,
+    /// Whose round this is (#202), so it can be *continued* rather than restarted.
+    /// `Some` on exactly the same condition as [`Self::meal_type`] — a channel names a
+    /// plan and the session names the caller — and `None` for the plan-less walk, which
+    /// is nobody's round and is untouched.
+    answered_by: Option<Answered>,
+}
+
+/// The caller of a meal round, as the deal has to know them (#202): a plan and a person,
+/// which is exactly the key `votes` is written under.
+///
+/// One field rather than two `Option`s on [`Bounds`], because the two are only ever
+/// meaningful together: a channel with no voter would exclude nothing and a voter with
+/// no channel would exclude across every plan they have ever swiped. Neither is a state
+/// this can be put in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Answered {
+    /// The plan whose votes count. A vote is a call *in this plan*, so answering a
+    /// recipe in last week's dinner cannot narrow tonight's.
+    channel: String,
+    /// The telegram id of the person asking, from the session (#25) — never from the
+    /// query string, which would let a client deal itself somebody else's remainder.
+    voter: String,
 }
 
 /// Would a plan for `meal` deal this dish **as the meal itself** (#184, #191)?
@@ -431,13 +459,70 @@ fn deals_as_the_meal(meal: Sitting, category: Option<&str>, sittings: &[Sitting]
 /// ([`recipe_core::meal`]) — which #147's per-addition rounds will read from the opposite
 /// direction — rather than an `IN` list and a `json_each` subquery inlined here that
 /// could drift from them.
+///
+/// # What you have already answered (#202)
+///
+/// A plan runs for days: the roster, every vote and the shopping state are all durable,
+/// so people drop out and come back. The deal was not — it re-seeded from OS entropy and
+/// consulted nothing about the caller, so a member returning on day four was dealt the
+/// cards they answered on day one. Re-swiping overwrites (`record_vote`) so nothing was
+/// *corrupted*; what was impossible was **continuing** a long plan, because every return
+/// started it over.
+///
+/// So a meal round excludes the `(source, id)`s this caller has already voted on **in
+/// this channel**. It changes what is *dealt*, never what is *writable* — the vote upsert
+/// is untouched, and a change-your-mind surface would be its own work.
+///
+/// **This one is in SQL, beside the cap, and the two bounds above are not** — which is
+/// the same distinction those two already draw, applied to a third thing:
+///
+/// - The kitchen and meal bounds read a **JSON reading** and rule on what an absent one
+///   means. That is a judgement, it is shared with other callers (#83, #147), and it
+///   belongs in one tested place in `recipe-core` rather than re-encoded in a
+///   `json_each` subquery that could drift from it.
+/// - This is not a judgement about a recipe at all. It is set membership over rows the
+///   database already holds and already indexes by exactly this key — `votes`' primary
+///   key is `(channel_id, source, id, voter_id)`, so the `NOT EXISTS` is a covered
+///   lookup. Answering it in Rust would mean a second query per walk to load every vote
+///   in the plan and rebuild that index in memory, on the pick page's hot path. The cap
+///   sits in SQL for the same reason stated the other way round: it is what SQL does
+///   natively.
+///
+/// There is no ruling here about silence, either: a recipe you have not voted on is a
+/// recipe you have not voted on. Absence of a row is the fact, not a gap in a reading —
+/// which is precisely why this needs none of the care #82 and #192 needed.
+///
+/// **A `no` is an answer.** The exclusion is on the *row*, not on `vote = 1`: passing on
+/// a recipe is deciding about it, and re-dealing it would be the same "starting over" the
+/// issue is about.
+///
+/// The predicate is `?2 IS NULL OR NOT EXISTS (…)`, so a plan-less walk — which carries
+/// no channel and therefore no voter — is untouched, exactly like the meal bound above.
+/// Note the cap's clause is parenthesised: `AND` binds tighter than `OR`, so without the
+/// brackets this would have attached to `total_seconds <= ?1` alone and left every
+/// un-estimated recipe dealt forever.
+///
+/// If a plan is ever **decided**, the decided state wins and this defers to it — the deal
+/// is not what such a plan is showing (#202).
 async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Result<Corpus> {
+    // Both or neither: `Answered` cannot hold one without the other, and the SQL keys off
+    // `?2` alone, so they cannot drift apart into a half-applied exclusion.
+    let (channel, voter) = match &bounds.answered_by {
+        Some(a) => (Some(a.channel.as_str()), Some(a.voter.as_str())),
+        None => (None, None),
+    };
     let mut rows = conn
         .query(
             "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings
              FROM recipes
-             WHERE ?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1",
-            libsql::params![bounds.max_total_seconds],
+             WHERE (?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1)
+               AND (?2 IS NULL OR NOT EXISTS (
+                     SELECT 1 FROM votes
+                      WHERE votes.channel_id = ?2
+                        AND votes.voter_id = ?3
+                        AND votes.source = recipes.source
+                        AND votes.id = recipes.id))",
+            libsql::params![bounds.max_total_seconds, channel, voter],
         )
         .await?;
 
@@ -546,7 +631,16 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
 /// this kitchen has", and the answer to a gap is filling it, not narrowing the product
 /// against it — so the deck stays whole and the lobby says why, rather than leaving a
 /// wider deck unexplained.
-async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bounds, AppError> {
+///
+/// `voter` is the caller's telegram id, taken from the session this route is already
+/// gated on (#25). It is what makes a meal round *this person's* deal (#202) — the walk
+/// was channelled and session-gated all along, so both halves of the key were in hand
+/// already and nothing new is asked of the client.
+async fn resolve_bounds(
+    state: &AppState,
+    channel: Option<&str>,
+    voter: &str,
+) -> Result<Bounds, AppError> {
     let Some(channel) = channel else {
         return Ok(Bounds::default());
     };
@@ -579,6 +673,14 @@ async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bound
         // channelled walk is always a meal round (#184). `None` — the unbounded,
         // channel-less walk — is the only walk that is not one.
         meal_type: Some(plan.meal_type),
+        // …and the same walk is somebody's round, so it continues where they left off
+        // rather than restarting (#202). Set on the same condition and in the same
+        // breath as the meal, because it is the same fact: a channelled walk is a meal
+        // round, and a meal round is dealt to a person.
+        answered_by: Some(Answered {
+            channel: channel.to_owned(),
+            voter: voter.to_owned(),
+        }),
     })
 }
 
@@ -589,15 +691,23 @@ async fn resolve_bounds(state: &AppState, channel: Option<&str>) -> Result<Bound
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
 /// the whole point (#47).
+///
+/// The session is now *read* as well as required: a meal round skips what this caller
+/// has already answered in this plan (#202), so a plan that runs for days is continued
+/// rather than restarted. Freshness and continuity are the same wish — the point of a
+/// re-seed was never to deal the same card twice.
 pub async fn walk(
     State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
     Query(params): Query<WalkParams>,
 ) -> Result<Json<WalkResponse>, AppError> {
     let len = params.len.unwrap_or(DEFAULT_LEN).clamp(1, MAX_LEN);
     // The bounds are read fresh from the session on every walk, so the walk always
     // enforces what the plan currently says — the client passes only the channel,
-    // never a bound itself, which keeps them server-authoritative (#80).
-    let bounds = resolve_bounds(&state, params.channel.as_deref()).await?;
+    // never a bound itself, which keeps them server-authoritative (#80). Who is asking
+    // comes from the session for the same reason: a voter id in the query string would
+    // let a client deal itself the cards somebody else has left (#202).
+    let bounds = resolve_bounds(&state, params.channel.as_deref(), &user.telegram_user_id).await?;
     let bounds = &bounds;
     let corpus = state
         .with_db(move |conn| async move { load_corpus(&conn, bounds).await })
@@ -1348,6 +1458,9 @@ mod tests {
             max_total_seconds: Some(1800),
             owned_equipment: Some([String::from("knife")].into_iter().collect()),
             meal_type: Some(MealType::Dinner),
+            // Nobody has answered anything, so #202 narrows nothing here — the three
+            // bounds under test are time, kitchen and meal.
+            answered_by: None,
         };
         let corpus = load_corpus(&conn, &bounds).await.unwrap();
         assert_eq!(ids(&corpus), vec!["blank", "pancakes"]);
@@ -1515,6 +1628,254 @@ mod tests {
         read_as(&conn, "stew", &[Sitting::Dinner]).await;
         let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
         assert_eq!(ids(&corpus).len(), 8, "every seeded recipe");
+    }
+
+    // ---- continuing a plan (#202) ------------------------------------------
+
+    /// [`meal_conn`], with every dish the corpus does not state is an accompaniment read
+    /// as a dinner. So a dinner round admits exactly `blank`, `pancakes`, `stew` and
+    /// `uncategorised`, and the only thing left to narrow it is what the caller has
+    /// already answered — which is what these tests are about.
+    async fn dinner_conn() -> libsql::Connection {
+        let conn = meal_conn().await;
+        for id in ["blank", "pancakes", "stew", "uncategorised"] {
+            read_as(&conn, id, &[Sitting::Dinner]).await;
+        }
+        conn
+    }
+
+    /// The row a swipe leaves behind — one per (plan, recipe, person), exactly as
+    /// [`crate::session`] writes it. `yes` is the call, not whether it counts: a pass is
+    /// an answer too.
+    async fn answered(
+        conn: &libsql::Connection,
+        channel: &str,
+        id: &str,
+        voter: &str,
+        yes: bool,
+    ) {
+        conn.execute(
+            "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+             VALUES (?1, 'test', ?2, ?3, ?4)",
+            libsql::params![channel, id, voter, yes as i64],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A meal round dealt to a person (#202) — the shape [`resolve_bounds`] builds for
+    /// every channelled walk: the plan's meal, plus who is asking and where.
+    fn continuing(meal: MealType, channel: &str, voter: &str) -> Bounds {
+        Bounds {
+            meal_type: Some(meal),
+            answered_by: Some(Answered {
+                channel: channel.to_owned(),
+                voter: voter.to_owned(),
+            }),
+            ..Bounds::default()
+        }
+    }
+
+    /// **The fix** (#202): a card you have answered is not dealt to you again, so a plan
+    /// that runs for days is *continued* rather than restarted every time you come back.
+    #[tokio::test]
+    async fn an_answered_card_is_not_dealt_to_its_voter_again() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", true).await;
+        let deck = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "mel"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&deck),
+            vec!["blank", "pancakes", "uncategorised"],
+            "the one she has answered is gone; the rest of the round is not"
+        );
+    }
+
+    /// **A pass is an answer.** The exclusion is on the vote *row*, not on `vote = 1`:
+    /// saying no to a recipe is deciding about it, and re-dealing it is the same
+    /// starting-over the yes case is. Pinned separately because `AND vote = 1` is one
+    /// clause away and would leave every no in circulation forever.
+    #[tokio::test]
+    async fn a_pass_is_an_answer_too() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", false).await;
+        let deck = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "mel"))
+            .await
+            .unwrap();
+        assert!(
+            !ids(&deck).contains(&"stew"),
+            "she said no, which is an answer: {:?}",
+            ids(&deck)
+        );
+    }
+
+    /// **The deal is per person, and that is the whole point of keying it to the
+    /// session.** Mel's answer narrows Mel's deck and nobody else's — a pick is people
+    /// swiping the same corpus independently and converging, so a card kit has never
+    /// seen is still kit's to answer.
+    #[tokio::test]
+    async fn a_card_somebody_else_answered_is_still_dealt_to_you() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", true).await;
+
+        let mel = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "mel"))
+            .await
+            .unwrap();
+        assert!(!ids(&mel).contains(&"stew"), "hers is answered: {:?}", ids(&mel));
+
+        let kit = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "kit"))
+            .await
+            .unwrap();
+        assert!(
+            ids(&kit).contains(&"stew"),
+            "kit has answered nothing, so kit is dealt everything: {:?}",
+            ids(&kit)
+        );
+    }
+
+    /// **A vote is a call in *this* plan.** Answering a recipe in last week's dinner must
+    /// not narrow tonight's — the two are separate decisions by the same person, and the
+    /// corpus is not a to-do list you tick off once.
+    #[tokio::test]
+    async fn an_answer_in_another_plan_does_not_narrow_this_one() {
+        let conn = dinner_conn().await;
+        answered(&conn, "last-week", "stew", "mel", true).await;
+        let deck = load_corpus(&conn, &continuing(MealType::Dinner, "tonight", "mel"))
+            .await
+            .unwrap();
+        assert!(
+            ids(&deck).contains(&"stew"),
+            "a different plan is a different decision: {:?}",
+            ids(&deck)
+        );
+    }
+
+    /// **The plan-less walk is not a meal round and is untouched** (#202), exactly as it
+    /// is untouched by the meal bound above. It carries no channel, so there is nobody
+    /// whose votes could narrow it — every recipe is still dealt however much this
+    /// person has answered elsewhere.
+    #[tokio::test]
+    async fn a_walk_with_no_plan_deals_everything_however_much_you_have_answered() {
+        let conn = dinner_conn().await;
+        for id in [
+            "blank",
+            "brownie",
+            "chips",
+            "pancakes",
+            "soup",
+            "stew",
+            "trifle",
+            "uncategorised",
+        ] {
+            answered(&conn, "plan", id, "mel", true).await;
+        }
+        let all = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        assert_eq!(
+            ids(&all),
+            vec![
+                "blank",
+                "brownie",
+                "chips",
+                "pancakes",
+                "soup",
+                "stew",
+                "trifle",
+                "uncategorised"
+            ],
+            "no channel, no round, nothing to continue"
+        );
+    }
+
+    /// **It composes with #192's filter rather than relaxing it.** Answering everything
+    /// the round can deal empties the deck — the honest state, which the client says
+    /// ("you've answered everything") instead of hunting forever. The stated
+    /// accompaniments are still out, and they are out because they were never dealable,
+    /// not because anybody answered them: this bound only ever removes.
+    #[tokio::test]
+    async fn answering_everything_dealable_deals_an_empty_deck() {
+        let conn = dinner_conn().await;
+        let plan = continuing(MealType::Dinner, "plan", "mel");
+        for id in ["blank", "pancakes", "stew", "uncategorised"] {
+            answered(&conn, "plan", id, "mel", true).await;
+        }
+        let deck = load_corpus(&conn, &plan).await.unwrap();
+        assert!(
+            ids(&deck).is_empty(),
+            "everything this round could deal has been answered: {:?}",
+            ids(&deck)
+        );
+        // And the four the round never dealt are still refused for their own reason —
+        // `trifle` was not answered, it is a stated dessert (#184/#114).
+        let fresh = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "kit"))
+            .await
+            .unwrap();
+        for accompaniment in ["brownie", "chips", "soup", "trifle"] {
+            assert!(
+                !ids(&fresh).contains(&accompaniment),
+                "{accompaniment} is out of the round on #184's rule, answered or not"
+            );
+        }
+    }
+
+    /// **Finishing is not final** (#202): the deal is recomputed on every walk, so a
+    /// recipe becoming dealable mid-plan un-finishes it with nothing to invalidate.
+    ///
+    /// Both halves are pinned in order, because they are two different rulings meeting.
+    /// A dish *arriving* changes nothing — unread explicitly matches nothing, so #192
+    /// keeps it out of every round. It is the **reading** landing that puts it in the
+    /// deck, which is the same "running the worker is the act that delivers it" #193
+    /// stated, seen from a member's side of the screen.
+    #[tokio::test]
+    async fn a_reading_landing_mid_plan_un_finishes_a_finished_deal() {
+        let conn = dinner_conn().await;
+        let plan = continuing(MealType::Dinner, "plan", "mel");
+        for id in ["blank", "pancakes", "stew", "uncategorised"] {
+            answered(&conn, "plan", id, "mel", true).await;
+        }
+        assert!(load_corpus(&conn, &plan).await.unwrap().len() == 0);
+
+        // Ingest adds a dish while the plan is running. Nobody has read it.
+        conn.execute(
+            "INSERT INTO recipes (source, id, title, category)
+             VALUES ('test', 'risotto', 'risotto', 'Miscellaneous')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(
+            ids(&load_corpus(&conn, &plan).await.unwrap()).is_empty(),
+            "an unread arrival explicitly matches nothing, so it deals to nobody (#192)"
+        );
+
+        // The meal-time worker reads it, and the very next walk deals it.
+        read_as(&conn, "risotto", &[Sitting::Dinner]).await;
+        assert_eq!(
+            ids(&load_corpus(&conn, &plan).await.unwrap()),
+            vec!["risotto"],
+            "the deal recomputes, so there is no finished flag to go stale"
+        );
+    }
+
+    /// The cap and this bound are two predicates, not one. `AND` binds tighter than
+    /// `OR`, so a cap clause left unparenthesised would read as
+    /// `cap IS NULL OR total_seconds IS NULL OR (fits AND unanswered)` — and every
+    /// un-estimated recipe would be dealt forever, however often it had been answered.
+    /// Every recipe here is un-estimated, which is the case that breaks.
+    #[tokio::test]
+    async fn an_answered_card_with_no_estimate_is_still_out_of_a_capped_deal() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", true).await;
+        let bounds = Bounds {
+            max_total_seconds: Some(1800),
+            ..continuing(MealType::Dinner, "plan", "mel")
+        };
+        let deck = load_corpus(&conn, &bounds).await.unwrap();
+        assert_eq!(
+            ids(&deck),
+            vec!["blank", "pancakes", "uncategorised"],
+            "the cap keeps un-estimated recipes (#80) and this still takes the answered one out"
+        );
     }
 
     /// Does `card`'s recipe list `via` (by the same normalization the graph uses)?
