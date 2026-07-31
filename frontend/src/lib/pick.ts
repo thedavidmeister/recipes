@@ -143,10 +143,15 @@ export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
  * ask about.
  */
 export interface PickHandlers {
-  /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
+  /** A full tally: sent on join and on every reconnect, so **replace**, don't merge.
+   *
+   * `participants` is `COUNT(DISTINCT voter_id)` — how many people have swiped at
+   * all, which is **not** the number a recipe has to win over and must not decide a
+   * pick (#181): one person's first yes arrives here as `participants: 1, yes: 1`.
+   * The count that decides is `deciders` on {@link onLobby}. */
   onTally?: (participants: number, votes: TallyRow[]) => void;
   /** The roster size and whether the swiping has begun — on join, and on every
-   * change to either. */
+   * change to either. `deciders` is the count a pick is decided against. */
   onLobby?: (deciders: number, started: boolean) => void;
   /** One live vote from any peer (including this client's own echo). */
   onVote?: (voter: string, source: string, id: string, vote: boolean) => void;
