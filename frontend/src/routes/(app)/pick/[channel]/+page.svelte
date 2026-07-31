@@ -4,6 +4,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
+  import { answeredEverything } from "$lib/deal";
   import { ApiError } from "$lib/client";
   import {
     PickClient,
@@ -121,6 +122,13 @@
   let refilling = $state(false);
   let loadedOnce = $state(false);
   let dry = $state(false); // nothing fresh right now — back off, don't busy-loop
+  // …except a pick *can* run dry, and since #202 it says so instead of hunting. The
+  // deal skips what this member has already voted on in this plan, so an empty deal
+  // means they have answered everything the plan can currently serve them and are
+  // waiting on the others. Read off every deal rather than latched, so a recipe
+  // becoming dealable mid-plan (the meal-time worker reading one this round can serve)
+  // un-finishes it on the very next refill with nothing to invalidate.
+  let finished = $state(false);
 
   // Recent swipe times (plain — logic only, never rendered) → a live rate.
   const swipeTimes: number[] = [];
@@ -162,8 +170,14 @@
         fetches++
       ) {
         // The channel travels with the walk so the server bounds it to the plan's
-        // time cap (#80) — the cap itself never comes from the client.
+        // time cap (#80) — the cap itself never comes from the client. It is also how
+        // the server knows whose round this is, and so what this member has already
+        // answered in it (#202); the id comes from the session, never from here.
         const stops = await getWalk(30, channel);
+        // What the *deal* held, not what was new to this deck — a walk of cards this
+        // client already queued is a client still holding cards, and says nothing about
+        // whether the member has answered them.
+        finished = answeredEverything(stops.length);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
           const k = cardKey(s.recipe.source, s.recipe.id);
@@ -179,6 +193,10 @@
       loadedOnce = true;
       if (!added) backoff();
     } catch (e) {
+      // `finished` is deliberately left alone: a deal that failed said nothing about
+      // whether anything is left, so the last one that answered stands until another
+      // does. Clearing it here would flash "Finding more recipes…" at the one person
+      // for whom that is untrue.
       if (e instanceof ApiError && e.status === 401) {
         // A lapsed session — drop back to login, the only real recovery.
         queryClient.invalidateQueries({ queryKey: ["session"] });
@@ -548,6 +566,7 @@
     card={current}
     participants={deciding}
     {yesVoters}
+    {finished}
     shareUrl={page.url.href}
     {copied}
     onVote={vote}

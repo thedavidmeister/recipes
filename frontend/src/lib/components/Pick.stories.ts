@@ -153,6 +153,46 @@ export const FindingMore: Story = {
   args: { status: "loading", participants: 3, shareUrl: share },
 };
 
+/**
+ * The same empty deck, for the other reason (#202): this person has answered every
+ * recipe the plan can currently deal them, so there is nothing to find. Waiting on the
+ * others is a real state — a plan runs for days and people come and go — and the one
+ * thing it must never be is the story above, hunting forever for a card that is not
+ * coming.
+ */
+export const AnsweredEverything: Story = {
+  args: { status: "loading", finished: true, participants: 3, shareUrl: share },
+};
+
+/** Two in the plan, so one other is left to hear from — said in the singular. */
+export const AnsweredEverythingWaitingOnOne: Story = {
+  args: { status: "loading", finished: true, participants: 2, shareUrl: share },
+};
+
+/**
+ * Nobody else is in this plan. The roster closed at the start (#96/#169), so no one is
+ * coming, and "0 others are still deciding" would be the same holding pattern dressed
+ * up as a number.
+ */
+export const AnsweredEverythingAlone: Story = {
+  args: { status: "loading", finished: true, participants: 1, shareUrl: share },
+};
+
+/**
+ * Finished *and* reconnecting. The two are independent — one is a fact about the deal,
+ * the other about the socket — which is why finishing is its own prop rather than
+ * another status: as a status it would lose this race, and the person who has answered
+ * everything would be told a card is on its way.
+ */
+export const AnsweredEverythingWhileReconnecting: Story = {
+  args: {
+    status: "reconnecting",
+    finished: true,
+    participants: 3,
+    shareUrl: share,
+  },
+};
+
 /** Right after copying the invite link. */
 export const LinkCopied: Story = {
   args: {
