@@ -100,6 +100,34 @@ pub struct RecipeCard {
     /// Both are honest, and which is honest *now* is a property of the rows, not of
     /// the deploy — so the badge self-corrects as the corpus is re-read.
     pub fully_timed: bool,
+    /// What the **whole recipe** costs in kcal (#162), from `recipes.kcal`. `None` is
+    /// unknown — the nutrition worker has not read this recipe, or read nothing it
+    /// could weigh — never "free"; the client shows nothing for it, exactly as it does
+    /// for an absent `total_seconds`.
+    ///
+    /// It is the whole-recipe total on purpose, with [`Self::servings`] beside it: per
+    /// serving is a division the surface does, not a third number the wire could carry
+    /// out of step with the two it came from (#162, `recipe_core::nutrition`).
+    pub kcal: Option<i64>,
+    /// Whether every ingredient line that stated a number was counted into
+    /// [`Self::kcal`] — so whether that total is an estimate or only a floor
+    /// (`recipes.kcal_complete`).
+    ///
+    /// The peer of [`Self::fully_timed`], and it rides on the card for the same reason:
+    /// the browser has no ingredient readings here and could not run `recipe-core` over
+    /// them if it did (no WASM). `false` → a line nothing could weigh counted as
+    /// nothing, so the total can only be too low and the mark is `+`; `true` → the
+    /// remaining error is ordinary estimation noise and the mark is `~`.
+    pub kcal_complete: bool,
+    /// How many people the recipe was read as feeding (`recipes.servings`). `None`
+    /// until read — never `1`, because "we have not read this" and "this feeds one
+    /// person" are different facts, and a per-serving figure that quietly assumed the
+    /// second would be wrong by a factor of four on a tray of lasagne.
+    ///
+    /// Without it a bare total is uninterpretable, which is the whole reason #162 made
+    /// the servings reading required rather than optional. The client shows no calorie
+    /// figure at all when this is absent.
+    pub servings: Option<i64>,
 }
 
 /// One stop on the walk: the recipe landed on, and the ingredient crossed to reach
@@ -513,7 +541,7 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
     };
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings
+            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings, kcal, kcal_complete, servings
              FROM recipes
              WHERE (?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1)
                AND (?2 IS NULL OR NOT EXISTS (
@@ -542,6 +570,16 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
             // NOT NULL DEFAULT 0, so this is a plain read with no absent case: a row
             // the step worker has not reached is `0`, which is the truth about it.
             fully_timed: row.get::<i64>(7)? != 0,
+            // The calorie estimate rides out the same way the time estimate does
+            // (#162/#84) — the walk is already reading this row, so it is one more
+            // column rather than a second read. New columns go on the **end** of the
+            // SELECT, never in the middle: every read here is positional, so inserting
+            // one above would silently re-point all of them (the #109 outage).
+            kcal: row.get::<Option<i64>>(11)?,
+            // NOT NULL DEFAULT 0 like `fully_timed`, so a plain read with no absent
+            // case: an unread row is `0`, and its `kcal` is NULL anyway.
+            kcal_complete: row.get::<i64>(12)? != 0,
+            servings: row.get::<Option<i64>>(13)?,
         };
         // The meal bound (#184, #191). Before the ingredients are parsed, because a dish
         // that is not in this round has no reason to be read at all.
@@ -733,6 +771,9 @@ mod tests {
             area: None,
             total_seconds: None,
             fully_timed: false,
+            kcal: None,
+            kcal_complete: false,
+            servings: None,
         }
     }
 
@@ -1129,6 +1170,73 @@ mod tests {
         assert_eq!(estimate("exact"), Some(1800));
         assert_eq!(estimate("slow"), Some(7200));
         assert_eq!(estimate("unknown"), None);
+    }
+
+    /// The calorie estimate rides out on the card too (#162), and all three of its
+    /// columns do — the total, whether that total is complete, and the servings it is
+    /// divided by. Dropping any one of them silently changes what the badge claims: no
+    /// `servings` and a per-serving figure becomes a whole-recipe one, no
+    /// `kcal_complete` and a floor renders as an estimate.
+    ///
+    /// It also pins the column order once more. The three reads are positional and sit
+    /// at the end of the `SELECT`; a column inserted above them reads the wrong value
+    /// rather than failing (#109), and here the wrong value is a plausible number.
+    #[tokio::test]
+    async fn a_loaded_card_carries_its_calorie_estimate() {
+        let conn = nutrition_conn().await;
+        let corpus = load_corpus(&conn, &Bounds::default()).await.unwrap();
+        let card = |id: &str| {
+            corpus
+                .cards
+                .iter()
+                .find(|c| c.id == id)
+                .expect("seeded recipe is in the corpus")
+                .clone()
+        };
+        let counted = card("counted");
+        assert_eq!(counted.kcal, Some(1045));
+        assert_eq!(counted.servings, Some(4));
+        assert!(counted.kcal_complete);
+
+        let floored = card("floor");
+        assert_eq!(floored.kcal, Some(900));
+        assert_eq!(floored.servings, Some(2));
+        assert!(
+            !floored.kcal_complete,
+            "a line nothing could weigh leaves the total a floor"
+        );
+
+        // Unread is unread: NULL, never 0 — a dish with no calories is never true of
+        // food, and "feeds one" is not what "nobody has read this" means.
+        let unread = card("unread");
+        assert_eq!(unread.kcal, None);
+        assert_eq!(unread.servings, None);
+        assert!(!unread.kcal_complete);
+    }
+
+    /// A corpus shaped for the calorie badge (#162): a complete total, a total that is
+    /// only a floor, and a recipe the nutrition worker has not reached.
+    async fn nutrition_conn() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        for (id, kcal, complete, servings) in [
+            ("counted", Some(1045i64), 1i64, Some(4i64)),
+            ("floor", Some(900i64), 0i64, Some(2i64)),
+            ("unread", None, 0i64, None),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, kcal, kcal_complete, servings)
+                 VALUES ('test', ?1, ?1, ?2, ?3, ?4)",
+                libsql::params![id, kcal, complete, servings],
+            )
+            .await
+            .unwrap();
+        }
+        conn
     }
 
     /// A corpus shaped for the kitchen bound (#82): one recipe per relationship a

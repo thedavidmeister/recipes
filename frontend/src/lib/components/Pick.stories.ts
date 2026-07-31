@@ -13,19 +13,60 @@ type Story = StoryObj<typeof meta>;
 const cards = recipeCards();
 const share = "https://recipes.lehlehleh.com/pick/ab12cd34ef56";
 
-/** A card up to vote on, no consensus yet. The badge beside the category is the
- * recipe's estimated total time (#84): "23 min+", an at-least — this recipe has
- * steps the reading left untimed, and they count as nothing in the total, so the
- * real cook takes longer. */
+/**
+ * A card up to vote on, no consensus yet. The badge beside the category is the recipe's
+ * estimated total time (#84): "23 min+", an at-least — this recipe has steps the reading
+ * left untimed, and they count as nothing in the total, so the real cook takes longer.
+ *
+ * The second is what it costs (#162). Chicken Handi's reading is 4,208 kcal over 6
+ * servings, so the badge reads "~701 kcal a serving" — per serving, because a
+ * whole-recipe total is the number nobody can interpret, and marked "~" because every
+ * ingredient line that stated a number was weighed.
+ *
+ * The two marks differ on this one card, which is the clearest statement of what they
+ * mean: the same recipe is a floor on time and an approximation on calories. Neither is
+ * a property of the deploy — both are read off the row.
+ */
 export const Swiping: Story = {
   args: { status: "swiping", card: cards[0], participants: 2, shareUrl: share },
+};
+
+/**
+ * The calorie badge on the richest thing in the sample: Beef and Mustard Pie, read as
+ * 5,389 kcal over 4 servings — "~1347 kcal a serving", beside "2 hours 30 min+".
+ *
+ * A story of its own rather than leaving the state to whatever card `Swiping` happens to
+ * hold, for the reason `FullyTimedRecipe` exists: a state visible only incidentally in a
+ * story about something else is a state nobody is watching. This one is picked for a
+ * stated reason — the largest per-serving figure the sample holds, so it is the
+ * four-digit badge, which is the width the pill has to survive beside a long time
+ * estimate on one line.
+ *
+ * Every number is the corpus's; the editorial act is only *which* real row is rendered,
+ * and `fixtures.test.ts` pins that no card carries a figure the sample does not hold.
+ *
+ * There is deliberately no floor story beside this one. `kcal_complete` is `1` on all
+ * seven sampled rows, so **no recipe in the sample renders `N kcal+ a serving`**, and
+ * the corpus is the only place that state can honestly come from — the same rule that
+ * keeps an invented `total_seconds` out of these fixtures (#157). It gets its story when
+ * a recipe whose reading left a line unweighable is added to `WANTED` in
+ * `scripts/sample-corpus.mjs`.
+ */
+export const CompleteCalorieEstimate: Story = {
+  args: { status: "swiping", card: cards[4], participants: 2, shareUrl: share },
 };
 
 /** The same badge for a recipe whose every step carries a duration (#158): "~19 min",
  * an approximation rather than a floor. Nothing is missing from the total, so it is
  * no longer only-too-low — it is cooking, and the remaining error runs both ways. The
  * mark comes from the card's own `fully_timed`, so as the re-read reaches recipes
- * they cross from the story above to this one, one at a time. */
+ * they cross from the story above to this one, one at a time.
+ *
+ * It carries **no** calorie badge, and that is the honest unread state rather than an
+ * oversight (#162). This card is hand-written because the state it declares does not
+ * exist in the corpus, so its recipe is not in the sample — and the sample is the only
+ * place a real calorie figure comes from. Production holds one; guessing it here would
+ * assert a count no reading ever made. */
 export const FullyTimedRecipe: Story = {
   args: {
     status: "swiping",
@@ -36,9 +77,14 @@ export const FullyTimedRecipe: Story = {
 };
 
 /** A recipe the step worker has genuinely not read (`total_seconds` is null in the
- * corpus, not blanked for the story): no badge at all. Unknown is not instant —
+ * corpus, not blanked for the story): no time badge at all. Unknown is not instant —
  * "0 min" would be a lie about the case we know least about — so the card says
- * nothing about time rather than guessing. */
+ * nothing about time rather than guessing.
+ *
+ * The nutrition worker *has* read it (1,356 kcal over 4 servings), so this is also the
+ * one card where the calorie badge stands alone: "~339 kcal a serving" with nothing
+ * beside it. The two readings are independent workers over the same corpus, and the
+ * quiet line has to hold either one on its own (#162/#84). */
 export const UntimedRecipe: Story = {
   args: {
     status: "swiping",

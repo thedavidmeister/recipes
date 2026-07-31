@@ -1,38 +1,48 @@
-import type { Match, RecipeCard } from "./types";
-
 /**
- * A pick's **win condition** (#20): how the running tally is keyed, how many a recipe
- * has to win over, and which recipes have won.
+ * A pick's **win condition** (#20): how the running tally is keyed, and how many a
+ * recipe has to win over.
  *
  * Pure — no I/O, no `$env`, nothing reactive — so vitest and a story can import it
  * while the page keeps the socket, the deck and the navigation (the `$lib/shopping`
  * split, which `lint:env` enforces).
  *
- * **One number decides, and it is the roster (#181).** A pick has two counts in the
- * air and they are not the same fact:
+ * **Who answers it, and where that moved.** #181 established that one number decides
+ * and it is the roster, not the tally's voter count. #201 moved the answering itself:
+ * `agreed` used to live here, taking that count and naming the recipes everyone had
+ * said yes to, and it is **gone**. The server evaluates the condition inside the
+ * vote's own write, records it on `pick_sessions`, and broadcasts it
+ * (`ServerMsg::Decided`, surfaced as `PickHandlers.onDecided`). Two evaluators of one
+ * condition are two answers to "what did we pick" — which is exactly the duplication
+ * that let a browser name any recipe it liked to `buy` — so there is one, and it is
+ * the side holding the roster and the votes.
+ *
+ * What stays is the part that was never the decision: the tally's key, and the count
+ * the pick *shows*. Both still deserve their tests, because both still have a wrong
+ * answer that is silent.
+ *
+ * A pick has two counts in the air and they are still not the same fact:
  *
  * - `ServerMsg::Lobby.deciders` — the plan's roster: who joined, and so who a recipe
  *   has to win over. The server sends it on connect and again on every roster change,
  *   so the count the page holds is the server's, not a tally the client kept.
  * - `ServerMsg::Tally.participants` — `COUNT(DISTINCT voter_id) FROM votes`, which is
- *   how many people have swiped **at all**. It is not a roster and must never decide:
- *   the host's very first yes arrives as `participants: 1, yes: 1, no: 0`, unanimous
- *   by that arithmetic, and a decision is stashed and navigated to off one swipe of
- *   one card while everyone else is still looking at their first recipe.
+ *   how many people have swiped **at all**. One person swiping once makes it 1,
+ *   whoever else is in the plan.
  *
- * So the deciding count has exactly one producer — {@link decidingCount}, off the
- * roster — and {@link agreed} accepts nothing else. That is what {@link Deciding} is
- * for: a plain `number` parameter would take the tally's voter count just as happily,
- * and the whole of #181 is that the two numbers had stopped being told apart.
+ * So the deciding count still has exactly one producer — {@link decidingCount}, off
+ * the roster — and {@link Deciding} still brands its result. Nothing downstream of it
+ * ends a pick any more, but a caption that tells a room of three that one person is
+ * deciding is its own wrong answer, and the brand is what keeps the two numbers told
+ * apart at all.
  */
 
 /**
- * The number a recipe has to win over.
+ * The number a recipe has to win over — and, since #201, the number the pick shows for
+ * it rather than the number it measures against.
  *
  * Branded so it can only come out of {@link decidingCount}. Both counts in a pick are
- * `number`, so nothing but the type keeps the wrong one out of {@link agreed}, and
- * the cost of mixing them up is a group sent to `/buy` for a recipe it never agreed
- * on.
+ * `number`, so nothing but the type keeps the tally's voter count from standing in for
+ * the roster; #181 is the record of what happens when they stop being told apart.
  */
 export type Deciding = number & { readonly __deciding: unique symbol };
 
@@ -54,48 +64,18 @@ export function cardKey(source: string, id: string): string {
  *
  * **Unknown is not one.** A client opening its socket is sent the tally *before* the
  * lobby, so there is a frame in between where the votes are known and the roster is
- * not, and a fresh page has neither. Reading that gap as "one decider" makes any
- * single yes already in the tally unanimous — and the decision is sticky: it stashes
- * the recipe and navigates to `/buy`. Absent stays absent, and {@link agreed} answers
- * nothing at all until the roster arrives.
+ * not, and a fresh page has neither. Reading that gap as "one decider" is what #181
+ * was: it made any single yes already in the tally unanimous, and the decision was
+ * sticky — it stashed the recipe and navigated to `/buy`. Since #201 that gap can no
+ * longer end a pick, and it is still not one decider: absent stays absent, so a page
+ * that has not been told the roster says nothing about it rather than guessing.
  *
  * **The floor is one.** Your own yes is unanimous when you are the only one in the
- * plan, so a roster that counts nobody still takes one yes to win rather than none.
+ * plan, so a roster that counts nobody still takes one yes to win rather than none —
+ * the same arithmetic the server's own `EXISTS (roster)` clause refuses to do without.
  */
 export function decidingCount(
   roster: number | undefined,
 ): Deciding | undefined {
   return roster === undefined ? undefined : (Math.max(roster, 1) as Deciding);
-}
-
-/**
- * The recipes everyone deciding said yes to and nobody said no to — a pick's whole
- * point (#20) — in the order the tally ranked them, so the first is the one a pick
- * decides on.
- *
- * Three things keep a wrong answer out, and each is doing its own job:
- *
- * - **An unknown roster agrees to nothing.** Not "one", not "everyone so far".
- * - **A no is a veto**, even against a full house. A live `vote` frame adds a yes
- *   without taking back the no it replaced (the next tally does), so the two counts
- *   can briefly both be set for one person; the veto stands until the tally settles
- *   it, because holding a decision back is recoverable and making one is not.
- * - **A recipe whose card has not arrived is not a match.** The tally names recipes
- *   this client has never walked to, and their cards are fetched after the fact —
- *   there is nothing to decide *on* until one is here.
- */
-export function agreed(
-  yes: Record<string, number>,
-  no: Record<string, number>,
-  deciding: Deciding | undefined,
-  cards: Record<string, RecipeCard>,
-): Match[] {
-  if (deciding === undefined) return [];
-  return Object.keys(yes)
-    .filter((k) => (yes[k] ?? 0) === deciding && (no[k] ?? 0) === 0)
-    .map((k) => {
-      const card = cards[k];
-      return card ? { card, yes: yes[k] ?? 0 } : null;
-    })
-    .filter((m): m is Match => m !== null);
 }

@@ -139,6 +139,37 @@ export interface RecipeCard {
    * than the deploy.
    */
   fully_timed: boolean;
+  /**
+   * What the **whole recipe** costs in kcal (#162) — `recipes.kcal`, summed by
+   * `recipe_core::nutrition` over the ingredient readings.
+   *
+   * `null` is **unread** (the nutrition worker has not reached this recipe, or read
+   * nothing it could weigh), never "free" — food always costs something, so nothing is
+   * shown for it rather than "0 kcal". It is the whole-recipe total with `servings`
+   * beside it, because per serving is a division the surface does (`formatCalories` in
+   * `nutrition.ts`), not a third number free to disagree with these two.
+   */
+  kcal: number | null;
+  /**
+   * Whether every ingredient line that stated a number was counted into `kcal`, so
+   * whether that total is an estimate or only a floor. Mirrors `recipes.kcal_complete`,
+   * the peer of `fully_timed`.
+   *
+   * `false` → a line nothing could weigh counted as nothing, so the total can only be
+   * too low → `410 kcal+ a serving`. `true` → the remaining error is ordinary
+   * estimation noise in either direction → `~410 kcal a serving`. Per card, like
+   * `fully_timed`: the corpus is re-read a recipe at a time.
+   */
+  kcal_complete: boolean;
+  /**
+   * How many people the recipe was read as feeding — `recipes.servings`.
+   *
+   * `null` until read, never `1`: "we have not read this" and "this feeds one person"
+   * are different facts. Without it the total is uninterpretable — 2,400 kcal is a
+   * reasonable tray of lasagne and an absurd plate of it — so the card shows no calorie
+   * figure at all rather than an ambiguous one.
+   */
+  servings: number | null;
 }
 
 /**
@@ -199,15 +230,12 @@ export type PickStatus =
   | "loading"
   | "error";
 
-/**
- * A **match** (#20): a recipe everyone in the pick said yes to. Consensus is the
- * whole point — a match is the pick, surfaced inline the moment it happens.
- */
-export interface Match {
-  card: RecipeCard;
-  /** How many said yes — equals the participant count for a match. */
-  yes: number;
-}
+// A **match** — a recipe everyone in the pick said yes to — used to be declared here,
+// as a card the page had worked out for itself. It is `Decided` in `$lib/pick` now
+// (#201): the win condition is evaluated on the server, inside the vote's own write,
+// and what a client holds is the record of it rather than a conclusion of its own. Two
+// spellings of one answer to "what did we pick" is the duplication that made the
+// decision unenforceable in the first place, so there is one, and it is the wire's.
 
 // ---- buy (#36) -------------------------------------------------------------
 
