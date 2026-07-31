@@ -21,6 +21,7 @@
     type Voter,
   } from "$lib/pick";
   import PlanLobby from "$lib/components/PlanLobby.svelte";
+  import { agreed, cardKey, decidingCount } from "$lib/consensus";
   import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
   import type {
@@ -62,8 +63,15 @@
   // it with the socket.
   let yesIds = $state<Record<string, string[]>>({});
   let voterIds = $state<string[]>([]); // distinct voters seen live
-  let serverParticipants = $state(0); // authoritative count from the last tally
-  let deciders = $state(0); // the lobby roster size — who a recipe has to win over
+  // The lobby roster size — who a recipe has to win over — as the server last stated
+  // it, and `undefined` until it has (#181). It comes from the `lobby` frame, which
+  // the server sends on connect and again on every roster change, so this is the
+  // server's count rather than one the client kept; the lobby read on mount seeds the
+  // same number from the same place. It survives a dropped socket on purpose: the
+  // roster is frozen at the start in both directions (#96/#169) and no vote exists
+  // before the start (#175/#179), so what is held across a gap is what the plan
+  // started with — and the reconnect re-states it anyway.
+  let deciders = $state<number | undefined>();
   let started = $state<boolean | undefined>(); // undefined until the lobby is known
   let lobby = $state<Lobby | undefined>();
   let lobbyError = $state<string | undefined>();
@@ -78,19 +86,15 @@
   const queued = new Set<string>();
   const pulling = new Set<string>();
 
-  // Encode the (source, id) key unambiguously — a bare `${s}:${i}` would collide if
-  // a future source or id ever held a colon, silently merging two recipes' tallies.
-  const key = (s: string, i: string) => JSON.stringify([s, i]);
-
   function rememberCard(card: RecipeCard) {
-    const k = key(card.source, card.id);
+    const k = cardKey(card.source, card.id);
     if (!cardMap[k]) cardMap = { ...cardMap, [k]: card };
   }
 
   // Fetch a card the tally references but this client has not walked to, so a match
   // can render it. Optionally slip it into the deck (peer-injection).
   async function pull(source: string, id: string, toDeck: boolean) {
-    const k = key(source, id);
+    const k = cardKey(source, id);
     if (cardMap[k] && !toDeck) return;
     if (pulling.has(k)) return; // one fetch in flight per key
     pulling.add(k);
@@ -159,7 +163,7 @@
         const stops = await getWalk(30, channel);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
-          const k = key(s.recipe.source, s.recipe.id);
+          const k = cardKey(s.recipe.source, s.recipe.id);
           if (queued.has(k)) continue;
           queued.add(k);
           rememberCard(s.recipe);
@@ -341,13 +345,17 @@
           client?.stop();
         }
       },
-      onTally: (participants, votes) => {
-        serverParticipants = participants;
+      // A tally's own count is how many people have swiped **at all**, not how many
+      // are deciding, so it is not what consensus is measured against — the roster
+      // is, and it arrives on the `lobby` frame (#181). Ignored here on purpose,
+      // rather than kept in a variable that would only ever be the wrong number to
+      // reach for.
+      onTally: (_participants, votes) => {
         const y: Record<string, number> = {};
         const n: Record<string, number> = {};
         const who: Record<string, string[]> = {};
         for (const v of votes) {
-          const k = key(v.source, v.id);
+          const k = cardKey(v.source, v.id);
           y[k] = v.yes;
           n[k] = v.no;
           who[k] = v.yes_voters;
@@ -359,7 +367,7 @@
       },
       onVote: (voter, source, id, vote) => {
         if (!voterIds.includes(voter)) voterIds = [...voterIds, voter];
-        const k = key(source, id);
+        const k = cardKey(source, id);
         if (vote) yes = { ...yes, [k]: (yes[k] ?? 0) + 1 };
         else no = { ...no, [k]: (no[k] ?? 0) + 1 };
         // A vote is a current call, not an append (`record_vote`), so a no takes
@@ -398,7 +406,7 @@
    * still shows, by id, because a vote is never withheld over a missing handle.
    */
   const yesVoters = $derived<Voter[]>(
-    (current ? (yesIds[key(current.source, current.id)] ?? []) : []).map(
+    (current ? (yesIds[cardKey(current.source, current.id)] ?? []) : []).map(
       (id) =>
         lobby?.voters.find((v) => v.telegram_user_id === id) ?? {
           telegram_user_id: id,
@@ -407,28 +415,22 @@
     ),
   );
   /**
-   * How many people a recipe has to win over: the lobby roster.
+   * How many people a recipe has to win over: the lobby roster, and `undefined` until
+   * the server has stated it.
    *
-   * This is the number the lobby exists to establish. Inferring it was the old bug in
-   * both directions — counting who had voted meant a solo swiper could never reach
-   * agreement with themselves, and counting who was connected meant a reload looked
-   * like somebody leaving. You are deciding because you joined, and you keep deciding
-   * while you make a cup of tea.
+   * This is the number the lobby exists to establish, and the **only** one that gets
+   * to decide (#181). Inferring it was the old bug in every direction — counting who
+   * had voted meant one person's first yes was already unanimous, and counting who
+   * was connected meant a reload looked like somebody leaving. You are deciding
+   * because you joined, and you keep deciding while you make a cup of tea.
    *
-   * The floor is one: your yes is unanimous when you are the only one in the plan.
+   * The rule and the floor-of-one live in `$lib/consensus`, where they can be tested:
+   * ending a pick stashes the recipe and navigates, so there is no undo to lean on.
    */
-  const participants = $derived(Math.max(deciders, 1));
+  const deciding = $derived(decidingCount(deciders));
 
   // Consensus: the recipes everyone deciding said yes to, and nobody said no to.
-  const consensus = $derived<Match[]>(
-    Object.keys(yes)
-      .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
-      .map((k) => {
-        const card = cardMap[k];
-        return card ? { card, yes: yes[k] ?? 0 } : null;
-      })
-      .filter((m): m is Match => m !== null),
-  );
+  const consensus = $derived<Match[]>(agreed(yes, no, deciding, cardMap));
 
   // A pick decides on the first recipe to reach consensus (consensus means one).
   // Stash it and go straight to `buy` — the ingredients for what everyone agreed on.
@@ -461,7 +463,7 @@
     const c = current;
     if (!c) return;
     recordSwipe();
-    queued.add(key(c.source, c.id));
+    queued.add(cardKey(c.source, c.id));
     client?.vote(c.source, c.id, y); // the echoed vote updates the tally
     deck = deck.slice(1);
   }
@@ -477,10 +479,13 @@
 </script>
 
 {#if started === true}
+  <!-- The roster and `started` always come off the same lobby read, so a swipe view
+       is never rendered without a count to show — `Pick`'s own default covers the
+       case the types cannot rule out. -->
   <Pick
     {status}
     card={current}
-    {participants}
+    participants={deciding}
     {yesVoters}
     shareUrl={page.url.href}
     {copied}
