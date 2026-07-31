@@ -1647,13 +1647,7 @@ mod tests {
     /// The row a swipe leaves behind — one per (plan, recipe, person), exactly as
     /// [`crate::session`] writes it. `yes` is the call, not whether it counts: a pass is
     /// an answer too.
-    async fn answered(
-        conn: &libsql::Connection,
-        channel: &str,
-        id: &str,
-        voter: &str,
-        yes: bool,
-    ) {
+    async fn answered(conn: &libsql::Connection, channel: &str, id: &str, voter: &str, yes: bool) {
         conn.execute(
             "INSERT INTO votes (channel_id, source, id, voter_id, vote)
              VALUES (?1, 'test', ?2, ?3, ?4)",
@@ -1722,7 +1716,11 @@ mod tests {
         let mel = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "mel"))
             .await
             .unwrap();
-        assert!(!ids(&mel).contains(&"stew"), "hers is answered: {:?}", ids(&mel));
+        assert!(
+            !ids(&mel).contains(&"stew"),
+            "hers is answered: {:?}",
+            ids(&mel)
+        );
 
         let kit = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "kit"))
             .await
