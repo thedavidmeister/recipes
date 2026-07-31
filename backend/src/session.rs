@@ -1892,8 +1892,17 @@ async fn record_vote(
 ///   A plan always holds at least its host (#96 deletes an emptied one), so this can
 ///   only fire on a plan that no longer exists.
 /// - no decider said **no** — one veto is enough, which is what "everyone likes it"
-///   means. Checked first-class rather than by subtracting from the yes count, because
-///   the two are different rows and a person's no is not the absence of their yes.
+///   means. **Redundant today, and kept**: `votes` is keyed
+///   `(channel_id, source, id, voter_id)`, so a person holds one row per recipe and is
+///   either a yes or a no on it, never both. The count below can therefore only reach
+///   the roster size when every decider's single row is a yes — which already means
+///   nobody said no. Dropping this clause changes no answer that any state of the two
+///   tables can produce (an *equivalent* mutation, not an untested one), and it stays
+///   because the rule has two halves and the SQL should say both: the second half would
+///   otherwise be true only by an argument about a primary key two migrations away, and
+///   a `votes` that ever became append-only would silently start deciding over vetoes.
+///   `a_persons_vote_is_one_row_so_a_yes_and_a_no_cannot_coexist` pins the key the
+///   redundancy rests on.
 /// - the distinct deciders who said **yes** number exactly the roster.
 ///
 /// **Both counts are taken over the roster**, joined to `pick_voters` rather than read
@@ -2824,6 +2833,47 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    /// Why the veto clause is redundant, asserted rather than assumed.
+    ///
+    /// `votes` is keyed `(channel_id, source, id, voter_id)`, so one person holds one
+    /// row per recipe: they are a yes or a no on it, never both. That is the whole
+    /// reason "every decider said yes" already implies "no decider said no", and so the
+    /// reason a mutation dropping `decide_if_agreed`'s `NOT EXISTS (… vote = 0)` clause
+    /// survives every test — it is an equivalent mutation, not an untested one.
+    ///
+    /// The redundancy is the interesting thing, so the fact underneath it is pinned
+    /// here. If this key ever widened — an append-only vote log, a per-round key — the
+    /// clause stops being redundant and starts being the only thing standing between a
+    /// veto and a decision, which is exactly when nobody would think to add it.
+    #[tokio::test]
+    async fn a_persons_vote_is_one_row_so_a_yes_and_a_no_cannot_coexist() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        // Written straight in, because the API cannot ask for this: `record_vote`'s
+        // upsert would overwrite the yes rather than sit beside it.
+        let refused = conn
+            .execute(
+                "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+                 VALUES ('c', 't', 'r1', 'alice', 0)",
+                (),
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a second row for one person on one recipe is not a state this table has"
+        );
+
+        let (_, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(
+            (row(&rows, "r1").yes, row(&rows, "r1").no),
+            (1, 0),
+            "so a full house of yeses can never have a no hiding under it"
+        );
     }
 
     /// **First past the post.** Two recipes reach the condition, and only one is ever

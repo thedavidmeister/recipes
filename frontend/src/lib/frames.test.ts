@@ -74,10 +74,7 @@ describe("applyFrame", () => {
     // `else if`s, and a frame quietly stealing another's branch is invisible from
     // everywhere except here.
     const h = spies();
-    applyFrame(
-      { type: "tally", participants: 2, votes: [] },
-      h,
-    );
+    applyFrame({ type: "tally", participants: 2, votes: [] }, h);
     applyFrame({ type: "lobby", deciders: 3, started: true }, h);
     applyFrame(
       { type: "vote", voter: "5150", source: "t", id: "r1", vote: true },
@@ -101,7 +98,10 @@ describe("applyFrame", () => {
       { telegram_user_id: "5150", username: "mel" },
       false,
     );
-    expect(h.onDecided, "and none of them is a decision").not.toHaveBeenCalled();
+    expect(
+      h.onDecided,
+      "and none of them is a decision",
+    ).not.toHaveBeenCalled();
   });
 
   it("drops a frame it does not know rather than throwing", () => {
