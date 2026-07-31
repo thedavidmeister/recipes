@@ -33,13 +33,18 @@ export function answeredEverything(dealt: number): boolean {
 }
 
 /**
- * The line under "You've answered everything." — who is left to hear from.
+ * The line under "Nothing left to swipe." — who is left to hear from.
+ *
+ * The state it qualifies: this member has swiped, yes or pass, on every recipe the
+ * plan can currently deal them — everything that fits the meal, the cap and the
+ * kitchen. "Swipe" because that is the deck's own verb (the footer says "swipe to
+ * find something everyone likes"); nobody "answers" a recipe (#173's register).
  *
  * `deciding` is the roster: how many people this plan needs agreement from, this member
  * included. So the number said out loud is the *others*, which is one fewer.
  *
  * Nobody else is a real arrival and gets its own sentence rather than "0 others are still
- * deciding". A solo swiper who has answered everything is not waiting on anyone — the
+ * deciding". A solo swiper who has seen everything is not waiting on anyone — the
  * roster closed at the start (#96/#169), so no one is coming — and telling them to hang
  * on for zero people would be the same dishonest holding pattern this replaces.
  */

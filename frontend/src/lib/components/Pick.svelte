@@ -146,9 +146,11 @@
              empty states wear, with the roster it is waiting on named under it the way
              the footer already names it. -->
         <Notice>
-          <p class="font-display text-stone-900">You've answered everything.</p>
+          <p class="font-display text-stone-900">Nothing left to swipe.</p>
           <p class="mt-1 text-sm text-stone-600">
-            {waitingOnOthers(participants)}
+            You've seen every recipe that fits this plan. {waitingOnOthers(
+              participants,
+            )}
           </p>
         </Notice>
       {:else if !card}
