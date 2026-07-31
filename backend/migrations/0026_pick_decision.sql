@@ -4,11 +4,13 @@
 -- ## Numbering: why 26
 --
 -- `db.rs` applies by `MAX(version)`, so a number at or below one already applied on
--- production never runs at all. Production `_migrations` is at **24**, and PR #199
--- carries **25** on another branch. 26 is the next number above everything, including
--- what is unmerged elsewhere, which is the only choice that is safe whichever deploys
--- first. 20 remains the burnt hole `db.rs` records; it is far below the floor and can
--- never be filled.
+-- production never runs at all. Production `_migrations` was at **24** when this was
+-- written, with PR #199 carrying **25** on another branch — so 26 is the next number
+-- above everything, including what was unmerged elsewhere, which is the only choice
+-- safe whichever deploys first. #199 has since landed and 25 is now registered beside
+-- this one, in order and with no hole: taking the top number rather than the next free
+-- one is what meant neither had to be renumbered. 20 remains the burnt hole `db.rs`
+-- records; it is far below the floor and can never be filled.
 --
 -- ## What was missing
 --

@@ -86,10 +86,14 @@ enum ServerMsg {
     /// listening.
     ///
     /// `participants` is the distinct-voter count — how many people have swiped at
-    /// all. It is not the number a recipe has to win over, and since #201 nothing
-    /// decides anything against it: the win condition is evaluated here, against the
-    /// roster, and its answer arrives as [`ServerMsg::Decided`]. This is the running
-    /// score, for display.
+    /// all. It is **not** the number a recipe has to win over, and consensus is not
+    /// evaluated against it (#181): one person's first yes arrives here as
+    /// `participants: 1, yes: 1, no: 0`, which is unanimous by this count alone.
+    ///
+    /// Since #201 nothing on either side of the wire decides anything against *either*
+    /// count. The win condition is evaluated here, against the roster, inside the
+    /// vote's own write, and its answer arrives as [`ServerMsg::Decided`]. This is the
+    /// running score, for display.
     Tally {
         participants: i64,
         votes: Vec<TallyRow>,
@@ -2318,8 +2322,9 @@ async fn load_buy_checks(
 }
 
 /// The tally for a channel: distinct-voter count plus per-recipe yes/no, ranked by
-/// yeses. The client derives both win conditions from this — plurality (rank by
-/// `yes`) and consensus (`yes == participants && no == 0`).
+/// yeses. Plurality (rank by `yes`) is derived from this alone; consensus is
+/// `yes == deciders && no == 0`, and `deciders` is the **roster** on
+/// [`ServerMsg::Lobby`], not the voter count returned here (#181).
 async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Vec<TallyRow>)> {
     let mut prows = conn
         .query(

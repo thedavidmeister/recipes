@@ -38,11 +38,6 @@ const RESERVED: &[i64] = &[
     // written, then never used. It is below the production floor now, so it can
     // never be filled.
     20,
-    // Claimed by PR #199 (the runs check), open on another branch while 26 was being
-    // written. Unlike 20 this one is still live: whichever of the two merges second
-    // sees the other's number already registered, and 25 and 26 are independent, so
-    // both apply in order and this reservation retires when #199 lands.
-    25,
 ];
 
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
@@ -105,10 +100,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         24,
         include_str!("../migrations/0024_meal_time_structures.sql"),
     ),
-    // 26, skipping 25: production `_migrations` is at 24 and PR #199 carries 25 on
-    // another branch. Same rule as 23 and 24 — take the next number above
-    // *everything*, including what is unmerged elsewhere, so this applies whichever
-    // branch deploys first. 25 is in RESERVED until #199 lands.
+    // 25 for the same reason 24 was not 20: production `_migrations` is at 24, so the
+    // next number above everything — including anything unmerged elsewhere — is the only
+    // one guaranteed to apply whichever branch deploys first.
+    (25, include_str!("../migrations/0025_run_reported.sql")),
+    // 26 was chosen while 25 was still unmerged on #199's branch, by that same rule:
+    // the next number above *everything*. #199 has since landed, so the two sit in
+    // order with no hole between them and neither had to be renumbered — which is what
+    // taking the top number rather than the next free one buys.
     (26, include_str!("../migrations/0026_pick_decision.sql")),
 ];
 

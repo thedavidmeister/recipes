@@ -28,6 +28,14 @@
 //! run [`Outcome::Failed`] ([`fail`]), so `running` keeps meaning only the one
 //! thing.
 //!
+//! **Being read is a separate fact from what happened (#183).** A true record that
+//! nobody looks at changed nothing, so [`crate::run_alerts`] reads this table on a
+//! schedule and messages the operator. What it writes back is [`mark_reported`], and
+//! it writes *only* that: `reported_at` says somebody was told, never that the run
+//! went differently. The status column is still owned by [`finish`] alone, which is
+//! what keeps the paragraph above true — a row's account of itself survives being
+//! complained about.
+//!
 //! The vocabulary is not a `CHECK` constraint. Every write goes through [`finish`],
 //! which takes an [`Outcome`] rather than a string, so the type is the constraint at
 //! the only writer — and a rebuild of this table to bolt one on would buy nothing
@@ -40,6 +48,9 @@ use libsql::Connection;
 pub const COMPLETED: &str = "completed";
 pub const PARTIAL: &str = "partial";
 pub const FAILED: &str = "failed";
+/// The status a run carries until something closes it. Not an [`Outcome`]: it is the
+/// absence of one, and a path can never choose it — [`begin`] is the only writer.
+pub const RUNNING: &str = "running";
 
 /// How a run ended, in severity order (#174).
 ///
@@ -139,6 +150,43 @@ pub async fn fail(conn: &Connection, run_id: i64, error: anyhow::Error) -> anyho
         tracing::warn!("could not close failed run {run_id}: {e}");
     }
     error
+}
+
+/// Record that somebody has been told about these runs (#183), so the next check does
+/// not say it again.
+///
+/// **It writes `reported_at` and nothing else.** Not `status`, not `finished_at`: what
+/// the row says happened is the record, and a run being complained about does not
+/// change it. That is the same line #182 drew when it refused to sweep un-closed rows —
+/// the difference between *nothing closed me* and *something closed me badly* is worth
+/// more than a tidy column, and there is no honest wall clock to sweep by anyway. This
+/// adds a fact about us beside the run's account of itself; it does not edit the
+/// account.
+///
+/// Idempotent, so it is safe to re-run: setting `reported_at` twice reaches the same
+/// state, and the alarm would rather repeat itself than lose a row's alarm.
+///
+/// Lives here rather than in [`crate::run_alerts`] because this table has one writing
+/// module, and keeping it that way is what makes "the status is only ever written by
+/// [`finish`]" a claim you can check by reading one file.
+pub async fn mark_reported(conn: &Connection, run_ids: &[i64]) -> anyhow::Result<()> {
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    // The id list is built rather than fixed, so the placeholders have to be too. They
+    // are bound, not interpolated: the ids came out of this table as `i64`, so there is
+    // nothing here a string could smuggle, and binding them keeps it that way if the
+    // caller ever changes.
+    let placeholders = (1..=run_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(
+        &format!("UPDATE runs SET reported_at = unixepoch() WHERE id IN ({placeholders})"),
+        libsql::params_from_iter(run_ids.iter().copied()),
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -244,5 +292,85 @@ mod tests {
         let (status, finished) = closed(&conn, run).await;
         assert_eq!(status, "failed");
         assert!(finished.is_some());
+    }
+
+    /// Whether a run has been complained about.
+    async fn reported(conn: &Connection, run_id: i64) -> Option<i64> {
+        let mut rows = conn
+            .query(
+                "SELECT reported_at FROM runs WHERE id = ?1",
+                libsql::params![run_id],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<Option<i64>>(0)
+            .unwrap()
+    }
+
+    /// **The record survives being complained about (#183).** `mark_reported` adds a
+    /// fact about us; it does not edit the run's account of itself. The un-closed row
+    /// is the one that matters — #182 ruled it must never be swept to a terminal
+    /// status, and marking it reported is exactly the back door that ruling would be
+    /// lost through.
+    #[tokio::test]
+    async fn marking_reported_never_rewrites_what_the_row_says() {
+        let conn = conn().await;
+        let died = begin(&conn, "ingest").await.unwrap();
+        let errored = begin(&conn, "enrich").await.unwrap();
+        finish(&conn, errored, Outcome::Failed).await.unwrap();
+        let before = closed(&conn, errored).await;
+
+        mark_reported(&conn, &[died, errored]).await.unwrap();
+
+        // The run nobody closed still says nothing closed it.
+        assert_eq!(
+            closed(&conn, died).await,
+            (RUNNING.to_string(), None),
+            "a reported run that never closed is still `running` with no finished_at"
+        );
+        // And the one that closed itself still says exactly what it said.
+        assert_eq!(
+            closed(&conn, errored).await,
+            before,
+            "reporting a failed run changes neither its status nor when it closed"
+        );
+        assert!(reported(&conn, died).await.is_some());
+        assert!(reported(&conn, errored).await.is_some());
+    }
+
+    /// It marks the runs it was given and no others — the neighbouring row is what a
+    /// too-broad `WHERE` would take with it, and a wrongly-marked run is one nobody
+    /// will ever be told about.
+    #[tokio::test]
+    async fn marking_reported_touches_only_the_named_runs() {
+        let conn = conn().await;
+        let named = begin(&conn, "ingest").await.unwrap();
+        let bystander = begin(&conn, "enrich").await.unwrap();
+
+        mark_reported(&conn, &[named]).await.unwrap();
+
+        assert!(reported(&conn, named).await.is_some());
+        assert!(
+            reported(&conn, bystander).await.is_none(),
+            "a run nobody was told about is still unreported"
+        );
+    }
+
+    /// Marking nothing is a no-op rather than a malformed `IN ()`, and marking twice
+    /// reaches the same state — the alarm re-runs on a schedule, so both are ordinary.
+    #[tokio::test]
+    async fn marking_reported_is_safe_to_repeat_and_safe_to_skip() {
+        let conn = conn().await;
+        mark_reported(&conn, &[]).await.unwrap();
+
+        let run = begin(&conn, "derive").await.unwrap();
+        mark_reported(&conn, &[run]).await.unwrap();
+        mark_reported(&conn, &[run]).await.unwrap();
+        assert!(reported(&conn, run).await.is_some());
+        assert_eq!(closed(&conn, run).await, (RUNNING.to_string(), None));
     }
 }
