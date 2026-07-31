@@ -46,3 +46,44 @@ jobs:
           cat report.json
           echo
           test "$code" = "200"
+  # Read the runs table and tell the admin if it says something bad (#183).
+  #
+  # A second job rather than a second workflow: this schedule already exists and
+  # already holds the key, and #183's argument is that alerting must *read* the
+  # table — the runs that die without closing themselves have no process left to
+  # report on their own behalf, so nothing in the pipeline can ever catch them.
+  #
+  # `needs: sync` so the check runs after the ingest whose run it may be reporting
+  # on, and `if: always()` so an ingest that failed at the HTTP layer still gets the
+  # table read. A check that only ran when the pipeline was healthy would be silent
+  # in exactly the case it exists for.
+  runs-check:
+    needs: sync
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report failed and dead runs
+        env:
+          # The same machine key as the sync — one schedule, one credential.
+          INGEST_API_KEY: ${{ secrets.INGEST_API_KEY }}
+        run: |
+          set -euo pipefail
+          # Cold start again if the sync above did not wake it, but this endpoint
+          # only reads a handful of rows and sends one message.
+          code=$(curl -sS -o check.json -w '%{http_code}' \
+            --max-time 120 \
+            -X POST "https://api.recipes.lehlehleh.com/api/runs/check" \
+            -H "Authorization: Bearer $INGEST_API_KEY")
+          echo "HTTP $code"
+          cat check.json
+          echo
+          test "$code" = "200"
+          # `told` is the whole point: `quiet` (nothing to say) and `sent` are the
+          # healthy answers. `unconfigured` and `undelivered` mean the runs table had
+          # something to say and nobody heard it — which is #183 itself, so it fails
+          # the job and Actions mails the same human the bot could not reach.
+          told=$(jq -r .told check.json)
+          case "$told" in
+            quiet|sent) ;;
+            *) echo "the run alarm could not reach anyone: told=$told" >&2; exit 1 ;;
+          esac

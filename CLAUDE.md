@@ -283,6 +283,45 @@ deploys again. The truth is in the body — `status` is `ok` or `degraded`,
 because it is unauthenticated. **Do not put migrations back on the fatal inline
 path**, and do not make `/api/health` non-200 for a live process.
 
+## The runs table is read on a schedule, and the bot says so (#183)
+
+#182 made `runs.status` true — `completed` / `partial` / `failed`, chosen from
+what the run did. A true record nobody reads changed nothing: the first night
+the new vocabulary ran for real, meal-time enrichment recorded 12 `failed` and
+nobody was told. `backend/src/run_alerts.rs` is the other half.
+
+- **Pull, never push.** A writing path could report its own failure, but the
+  rows that matter most died _without_ closing themselves — the 15-minute
+  spin-down kills a process mid-run — and those have no process left to send
+  anything. Only something that **reads** the table can see them. Alerting also
+  stays out of the corpus pipeline, which stays dumb.
+- **Told through the bot, to `ADMIN_TELEGRAM_USER_ID`** — never a broadcast,
+  never a new channel. In a one-to-one chat the chat id **is** the user id, so
+  the admin already configured for the health dashboard is already an address,
+  and being the admin means having messaged the bot (that is how the session was
+  minted), which is what makes it deliverable at all. The "a pipeline alarm in
+  the what's-for-dinner thread is the wrong room" objection is real and loses: a
+  correct signal in a room nobody opens is worth nothing, and that is the bug.
+- **Thresholds are policy and live in one commented block** at the top of
+  `run_alerts.rs`, never at a call site. One `failed` speaks. One never-closed
+  run past **6h** speaks. A single `partial` is **weather** — sources 502
+  scrapers, and alerting on one would pin this check to always-firing, which is
+  #174's bug with a bell on — so five is the pattern. Keep the stale threshold
+  **below** the check's cadence, or a death waits two cycles.
+- **`reported_at` (migration 0025) is the no-respam memory, and it is
+  additive.** It records that somebody was told; it never touches `status` or
+  `finished_at`. #182's ruling that an un-closed row is not swept **stands** —
+  marking a row reported must not become sweeping it by the back door. A
+  high-water mark by run id is wrong here and was rejected: deadness is
+  discovered out of id order, so a watermark buries the very run that turns out
+  to have died.
+- **Tell first, mark second, and mark only what was told.** A lost message costs
+  a repeat; the other order costs the alarm, which is the whole failure.
+- **Missing config degrades** (the `INGEST_API_KEY` stance): no admin ⇒ log at
+  `error`, answer `told: unconfigured`, mark nothing. That fails the scheduled
+  job, so Actions mails the same human the bot could not reach. It never
+  crashes.
+
 ## The infra today is Render + Turso + Cloudflare R2 (screenshots only)
 
 Backend = Render web service (free, spins down at 15 min idle). Frontend +
