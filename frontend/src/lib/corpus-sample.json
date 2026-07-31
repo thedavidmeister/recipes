@@ -1,5 +1,5 @@
 {
-  "sampled_at": "2026-07-28",
+  "sampled_at": "2026-07-30",
   "recipes": [
     {
       "why": "the base recipe — buy, cook, and the walk's first stop",
@@ -410,10 +410,29 @@
           "after": [14]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "wok"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "plate"
+        },
+        {
+          "item": "whisk"
+        }
+      ],
       "source_url": null,
       "video_url": "https://www.youtube.com/watch?v=IO0issT0Rmc",
-      "total_seconds": 1380
+      "total_seconds": 1380,
+      "kcal": 4208,
+      "kcal_complete": true,
+      "servings": 6
     },
     {
       "why": "walk stop 2",
@@ -843,10 +862,32 @@
           "after": [16, 11]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "sieve"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "frying pan"
+        }
+      ],
       "source_url": "http://allrecipes.co.uk/recipe/29578/chicken-katsu-curry.aspx",
       "video_url": "https://www.youtube.com/watch?v=MWzxDFRtVbc",
-      "total_seconds": 1980
+      "total_seconds": 1980,
+      "kcal": 4000,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "walk stop 3",
@@ -1156,10 +1197,32 @@
           "after": [16]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "oven"
+        },
+        {
+          "item": "baking dish"
+        },
+        {
+          "item": "pot"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "fork"
+        },
+        {
+          "item": "spoon"
+        }
+      ],
       "source_url": null,
       "video_url": "https://www.youtube.com/watch?v=4aZr5hZXP_s",
-      "total_seconds": 3360
+      "total_seconds": 3360,
+      "kcal": 1800,
+      "kcal_complete": true,
+      "servings": 6
     },
     {
       "why": "walk stop 4 — the long one (past the hour)",
@@ -1485,10 +1548,29 @@
           "after": [10, 2, 5]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "baking tray"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        },
+        {
+          "item": "casserole dish"
+        }
+      ],
       "source_url": "https://www.bbcgoodfood.com/recipes/420631/beef-massaman-curry",
       "video_url": "https://www.youtube.com/watch?v=mVxgZSCU9_g",
-      "total_seconds": 7500
+      "total_seconds": 7500,
+      "kcal": 3902,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "walk stop 5",
@@ -1918,10 +2000,38 @@
           "after": [17, 20]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "casserole dish"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "pie dish"
+        },
+        {
+          "item": "pastry brush"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "colander"
+        }
+      ],
       "source_url": "https://www.bbc.co.uk/food/recipes/beef_and_mustard_pie_58002",
       "video_url": "https://www.youtube.com/watch?v=nMyBC9staMU",
-      "total_seconds": 9000
+      "total_seconds": 9000,
+      "kcal": 5389,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "the unread card — total_seconds is null in the corpus",
@@ -2130,10 +2240,29 @@
           "after": [5, 4]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "saucepan"
+        },
+        {
+          "item": "colander"
+        },
+        {
+          "item": "serving dish"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        }
+      ],
       "source_url": "https://www.bbcgoodfood.com/recipes/bang-bang-prawn-salad",
       "video_url": "https://www.youtube.com/watch?v=Na-6-lzs2wU",
-      "total_seconds": null
+      "total_seconds": null,
+      "kcal": 1356,
+      "kcal_complete": true,
+      "servings": 4
     },
     {
       "why": "the longest title in the corpus, for the wrapping story",
@@ -2556,10 +2685,32 @@
           "after": [12]
         }
       ],
-      "equipment": [],
+      "equipment": [
+        {
+          "item": "pot"
+        },
+        {
+          "item": "casserole dish"
+        },
+        {
+          "item": "bowl"
+        },
+        {
+          "item": "oven"
+        },
+        {
+          "item": "knife"
+        },
+        {
+          "item": "chopping board"
+        }
+      ],
       "source_url": "https://www.allrecipes.com/recipe/258873/tajine-de-poulet-aux-carottes-et-patates-douces-chicken-and-sweet-potato-tagine/",
       "video_url": "https://www.youtube.com/watch?v=thf-JDXoTVg",
-      "total_seconds": 5400
+      "total_seconds": 5400,
+      "kcal": 1595,
+      "kcal_complete": true,
+      "servings": 4
     }
   ]
 }

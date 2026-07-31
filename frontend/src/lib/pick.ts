@@ -67,7 +67,7 @@ export async function fetchCard(
   const rs = await turso().execute({
     // Named columns, never `SELECT *` — the row is read by name below, and a
     // wildcard would hand back whatever order the table happens to have (#109).
-    sql: "SELECT source, id, title, image, category, area, total_seconds, fully_timed FROM recipes WHERE source = ? AND id = ? LIMIT 1",
+    sql: "SELECT source, id, title, image, category, area, total_seconds, fully_timed, kcal, kcal_complete, servings FROM recipes WHERE source = ? AND id = ? LIMIT 1",
     args: [source, id],
   });
   const row = rs.rows[0];
@@ -89,6 +89,14 @@ export async function fetchCard(
     // reached by walking showed `~23 min` — the same recipe contradicting itself
     // across the deck. SQLite has no boolean type, so this arrives as 0/1.
     fully_timed: Number(row.fully_timed) !== 0,
+    // The calorie estimate travels with it for the same reason (#162), and all three
+    // of its columns do: without `servings` a per-serving badge would silently become
+    // a whole-recipe one, and without `kcal_complete` a floor would render as an
+    // estimate. A card is a card however it reached the deck.
+    kcal: row.kcal == null ? null : Number(row.kcal),
+    // NOT NULL DEFAULT 0 in the schema, and 0/1 on the wire like `fully_timed`.
+    kcal_complete: Number(row.kcal_complete) !== 0,
+    servings: row.servings == null ? null : Number(row.servings),
   };
 }
 
