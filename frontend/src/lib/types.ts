@@ -199,15 +199,12 @@ export type PickStatus =
   | "loading"
   | "error";
 
-/**
- * A **match** (#20): a recipe everyone in the pick said yes to. Consensus is the
- * whole point — a match is the pick, surfaced inline the moment it happens.
- */
-export interface Match {
-  card: RecipeCard;
-  /** How many said yes — equals the participant count for a match. */
-  yes: number;
-}
+// A **match** — a recipe everyone in the pick said yes to — used to be declared here,
+// as a card the page had worked out for itself. It is `Decided` in `$lib/pick` now
+// (#201): the win condition is evaluated on the server, inside the vote's own write,
+// and what a client holds is the record of it rather than a conclusion of its own. Two
+// spellings of one answer to "what did we pick" is the duplication that made the
+// decision unenforceable in the first place, so there is one, and it is the wire's.
 
 // ---- buy (#36) -------------------------------------------------------------
 

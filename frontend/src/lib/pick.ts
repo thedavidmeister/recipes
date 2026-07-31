@@ -1,4 +1,5 @@
 import { ApiError, apiFetch, backendUrl } from "./client";
+import { applyFrame } from "./frames";
 import { turso } from "./turso";
 import type { MealAddition, MealType, RecipeCard } from "./types";
 
@@ -103,6 +104,21 @@ export interface TallyRow {
   yes_voters: string[];
 }
 
+/**
+ * What a plan decided (#201). Mirrors `session::DecidedRecipe`.
+ *
+ * The server's **record**, not a client's reading of the tally. The win condition is
+ * evaluated inside the write that stores it, so holding one of these is the same thing
+ * as the pick being over — nothing on this side recomputes it, and nothing on this side
+ * is allowed to disagree with it. That is the whole of why it moved.
+ */
+export interface Decided {
+  source: string;
+  id: string;
+  /** Unix seconds, from the database's clock. */
+  decided_at: number;
+}
+
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
@@ -114,7 +130,8 @@ export type ServerMsg =
       id: string;
       checks: RoomBuyCheck[];
     }
-  | { type: "left"; voter: Voter; ended: boolean };
+  | { type: "left"; voter: Voter; ended: boolean }
+  | { type: "decided"; source: string; id: string; decided_at: number };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -143,11 +160,27 @@ export type ConnStatus = "connecting" | "open" | "reconnecting" | "closed";
  * ask about.
  */
 export interface PickHandlers {
-  /** A full tally: sent on join and on every reconnect, so **replace**, don't merge. */
+  /** A full tally: sent on join and on every reconnect, so **replace**, don't merge.
+   *
+   * `participants` is `COUNT(DISTINCT voter_id)` — how many people have swiped at all.
+   * It decides nothing (#201): the win condition is evaluated on the server, against
+   * the roster, and its answer arrives on {@link onDecided}. This is the running
+   * score. */
   onTally?: (participants: number, votes: TallyRow[]) => void;
   /** The roster size and whether the swiping has begun — on join, and on every
    * change to either. */
   onLobby?: (deciders: number, started: boolean) => void;
+  /** **The plan decided** (#201) — the one frame that ends a pick.
+   *
+   * Sent to the room the instant the deciding vote lands, and again to every socket on
+   * connect, so a member whose browser was closed when the last yes arrived is *told*
+   * what was decided rather than re-deriving it. A watcher (#180) is told the same way:
+   * the frame goes to the room, not to the roster.
+   *
+   * There is no client-side counterpart and deliberately so. Two evaluators of one win
+   * condition are two answers to "what did we pick", and the server holds the roster
+   * and the votes. */
+  onDecided?: (decided: Decided) => void;
   /** One live vote from any peer (including this client's own echo). */
   onVote?: (voter: string, source: string, id: string, vote: boolean) => void;
   /** One recipe's shopping checklist, **whole** — someone ticked or unticked a
@@ -226,17 +259,11 @@ export class PickClient {
       } catch {
         return;
       }
-      if (msg.type === "tally") {
-        this.handlers.onTally?.(msg.participants, msg.votes);
-      } else if (msg.type === "lobby") {
-        this.handlers.onLobby?.(msg.deciders, msg.started);
-      } else if (msg.type === "vote") {
-        this.handlers.onVote?.(msg.voter, msg.source, msg.id, msg.vote);
-      } else if (msg.type === "buy") {
-        this.handlers.onBuy?.(msg.source, msg.id, msg.checks);
-      } else if (msg.type === "left") {
-        this.handlers.onLeft?.(msg.voter, msg.ended);
-      }
+      // The reading of the wire lives in `$lib/frames`, where a test can reach it:
+      // an unrecognised frame is dropped in silence on purpose, so a branch that
+      // never fires looks exactly like a server that never sent one, and `decided`
+      // is the frame a pick ends on.
+      applyFrame(msg, this.handlers);
     };
     ws.onclose = () => {
       this.ws = null;
@@ -280,6 +307,12 @@ export interface Lobby {
   voters: Voter[];
   /** Kitchen members not yet deciding — the host can add any without a link (#72). */
   candidates: Voter[];
+  /** What this plan decided (#201), or null while its deck is still running.
+   *
+   * The same record the `decided` frame carries, on the one HTTP answer that describes
+   * the whole plan — so a page that has read the lobby knows the pick is over without
+   * waiting for its socket, and a lobby read can never be silent about it. */
+  decided: Decided | null;
 }
 
 function lobbyFailed(status: number, action: string): ApiError {
