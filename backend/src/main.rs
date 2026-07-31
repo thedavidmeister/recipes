@@ -43,6 +43,7 @@ mod nutrition;
 mod nutrition_api;
 mod proxy;
 mod recipes;
+mod run_alerts;
 mod runs;
 mod session;
 mod step_api;
@@ -254,6 +255,11 @@ pub fn app(state: AppState) -> Router {
         // infrastructure, and the app is what validates and writes the corpus.
         .route("/enrich/meal-times/pending", get(meal_time_api::pending))
         .route("/enrich/meal-times/results", post(meal_time_api::results))
+        // Read the runs table and speak up when it says something bad (#183). Machine
+        // -gated with the rest because a schedule calls it, not a person — it rides the
+        // ingest cron that already exists. The operator's *view* of the same data is
+        // `/admin/health`, which a browser reaches and which is gated for a browser.
+        .route("/runs/check", post(run_alerts::check))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -1546,6 +1552,68 @@ mod tests {
             assert!(json.get(key).is_some(), "missing {key} in {json}");
         }
         assert_eq!(json["recipes"], 0, "empty test corpus");
+    }
+
+    fn runs_check_req(auth: Option<&str>, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/api/runs/check");
+        if let Some(v) = auth {
+            b = b.header("authorization", v);
+        }
+        if let Some(v) = cookie {
+            b = b.header("cookie", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// The run check is machine-authed like ingest and the enrich queues (#183): a
+    /// schedule calls it, not a person, so a browser session — even the **admin's**,
+    /// who is the very person the alarm messages — does not open it. The operator's
+    /// door to this data is `/api/admin/health`, which is session-gated because a
+    /// browser reaches it; this one triggers a side effect and belongs to the machine.
+    #[tokio::test]
+    async fn runs_check_requires_the_api_key_not_a_session() {
+        let (app, conn) = test_app().await;
+
+        let res = app
+            .clone()
+            .oneshot(runs_check_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "no key, no entry");
+
+        let admin = auth::issue_test_session(&conn, "4242").await;
+        let res = app
+            .oneshot(runs_check_req(
+                None,
+                Some(&format!("recipes_session={admin}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "the admin's own session must not trigger the check"
+        );
+    }
+
+    /// With the machine key and a healthy table it answers, says nothing was wrong,
+    /// and — the part that matters for a test with no network — never reaches for
+    /// Telegram, because `quiet` is decided before any delivery is attempted.
+    #[tokio::test]
+    async fn runs_check_with_the_key_answers_quiet_on_a_healthy_table() {
+        let (app, _conn) = test_app().await;
+        let res = app
+            .oneshot(runs_check_req(Some("Bearer test-ingest-key"), None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = body_json(res).await;
+        assert_eq!(json["told"], "quiet");
+        assert_eq!(json["alarming"], false);
+        assert_eq!(
+            (&json["failed"], &json["partial"], &json["stale"]),
+            (&0.into(), &0.into(), &0.into())
+        );
     }
 
     fn walk_req(cookie: Option<&str>) -> Request<Body> {

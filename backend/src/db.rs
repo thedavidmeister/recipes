@@ -100,6 +100,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         24,
         include_str!("../migrations/0024_meal_time_structures.sql"),
     ),
+    // 25 for the same reason 24 was not 20: production `_migrations` is at 24, so the
+    // next number above everything — including anything unmerged elsewhere — is the only
+    // one guaranteed to apply whichever branch deploys first.
+    (25, include_str!("../migrations/0025_run_reported.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
