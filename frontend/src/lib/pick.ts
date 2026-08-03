@@ -1,5 +1,7 @@
 import { ApiError, apiFetch, backendUrl } from "./client";
 import { applyFrame } from "./frames";
+import { pongFor, raise } from "./session-events";
+import type { RunningTimer, SessionEvent } from "./session-events";
 import { turso } from "./turso";
 import type { MealAddition, MealType, RecipeCard } from "./types";
 
@@ -139,7 +141,10 @@ export type ServerMsg =
       checks: RoomBuyCheck[];
     }
   | { type: "left"; voter: Voter; ended: boolean }
-  | { type: "decided"; source: string; id: string; decided_at: number };
+  | { type: "decided"; source: string; id: string; decided_at: number }
+  | { type: "time_ping"; server_ms: number }
+  | { type: "time_sync"; offset_ms: number; rtt_ms: number }
+  | { type: "timers"; source: string; id: string; timers: RunningTimer[] };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -205,6 +210,26 @@ export interface PickHandlers {
    * `ended` is the part nothing else can say: they were the last, so the plan itself
    * is gone and there is no roster left to send. */
   onLeft?: (voter: Voter, ended: boolean) => void;
+  /** The server's clock, asking for this device's — the event framework's drift
+   * measurement (`$lib/session-events`). {@link PickClient} answers this itself and a
+   * page never sees it; it is on the interface because the reading of the wire is a
+   * pure function in `$lib/frames` and every frame has to land somewhere there. */
+  onTimePing?: (serverMs: number) => void;
+  /** **What the server measured this connection's clock to be doing** — how far ahead
+   * of the shared timeline it reads, and the round trip that estimate came from.
+   *
+   * {@link PickClient} records it (see {@link PickClient.clockOffsetMs}); a page only
+   * needs this if it wants to re-render the moment the estimate moves, which a page
+   * showing a countdown does. */
+  onTimeSync?: (offsetMs: number, rttMs: number) => void;
+  /** One recipe's shared cook timers, **whole** (#208) — on connect, and on every start
+   * and dismiss anyone in the plan makes.
+   *
+   * Whole rather than a delta, exactly like {@link onBuy}: a client that missed a frame
+   * is corrected by the next one instead of drifting. Instants are on the **shared
+   * timeline** — translate with `toLocal` and this connection's offset before comparing
+   * them to `Date.now()`. */
+  onTimers?: (source: string, id: string, timers: RunningTimer[]) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
@@ -222,6 +247,15 @@ export class PickClient {
   private stopped = false;
   private backoffMs = 500;
   private readonly maxBackoffMs = 10_000;
+  /**
+   * What the server has measured **this connection's** clock to be doing, in ms
+   * (`client - server`) — the event framework's recorded offset for this participant.
+   *
+   * `0` until the first `time_sync` lands, which is one round trip after connect, and
+   * back to `0` on a reconnect because the offset describes a socket: a new connection
+   * is measured afresh rather than inheriting how wrong this phone used to be.
+   */
+  private offsetMs = 0;
 
   constructor(
     private readonly channel: string,
@@ -234,11 +268,41 @@ export class PickClient {
     this.connect(true);
   }
 
+  /**
+   * This connection's recorded clock offset, for translating shared-timeline instants
+   * with `toLocal` (`$lib/session-events`). A page that shows a countdown reads it on
+   * every frame rather than caching it — the estimate is refreshed for the life of the
+   * socket, and a countdown rendered off a stale one drifts exactly as far as the clock
+   * did.
+   */
+  get clockOffsetMs(): number {
+    return this.offsetMs;
+  }
+
   /** Send this client's yes/no on a recipe. Dropped silently if not connected —
    * the durable record is the server's, and the user can re-swipe on reconnect. */
   vote(source: string, id: string, vote: boolean): void {
+    this.send({ type: "vote", source, id, vote });
+  }
+
+  /**
+   * **Raise an event through the framework** (#208) — stamped with this device's clock
+   * at the moment of the call, because this device is where the action happened.
+   *
+   * Dropped silently if the socket is not open, like a vote: the durable record is the
+   * server's, and a tap that never left is a tap to make again. Deliberately *not*
+   * queued for the reconnect — a queued timer start would fire minutes late carrying an
+   * instant that the server's sanity bound would then clamp, which is a worse lie than
+   * a button that plainly did nothing.
+   */
+  event(event: SessionEvent): void {
+    this.send(raise(event));
+  }
+
+  /** One frame out, if there is a socket to put it on. */
+  private send(frame: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "vote", source, id, vote }));
+      this.ws.send(JSON.stringify(frame));
     }
   }
 
@@ -259,6 +323,10 @@ export class PickClient {
     this.handlers.onStatus?.(first ? "connecting" : "reconnecting");
     const ws = new WebSocket(this.url());
     this.ws = ws;
+    // A new socket is a new participant as far as the clock measurement is concerned;
+    // the server measures it afresh, and rendering off the old number until it does
+    // would be rendering off a connection that no longer exists.
+    this.offsetMs = 0;
 
     ws.onopen = () => {
       this.backoffMs = 500;
@@ -275,7 +343,25 @@ export class PickClient {
       // an unrecognised frame is dropped in silence on purpose, so a branch that
       // never fires looks exactly like a server that never sent one, and `decided`
       // is the frame a pick ends on.
-      applyFrame(msg, this.handlers);
+      //
+      // The two clock frames are answered and recorded **here** rather than by the
+      // page: measuring this connection's drift is the socket's own business, and a
+      // page that had to remember to answer a ping is a page that could forget and
+      // silently render off an unmeasured clock. A page still hears about the estimate
+      // (`onTimeSync`) — it just never has to keep the exchange going.
+      applyFrame(msg, {
+        ...this.handlers,
+        onTimePing: (serverMs) => {
+          // Immediately, and with no work in between: any delay this side adds lands
+          // in the measured round trip and is charged half to the offset.
+          this.send(pongFor(serverMs));
+          this.handlers.onTimePing?.(serverMs);
+        },
+        onTimeSync: (offsetMs, rttMs) => {
+          this.offsetMs = offsetMs;
+          this.handlers.onTimeSync?.(offsetMs, rttMs);
+        },
+      });
     };
     ws.onclose = () => {
       this.ws = null;

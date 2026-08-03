@@ -276,10 +276,18 @@ export type CookStatus = "pending" | "error" | "ready";
  * per timed step, and the dependencies that say what runs in parallel.
  */
 export interface CookRecipe {
+  /** Which recipe — the plan's decision, and what a shared timer is keyed against. */
+  source: string;
+  id: string;
   title: string;
   image: string | null;
   ingredients: StructuredMeasure[];
   steps: StructuredStep[];
+  /** The meal session it was decided in (#208) — where the plan's **shared** cook
+   * timers live, exactly as `BuyRecipe.channel` is where the shared checklist lives.
+   * Absent when there is no session behind the decision, which is what puts `cook` on
+   * its device-local timer path (see `$lib/steps`). */
+  channel?: string;
 }
 
 /** One model's enrichment count (`admin::ModelCount`) — provenance at a glance. */

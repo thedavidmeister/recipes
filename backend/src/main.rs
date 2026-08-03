@@ -34,6 +34,7 @@ mod enrich_api;
 mod equipment;
 mod equipment_api;
 mod error;
+mod events;
 mod ingest;
 mod kitchens;
 mod mcp;
@@ -49,6 +50,7 @@ mod session;
 mod step_api;
 mod steps;
 mod sync;
+mod timers;
 mod walk;
 
 use axum::{

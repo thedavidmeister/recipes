@@ -1,3 +1,6 @@
+import type { Voter } from "./pick";
+import { toLocal } from "./session-events";
+import type { RunningTimer } from "./session-events";
 import type { StructuredStep } from "./types";
 
 /**
@@ -139,11 +142,95 @@ export function cookStages(steps: StructuredStep[]): StepGroup[] {
 // A running timer is a deadline (ms). Persisting it per recipe means a reload — or a
 // tab switch — mid-cook keeps the countdown, and a timer that finished while away
 // shows as done rather than lost.
+//
+// This is the **solo** path (#208): a cook with no plan behind it, which is what `buy`'s
+// device-local checklist is for the same reason. When there is a channel the timers are
+// the plan's and come over the socket instead; see `sharedTimers` below.
 
 /** Live timer state for one step, as the component renders it. */
 export interface StepTimer {
   remaining: number;
   done: boolean;
+  /**
+   * Who started it, on a plan's shared timer (#208) — the peer of a ticked shopping
+   * line's `by`. Absent on the device-local path, where there is nobody to attribute a
+   * timer to and saying so would be inventing a person.
+   */
+  by?: Voter | null;
+}
+
+/**
+ * A timer's live state, from a deadline and the clock this screen is reading — the one
+ * rule both paths use.
+ *
+ * **`done` is read, never stored**: a timer is done when its deadline has passed, which
+ * stays true with nobody connected, with the tab backgrounded, and with the server spun
+ * down. The alternative — a flag somebody has to set at the moment the deadline passes —
+ * needs a writer exactly when everything might be asleep, and a flag that failed to get
+ * set is a pot that silently un-finished.
+ *
+ * **The remaining is re-derived from `deadline - now` on every tick**, never counted
+ * down from a starting number, so a tab that was backgrounded for twenty minutes comes
+ * back correct rather than twenty minutes behind.
+ */
+function timerAt(deadline: number, now: number): StepTimer {
+  return {
+    remaining: Math.max(0, Math.ceil((deadline - now) / 1000)),
+    done: now >= deadline,
+  };
+}
+
+/**
+ * This device's own timers, as the component renders them — the **solo** path.
+ *
+ * Same rule as {@link sharedTimers}, minus the timeline translation there is nothing to
+ * translate against: a deadline here was written by this browser off this clock, so this
+ * clock is the only one in play. And minus the attribution — there is no plan, so there
+ * is nobody whose timer it is.
+ */
+export function localTimers(
+  deadlines: Deadlines,
+  now: number,
+): Record<number, StepTimer> {
+  const out: Record<number, StepTimer> = {};
+  for (const [idStr, deadline] of Object.entries(deadlines)) {
+    out[Number(idStr)] = timerAt(deadline, now);
+  }
+  return out;
+}
+
+/**
+ * The plan's shared timers, as the component renders them (#208).
+ *
+ * `timers` are the room's — instants on the **shared timeline** — and `offsetMs` is what
+ * the server measured *this* device's clock to be doing, so translating with
+ * {@link toLocal} puts the room's deadline on the clock this screen is reading. Two
+ * phones a minute apart therefore show the same number of seconds left, which is the
+ * whole point of the exercise.
+ *
+ * **The remaining is re-derived from `deadline - now` on every tick**, never counted
+ * down from a starting number. A tab that was backgrounded for twenty minutes comes
+ * back correct, and a clock estimate that improves mid-simmer corrects the countdown in
+ * place instead of leaving it wrong until a reload. The residual error is this device's
+ * offset error — bounded by half a round trip, so tens of milliseconds — which on a
+ * thirty-minute simmer is not a thing anybody can see; the deliberate choice is to
+ * compare a translated deadline against `Date.now()` rather than run a second local
+ * clock beside the shared one, because two clocks are two things to disagree.
+ */
+export function sharedTimers(
+  timers: RunningTimer[],
+  offsetMs: number,
+  now: number,
+): Record<number, StepTimer> {
+  const out: Record<number, StepTimer> = {};
+  for (const t of timers) {
+    out[t.step] = {
+      ...timerAt(toLocal(t.deadline, offsetMs), now),
+      // Whose pot it is, straight from the room — the shared list's `by`, on a timer.
+      by: t.started_by,
+    };
+  }
+  return out;
 }
 
 /** The persisted timers for one recipe: step id → deadline (unix ms). */

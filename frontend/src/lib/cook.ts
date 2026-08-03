@@ -49,9 +49,15 @@ export async function getCookRecipe(): Promise<CookRecipe | null> {
   }
 
   return {
+    // The decision's own key travels with the recipe (#208), the way `getBuyList`
+    // carries it: a shared timer names a step of a *particular* recipe, and the plan
+    // it belongs to is what makes it shared at all.
+    source: ref.source,
+    id: ref.id,
     title: String(row.title),
     image: row.image == null ? null : String(row.image),
     ingredients,
     steps,
+    channel: ref.channel,
   };
 }

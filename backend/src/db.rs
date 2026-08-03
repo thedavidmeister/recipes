@@ -109,6 +109,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // order with no hole between them and neither had to be renumbered — which is what
     // taking the top number rather than the next free one buys.
     (26, include_str!("../migrations/0026_pick_decision.sql")),
+    // 27 by the same rule: production `_migrations` is at 26, so this is the next number
+    // above everything, including the branches in flight beside it (#206, #207).
+    (27, include_str!("../migrations/0027_plan_timers.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

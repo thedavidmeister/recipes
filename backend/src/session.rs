@@ -66,22 +66,50 @@ fn mint_channel_id() -> String {
 /// A frame from a client.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg {
+pub(crate) enum ClientMsg {
     /// This client's yes/no on a recipe. The voter is the authenticated session,
     /// never a field the client supplies — a client cannot vote as someone else, and
     /// cannot vote at all unless that session holds a seat at a plan whose swiping
     /// has begun (see [`record_vote`]).
+    ///
+    /// One of the frames that predates the event framework ([`crate::events`]) and is
+    /// meant to migrate onto it: a vote is exactly a payload under
+    /// `Guard::SeatedInStartedPlan`, and an envelope's `at` would give a swipe the
+    /// swiper's instant instead of the row's `unixepoch()` default. Left where it is on
+    /// purpose — #208 is timers, and that migration is its own piece of work.
     Vote {
         source: String,
         id: String,
         vote: bool,
+    },
+    /// The client's half of a clock measurement — its answer to [`ServerMsg::TimePing`].
+    ///
+    /// `server_ms` is the reading the ping carried, echoed back so the round trip is
+    /// timed against the send it belongs to; `client_ms` is the client's own clock when
+    /// it answered. The framework folds the pair into this connection's recorded offset
+    /// (`events::ClockOffset`), which is what every event from it is normalised through.
+    TimePong { server_ms: i64, client_ms: i64 },
+    /// **An event, through the framework** ([`crate::events`]) — the one path a
+    /// time-sensitive action takes.
+    ///
+    /// `at` is the **initiator's own clock at the moment of the action**, and it is the
+    /// event's instant: the tap is what happened, not the arrival of the frame carrying
+    /// it. It is normalised into the shared timeline through this connection's recorded
+    /// offset before anything downstream sees it, so a phone whose clock is wrong still
+    /// lands its event where the room agrees it happened.
+    ///
+    /// Who raised it is never on the wire — it is the authenticated session, like every
+    /// other write on this socket.
+    Event {
+        at: i64,
+        event: crate::events::SessionEvent,
     },
 }
 
 /// A frame to a client.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMsg {
+pub(crate) enum ServerMsg {
     /// The full tally, sent on join so a (re)connecting client rehydrates before
     /// listening.
     ///
@@ -168,10 +196,51 @@ enum ServerMsg {
         /// shown is the write that *made* this the decision.
         decided_at: i64,
     },
+    /// **The server's clock, asking for yours** — the drift measurement the event
+    /// framework runs on ([`crate::events::ClockOffset`]).
+    ///
+    /// Sent on connect and then on every keepalive tick (~30s), so the offset recorded
+    /// for a connection tracks a clock that wanders over a plan's days rather than being
+    /// measured once at the start. A client answers with [`ClientMsg::TimePong`],
+    /// echoing `server_ms` and adding its own reading; nothing else about a client's
+    /// clock is ever asked for.
+    TimePing { server_ms: i64 },
+    /// **What the server has measured this connection's clock to be doing**: how far
+    /// ahead of the shared timeline it reads, and the round trip that estimate came
+    /// from.
+    ///
+    /// Sent back so both sides work off *one* number. The client stamps its events with
+    /// its own clock and the server subtracts this to normalise them; the client adds it
+    /// back to render shared instants. The initiator's own countdown and everyone
+    /// else's therefore agree exactly, rather than each side estimating separately and
+    /// disagreeing by the difference.
+    ///
+    /// `rtt_ms` is the estimate's error bar — half of it bounds the offset's error — so
+    /// a surface can say how well it knows the shared timeline instead of implying it
+    /// knows it perfectly.
+    TimeSync { offset_ms: i64, rtt_ms: i64 },
+    /// **The plan's shared cook timers for one recipe** (#208), whole.
+    ///
+    /// Whole rather than a delta, for [`ServerMsg::Buy`]'s reason: a client that missed
+    /// a frame is corrected by the next one instead of drifting, and two people tapping
+    /// at once leave no ordering to get wrong. Sent to every socket on connect (the
+    /// rehydrate half — a pot does not stop because a browser closed) and to the room on
+    /// every start and dismiss.
+    ///
+    /// Instants are in the **shared timeline**; a client translates them through the
+    /// offset it was given above. Finished timers are in the list — dismissing is what
+    /// removes one, not time passing.
+    Timers {
+        source: String,
+        id: String,
+        timers: Vec<crate::timers::RunningTimer>,
+    },
 }
 
+/// `pub(crate)` only because [`ServerMsg`] is: the event framework builds frames, so the
+/// wire enum reaches outside this module and everything it names has to reach as far.
 #[derive(Debug, Clone, Serialize)]
-struct TallyRow {
+pub(crate) struct TallyRow {
     source: String,
     id: String,
     yes: i64,
@@ -1205,6 +1274,22 @@ async fn socket_loop(
         return;
     };
 
+    // This connection's recorded clock offset — the event framework's per-participant
+    // drift measurement (`events::ClockOffset`). It lives exactly as long as the socket:
+    // an offset describes *this* connection, and a reconnect re-measures in one round
+    // trip rather than being served out of a record of how wrong a phone used to be.
+    let mut clock = crate::events::ClockOffset::new();
+
+    // First measurement before anything else, so a client that taps immediately is
+    // already normalised through a real sample rather than the honest-but-blind zero.
+    let ping = crate::events::server_now_ms();
+    clock.ping_sent(ping);
+    if let Ok(txt) = serde_json::to_string(&ServerMsg::TimePing { server_ms: ping }) {
+        if sink.send(Message::Text(txt.into())).await.is_err() {
+            return;
+        }
+    }
+
     // Rehydrate: the current tally before any live vote.
     if let Ok((participants, votes)) = load_tally(&db, &channel).await {
         if let Ok(txt) = serde_json::to_string(&ServerMsg::Tally {
@@ -1253,8 +1338,30 @@ async fn socket_loop(
         }
     }
 
+    // And the pots that are on (#208). Plan state survives a drop and a long session
+    // exactly the way the lobby and the decision above do: a countdown started an hour
+    // ago is still counting, and one that finished while every browser was closed is
+    // still a pot to take off the heat — so both come back here, and only a dismiss ever
+    // removes one.
+    //
+    // Every recipe the plan has timers on, not merely the decided one, so a client is
+    // never told about a timer it cannot see *or* left holding one it was never told
+    // about; the cook screen ignores frames for a recipe it is not cooking, the way
+    // `buy` ignores another recipe's checklist.
+    if let Ok(all) = crate::timers::load_all(&db, &channel).await {
+        for (source, id, timers) in all {
+            if let Ok(txt) = serde_json::to_string(&ServerMsg::Timers { source, id, timers }) {
+                if sink.send(Message::Text(txt.into())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
     // Render's free tier closes a WS idle for 5 min; a ping well inside that keeps
-    // an active session's socket — and the box — awake.
+    // an active session's socket — and the box — awake. It is also the event
+    // framework's drift-refresh cadence: the clock measurement rides this frame, so
+    // tracking a wandering clock over a days-long plan costs no extra wake-ups.
     let mut keepalive = tokio::time::interval(Duration::from_secs(30));
     keepalive.tick().await; // the first tick fires immediately; consume it
 
@@ -1275,9 +1382,14 @@ async fn socket_loop(
             // A frame from this client.
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    if let Ok(ClientMsg::Vote { source, id, vote }) =
-                        serde_json::from_str::<ClientMsg>(&t)
-                    {
+                    // Every frame this client sends is read once, here, and routed: the
+                    // vote by its own handler (it predates the event framework and is
+                    // meant to migrate onto it), the clock measurement into this
+                    // connection's recorded offset, and everything since through
+                    // `events::ingest`. An unreadable frame is dropped in silence —
+                    // there is nowhere on this socket to answer one.
+                    match serde_json::from_str::<ClientMsg>(&t) {
+                    Ok(ClientMsg::Vote { source, id, vote }) => {
                         // Durable write first, then the live push — Turso is the truth,
                         // so a vote it declined is a vote the room never hears about.
                         // Peers apply this frame to their tally incrementally, so
@@ -1323,6 +1435,52 @@ async fn socket_loop(
                             }
                         }
                     }
+                    // The other half of one clock measurement (`events::ClockOffset`).
+                    // The estimate goes straight back to the client that produced it, so
+                    // both sides normalise through the *same* number rather than each
+                    // estimating separately and disagreeing by the difference. A pong
+                    // that answers no outstanding ping is dropped and says nothing.
+                    Ok(ClientMsg::TimePong { server_ms, client_ms }) => {
+                        if clock.pong(server_ms, client_ms, crate::events::server_now_ms()) {
+                            if let Ok(txt) = serde_json::to_string(&ServerMsg::TimeSync {
+                                offset_ms: clock.offset_ms(),
+                                rtt_ms: clock.rtt_ms(),
+                            }) {
+                                if sink.send(Message::Text(txt.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // The event framework's one path in (#208). Normalising `at`,
+                    // applying the kind's guard, writing and deciding what the room is
+                    // told all live in `events::ingest`; this arm only carries what came
+                    // back to the room. The rules it inherits are the vote's, above:
+                    // nothing announced that was not written (an empty answer is a
+                    // refusal, and refusals on this socket are silent), and a database
+                    // fault leaves the plan as it was rather than announcing a write
+                    // that never happened.
+                    Ok(ClientMsg::Event { at, event }) => {
+                        let frames = crate::events::ingest(
+                            &db,
+                            &channel,
+                            &voter,
+                            &clock,
+                            at,
+                            crate::events::server_now_ms(),
+                            event,
+                        )
+                        .await
+                        .unwrap_or_default();
+                        for frame in frames {
+                            if let Ok(txt) = serde_json::to_string(&frame) {
+                                // Err only means no receivers right now — harmless.
+                                let _ = tx.send(txt);
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 // Ping/pong are handled by axum; other frames are ignored.
@@ -1332,6 +1490,17 @@ async fn socket_loop(
             _ = keepalive.tick() => {
                 if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
+                }
+                // …and the drift refresh rides it. A plan runs for days or weeks (#202)
+                // and clocks wander over that, so the offset recorded for this
+                // connection is re-measured for as long as the connection lives rather
+                // than being taken once at the start and trusted forever.
+                let ping = crate::events::server_now_ms();
+                clock.ping_sent(ping);
+                if let Ok(txt) = serde_json::to_string(&ServerMsg::TimePing { server_ms: ping }) {
+                    if sink.send(Message::Text(txt.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -1801,12 +1970,35 @@ async fn update_additions(
 /// `person` is the **placeholder** the caller bound the telegram id to (`"?4"`), not
 /// an id — the channel is always `?1`, and the person's position differs between the
 /// statements below. Every argument it is ever given is a literal written here.
-fn seated_in_a_started_plan(person: &str) -> String {
+pub(crate) fn seated_in_a_started_plan(person: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM pick_sessions s, pick_voters v
                   WHERE s.channel_id = ?1 AND s.started_at IS NOT NULL
                     AND v.channel_id = ?1 AND v.user_id = {person})"
     )
+}
+
+/// The same predicate, asked as a question — the event framework's guard
+/// (`events::Guard::SeatedInStartedPlan`) applied at its choke point.
+///
+/// Built out of [`seated_in_a_started_plan`] rather than beside it, so there is exactly
+/// one description of who may write to a plan and a change to it reaches the framework
+/// and every existing write at once. Asking it here does **not** retire the copy inside
+/// each write's own predicate: this decides whether a handler runs at all, and the
+/// write's predicate is what makes the answer race-free when a seat is given up in the
+/// round trip between the two (#175/#179).
+pub(crate) async fn is_seated_in_a_started_plan(
+    conn: &Connection,
+    channel: &str,
+    person: &str,
+) -> anyhow::Result<bool> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT 1 WHERE {}", seated_in_a_started_plan("?2")),
+            libsql::params![channel, person],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// The other half of a vote's precondition since #201: **the plan has not decided**.
@@ -2152,7 +2344,7 @@ pub async fn kitchen_meals(
 /// `source` and `id` are the **placeholders** the caller bound them to; they are `?2`
 /// and `?3` on every statement below, but naming them keeps the fragment honest about
 /// what it reads. The channel is always `?1`.
-fn not_against_the_decision(source: &str, id: &str) -> String {
+pub(crate) fn not_against_the_decision(source: &str, id: &str) -> String {
     format!(
         "NOT EXISTS (SELECT 1 FROM pick_sessions s
                       WHERE s.channel_id = ?1 AND s.decided_at IS NOT NULL
@@ -2522,29 +2714,29 @@ async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Ve
     Ok((participants, out))
 }
 
+/// Plan fixtures shared with the modules that write to a plan from outside this one —
+/// [`crate::timers`] through the event framework, today.
+///
+/// They live here because the states they build are this module's (`create_session`,
+/// `seat_voter`, `begin_session` and the decision are all private), and because a
+/// second module hand-rolling "a started plan" out of raw INSERTs would be building a
+/// state no client can produce — which is exactly the mistake the docstring below
+/// records.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-
-    async fn conn() -> Connection {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().unwrap();
-        crate::db::migrate(&conn).await.unwrap();
-        conn
-    }
-
-    fn row<'a>(rows: &'a [TallyRow], id: &str) -> &'a TallyRow {
-        rows.iter().find(|r| r.id == id).expect("a tally row")
-    }
 
     /// A plan mid-swipe: `who` on the roster and the lobby closed behind them — the
     /// only state a vote or a shopping claim can be written in (#175). Fixtures that
     /// wrote either against a bare `create_session` were building a state no client
     /// can produce, which is exactly what let the gap sit unnoticed.
-    async fn started_plan(conn: &Connection, channel: &str, who: &[&str]) {
+    pub(crate) async fn started_plan(conn: &Connection, channel: &str, who: &[&str]) {
+        lobby(conn, channel, who).await;
+        begin_session(conn, channel).await.unwrap();
+    }
+
+    /// The same plan with its lobby still open — nothing shared may be written yet.
+    pub(crate) async fn lobby(conn: &Connection, channel: &str, who: &[&str]) {
         create_session(
             conn,
             channel,
@@ -2560,7 +2752,38 @@ mod tests {
         for person in who {
             seat_voter(conn, channel, person).await.unwrap();
         }
-        begin_session(conn, channel).await.unwrap();
+    }
+
+    /// Record what the plan decided (#201), the way the deciding vote's write does.
+    pub(crate) async fn decide(conn: &Connection, channel: &str, source: &str, id: &str) {
+        conn.execute(
+            "UPDATE pick_sessions
+                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch()
+              WHERE channel_id = ?1",
+            libsql::params![channel, source, id],
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::started_plan;
+    use super::*;
+
+    async fn conn() -> Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        conn
+    }
+
+    fn row<'a>(rows: &'a [TallyRow], id: &str) -> &'a TallyRow {
+        rows.iter().find(|r| r.id == id).expect("a tally row")
     }
 
     /// Two voters, two recipes: the tally counts yes/no per recipe and the distinct
@@ -4976,6 +5199,84 @@ mod tests {
         assert_eq!(
             remove_voter(&conn, "solo", "alice").await.unwrap(),
             Removed::Ended
+        );
+    }
+
+    /// **The socket's wire, both ways** (#208) — the shape `$lib/pick` and
+    /// `$lib/session-events` mirror.
+    ///
+    /// Pinned here because a rename on either side of this wire is invisible to every
+    /// other gate in the project: Rust compiles, `svelte-check` is happy, the stories
+    /// render, and the only symptom is a timer that never appears on anybody else's
+    /// phone. The two clock frames matter most — nothing renders them, so nothing would
+    /// notice them going quietly wrong.
+    #[test]
+    fn the_event_wire_reads_and_writes_as_the_browser_expects() {
+        // In: an event, carrying the initiator's own clock and no duration.
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"event","at":1700000000000,
+                 "event":{"kind":"timer_start","source":"themealdb","id":"52795","step":7}}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::Event { at, event } => {
+                assert_eq!(at, 1_700_000_000_000);
+                assert_eq!(
+                    event,
+                    crate::events::SessionEvent::TimerStart {
+                        source: "themealdb".into(),
+                        id: "52795".into(),
+                        step: 7
+                    }
+                );
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        // In: the clock measurement's answer, echoing the ping it belongs to.
+        let pong: ClientMsg =
+            serde_json::from_str(r#"{"type":"time_pong","server_ms":10,"client_ms":99}"#).unwrap();
+        match pong {
+            ClientMsg::TimePong {
+                server_ms,
+                client_ms,
+            } => {
+                assert_eq!((server_ms, client_ms), (10, 99));
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        // Out: the ping and the estimate it produces.
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::TimePing { server_ms: 10 }).unwrap(),
+            r#"{"type":"time_ping","server_ms":10}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::TimeSync {
+                offset_ms: -250,
+                rtt_ms: 40
+            })
+            .unwrap(),
+            r#"{"type":"time_sync","offset_ms":-250,"rtt_ms":40}"#
+        );
+
+        // Out: the room's timers, whole, with the deadline the client renders from.
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::Timers {
+                source: "themealdb".into(),
+                id: "52795".into(),
+                timers: vec![crate::timers::RunningTimer {
+                    step: 7,
+                    started_at: 1_700_000_000_000,
+                    deadline: 1_700_000_300_000,
+                    started_by: Voter {
+                        telegram_user_id: "5150".into(),
+                        username: Some("mel".into())
+                    }
+                }]
+            })
+            .unwrap(),
+            r#"{"type":"timers","source":"themealdb","id":"52795","timers":[{"step":7,"started_at":1700000000000,"deadline":1700000300000,"started_by":{"telegram_user_id":"5150","username":"mel"}}]}"#
         );
     }
 
