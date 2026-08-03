@@ -13,7 +13,7 @@ flowchart TD
         ui["UI — TanStack Query · Bits UI · Tailwind<br/>reads the corpus, renders. No search, no ingestion."]
     end
 
-    cron["Schedule · GitHub Actions (free)<br/>daily: POST /api/ingest"]
+    cron["Schedule · GitHub Actions (free)<br/>daily: POST /api/ingest<br/>then POST /api/runs/check"]
 
     subgraph render["Rust · Axum — Render · free, managed"]
         gate["auth gate<br/>session for people · Bearer key for the machine"]
@@ -392,6 +392,31 @@ migration (a credential it refused, SQL it rejected) and needs a person. Even
 then the process stays up — a container that exited is the quietest possible
 signal, and the transient/fatal split reads strings the provider words, so
 exiting on one misfiled error is how the deploy freeze comes back.
+
+### A failed run tells somebody (#183)
+
+Every pipeline invocation opens a row in `runs` and closes it with what it
+actually did — `completed`, `partial` or `failed` (#182). That record is only
+worth having if it is read, so the same daily schedule that triggers ingest also
+POSTs `/api/runs/check`, which reads the table and messages the admin over the
+bot that already logs them in.
+
+It **pulls**, deliberately. A writing path could report its own failure, but the
+rows that matter most are the ones that died _without_ closing themselves — the
+free tier kills a process at 15 minutes idle — and those have no process left to
+send anything. Only something that reads the table can see them.
+
+The thresholds are policy and live in one block in `backend/src/run_alerts.rs`:
+one `failed` speaks, one run still `running` after **6h** speaks, and a single
+`partial` is weather (sources 502 scrapers — that is why `partial` has its own
+word) so it takes five. Each reported run is stamped `reported_at`, which is a
+new fact beside the row rather than an edit to it: what the run says happened is
+never rewritten. The message goes out first and the stamp second, so a Telegram
+outage costs a repeated alarm instead of a lost one.
+
+With no `ADMIN_TELEGRAM_USER_ID` configured the check logs loudly, marks
+nothing, and answers `told: unconfigured` — which fails the scheduled job, so
+GitHub mails the human the bot could not reach. It never takes the service down.
 
 ## Status
 

@@ -4,6 +4,8 @@
   import Panel from "./Panel.svelte";
   import UserName from "./UserName.svelte";
   import { userTint } from "$lib/colour";
+  import { waitingOnOthers } from "$lib/deal";
+  import { calorieHint, formatCalories } from "$lib/nutrition";
   import { formatEstimate } from "$lib/steps";
   import type { Voter } from "$lib/pick";
   import type { PickStatus, RecipeCard } from "$lib/types";
@@ -34,7 +36,8 @@
     status: PickStatus;
     /** The card at the top of this client's deck, if any. */
     card?: RecipeCard;
-    /** How many people are in this pick (distinct voters). */
+    /** How many a recipe has to win over — the plan's roster, not who has swiped so
+     * far (#181). One when you are the only one in the plan. */
     participants?: number;
     /** Who has already said yes to this card. */
     yesVoters?: Voter[];
@@ -53,6 +56,17 @@
      * than a plan with nobody in it — a started plan always holds at least its host.
      */
     roster?: Voter[];
+    /**
+     * Whether this person has answered every recipe the plan can currently deal them
+     * (#202), so an empty deck is **finished** rather than loading.
+     *
+     * A prop of its own rather than another [`PickStatus`], because it is not a phase of
+     * the connection like the others — it is a fact about the deal, and it is true or
+     * false independently of every one of them. As a status it would have had to lose a
+     * race with `reconnecting`, which would put "Finding more recipes…" back in front of
+     * exactly the person this state exists for.
+     */
+    finished?: boolean;
     error?: string;
     /** The shareable link that invites others into this pick. */
     shareUrl?: string;
@@ -68,6 +82,7 @@
     yesVoters = [],
     watching = false,
     roster = [],
+    finished = false,
     error,
     shareUrl,
     copied = false,
@@ -103,6 +118,26 @@
     card?.fully_timed
       ? "Roughly how long it takes, start to finish."
       : "At least this long — some steps here have no time on them, so the cooking runs longer.",
+  );
+
+  /**
+   * "What does this cost me" as a second badge, for the same reason the first one is
+   * here: #162 opens on wanting it *"so a pick can be made with that in view"*, and
+   * this is the only screen where that pick is being made. Everything downstream —
+   * `buy`, `cook` — is after the decision, where the number can no longer change it.
+   *
+   * **Per serving**, which is the only interpretable form: the corpus stores the
+   * whole-recipe total, and dividing it by the servings reading is a job `nutrition.ts`
+   * does once for every surface rather than a stored third column free to drift from
+   * the two it came from. Null — an unread recipe, or one with no servings to divide
+   * by — is *nothing on the card*, never a zero and never the ambiguous total instead.
+   *
+   * The card's own `kcal_complete` picks the mark, exactly as `fully_timed` does above:
+   * `~410 kcal a serving` when every line that stated a number was weighed, and
+   * `410 kcal+ a serving` when one could not be, so the dish can only cost more.
+   */
+  const calories = $derived(
+    card ? formatCalories(card.kcal, card.servings, card.kcal_complete) : null,
   );
 </script>
 
@@ -149,7 +184,22 @@
         </p>
       {/if}
 
-      {#if !card}
+      {#if !card && finished}
+        <!-- An empty deck, for the other reason: everything this plan can deal you has
+             been answered (see the `finished` prop). Waiting on the others is a real
+             state and it says so, rather than hunting for a card that is not coming.
+             Not an error and nothing to do, so it wears the same quiet Notice the other
+             empty states wear, with the roster it is waiting on named under it the way
+             the footer already names it. -->
+        <Notice>
+          <p class="font-display text-stone-900">Nothing left to swipe.</p>
+          <p class="mt-1 text-sm text-stone-600">
+            You've seen every recipe that fits this plan. {waitingOnOthers(
+              participants,
+            )}
+          </p>
+        </Notice>
+      {:else if !card}
         <Notice>
           <p class="font-display text-stone-900">Finding more recipes…</p>
           <p class="mt-1 text-sm text-stone-600">
@@ -174,9 +224,12 @@
               {card.title}
             </h2>
             <!-- Supporting information, not the headline: the meal is still the
-               title and the photo. The estimate sits beside the category/area on
-               the same quiet line, and is absent entirely when unknown. -->
-            {#if meta || estimate}
+               title and the photo. Both estimates sit beside the category/area on
+               the same quiet line, in the order a decision is made in — can I be
+               bothered, then can I afford it — and each is absent entirely when
+               unknown. Two badges, one line, no promotion of either: what the card
+               says loudly is still the dish (#84). -->
+            {#if meta || estimate || calories}
               <p
                 class="mt-1 flex flex-wrap items-center gap-2 text-sm text-stone-500"
               >
@@ -185,6 +238,12 @@
                   <span
                     class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
                     title={estimateHint}>{estimate}</span
+                  >
+                {/if}
+                {#if calories}
+                  <span
+                    class="rounded-pill bg-cream-200 px-2 py-0.5 text-xs text-stone-600"
+                    title={calorieHint(card.kcal_complete)}>{calories}</span
                   >
                 {/if}
               </p>

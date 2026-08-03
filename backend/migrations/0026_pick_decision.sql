@@ -1,0 +1,71 @@
+-- The decision is a server fact (#201): where a plan's pick landed, recorded beside
+-- the roster and the votes that produced it.
+--
+-- ## Numbering: why 26
+--
+-- `db.rs` applies by `MAX(version)`, so a number at or below one already applied on
+-- production never runs at all. Production `_migrations` was at **24** when this was
+-- written, with PR #199 carrying **25** on another branch — so 26 is the next number
+-- above everything, including what was unmerged elsewhere, which is the only choice
+-- safe whichever deploys first. #199 has since landed and 25 is now registered beside
+-- this one, in order and with no hole: taking the top number rather than the next free
+-- one is what meant neither had to be renumbered. 20 remains the burnt hole `db.rs`
+-- records; it is far below the floor and can never be filled.
+--
+-- ## What was missing
+--
+-- #169 froze the roster, #179 put the roster inside the vote's own predicate, and the
+-- browser then read `yes == deciders && no == 0` off the rehydrated tally. So the
+-- *inputs* were server-enforced and the *conclusion* was not: the win condition was
+-- evaluated in each browser and the winner was stashed in `localStorage`. Two things
+-- followed, and both were real.
+--
+-- **Nothing enforced it.** `GET/POST /api/session/{c}/buy` took the recipe from the
+-- query string, so any seated member's client could name any `(source, id)` and the
+-- whole downstream obliged — list built, pantry seeded (#156), ticks accepted. Two
+-- clients could shop two different dinners on one channel and the server held no
+-- opinion about which was the plan's.
+--
+-- **Nothing was durable.** A plan runs for days. A member whose browser was closed
+-- when the last yes landed had nothing to come back to: every client re-derived "what
+-- we decided" from the tally, and the answer lived nowhere. `BuyQuery`'s own docstring
+-- anticipated this migration in as many words.
+--
+-- ## Three columns on the plan, not a table
+--
+-- A plan decides **at most one** recipe, so the fact is one-to-one with the row that
+-- already holds the roster's other frozen facts (`started_at`, `meal_type`,
+-- `max_total_seconds`). A side table would have been a second place to ask "did this
+-- plan decide", and `pick_sessions` is where every other question about a plan is
+-- answered.
+--
+-- **All three move together or not at all**, and one statement is what makes that
+-- true: `session::decide_if_agreed` is the only writer and it sets all three in a
+-- single UPDATE. SQLite cannot add a CHECK with `ALTER TABLE ADD COLUMN`, and
+-- rebuilding this table to gain one would buy less than 0021's CHECK did — there the
+-- discriminant had two independent writers that could each set one half, here there is
+-- exactly one writer and one statement. So the invariant is asserted on the way *out*
+-- instead: `load_decision` refuses a partially-recorded row loudly rather than serving
+-- half a decision, the same ruling `load_lobby` applies to a `meal_type` outside the
+-- vocabulary (a wrong database must not run beautifully).
+--
+-- `decided_at` is the column the guard is written against — `WHERE decided_at IS NULL`
+-- — so it is also the column that says *whether*, not merely *when*. First past the
+-- post: two votes completing at the same instant both run the UPDATE, the predicate is
+-- re-evaluated inside each write, and exactly one of them changes a row. The loser
+-- learns it lost (zero rows changed) and announces nothing, so the room hears one
+-- decision.
+--
+-- ## Nothing is backfilled, deliberately
+--
+-- Every existing plan comes out of this migration undecided, including the ones whose
+-- browsers agreed months ago. There is no honest way to reconstruct those: the tally
+-- says which recipes *currently* satisfy the condition, not which one a client
+-- navigated on, and a plan re-derived into a decision it never made would be a guess
+-- written into the one column that is meant to be a fact. An unrecorded decision reads
+-- as unrecorded, and the buy path treats it exactly that way — it validates against a
+-- decision when there is one and stands aside when there is not, so a shopping list
+-- stashed in a browser before this deployed keeps working.
+ALTER TABLE pick_sessions ADD COLUMN decided_source TEXT;
+ALTER TABLE pick_sessions ADD COLUMN decided_id TEXT;
+ALTER TABLE pick_sessions ADD COLUMN decided_at INTEGER;

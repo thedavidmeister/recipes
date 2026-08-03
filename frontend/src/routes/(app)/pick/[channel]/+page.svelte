@@ -4,6 +4,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getWalk } from "$lib/walk";
+  import { answeredEverything } from "$lib/deal";
   import { ApiError } from "$lib/client";
   import {
     PickClient,
@@ -17,17 +18,18 @@
     setMealType,
     setPlanCap,
     type ConnStatus,
+    type Decided,
     type Lobby,
     type Voter,
   } from "$lib/pick";
   import PlanLobby from "$lib/components/PlanLobby.svelte";
   import { isWatching } from "$lib/roster";
+  import { cardKey, decidingCount } from "$lib/consensus";
   import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
   import type {
     MealAddition,
     MealType,
-    Match,
     PickStatus,
     RecipeCard,
   } from "$lib/types";
@@ -63,8 +65,18 @@
   // it with the socket.
   let yesIds = $state<Record<string, string[]>>({});
   let voterIds = $state<string[]>([]); // distinct voters seen live
-  let serverParticipants = $state(0); // authoritative count from the last tally
-  let deciders = $state(0); // the lobby roster size — who a recipe has to win over
+  // The lobby roster size — who a recipe has to win over — as the server last stated
+  // it, and `undefined` until it has (#181). It comes from the `lobby` frame, which
+  // the server sends on connect and again on every roster change, so this is the
+  // server's count rather than one the client kept; the lobby read on mount seeds the
+  // same number from the same place.
+  //
+  // Since #201 it is what the footer *shows*, not what anything here measures against:
+  // the server holds this roster and evaluates the win condition inside the vote's own
+  // write. The unknown-is-not-one care below is still worth keeping — a caption that
+  // says "1 deciding" to a room of three is still wrong — but a wrong number here can
+  // no longer end a pick.
+  let deciders = $state<number | undefined>();
   let started = $state<boolean | undefined>(); // undefined until the lobby is known
   let lobby = $state<Lobby | undefined>();
   let lobbyError = $state<string | undefined>();
@@ -79,19 +91,15 @@
   const queued = new Set<string>();
   const pulling = new Set<string>();
 
-  // Encode the (source, id) key unambiguously — a bare `${s}:${i}` would collide if
-  // a future source or id ever held a colon, silently merging two recipes' tallies.
-  const key = (s: string, i: string) => JSON.stringify([s, i]);
-
   function rememberCard(card: RecipeCard) {
-    const k = key(card.source, card.id);
+    const k = cardKey(card.source, card.id);
     if (!cardMap[k]) cardMap = { ...cardMap, [k]: card };
   }
 
   // Fetch a card the tally references but this client has not walked to, so a match
   // can render it. Optionally slip it into the deck (peer-injection).
   async function pull(source: string, id: string, toDeck: boolean) {
-    const k = key(source, id);
+    const k = cardKey(source, id);
     if (cardMap[k] && !toDeck) return;
     if (pulling.has(k)) return; // one fetch in flight per key
     pulling.add(k);
@@ -115,6 +123,13 @@
   let refilling = $state(false);
   let loadedOnce = $state(false);
   let dry = $state(false); // nothing fresh right now — back off, don't busy-loop
+  // …except a pick *can* run dry, and since #202 it says so instead of hunting. The
+  // deal skips what this member has already voted on in this plan, so an empty deal
+  // means they have answered everything the plan can currently serve them and are
+  // waiting on the others. Read off every deal rather than latched, so a recipe
+  // becoming dealable mid-plan (the meal-time worker reading one this round can serve)
+  // un-finishes it on the very next refill with nothing to invalidate.
+  let finished = $state(false);
 
   // Recent swipe times (plain — logic only, never rendered) → a live rate.
   const swipeTimes: number[] = [];
@@ -156,11 +171,17 @@
         fetches++
       ) {
         // The channel travels with the walk so the server bounds it to the plan's
-        // time cap (#80) — the cap itself never comes from the client.
+        // time cap (#80) — the cap itself never comes from the client. It is also how
+        // the server knows whose round this is, and so what this member has already
+        // answered in it (#202); the id comes from the session, never from here.
         const stops = await getWalk(30, channel);
+        // What the *deal* held, not what was new to this deck — a walk of cards this
+        // client already queued is a client still holding cards, and says nothing about
+        // whether the member has answered them.
+        finished = answeredEverything(stops.length);
         const fresh: RecipeCard[] = [];
         for (const s of stops) {
-          const k = key(s.recipe.source, s.recipe.id);
+          const k = cardKey(s.recipe.source, s.recipe.id);
           if (queued.has(k)) continue;
           queued.add(k);
           rememberCard(s.recipe);
@@ -173,6 +194,10 @@
       loadedOnce = true;
       if (!added) backoff();
     } catch (e) {
+      // `finished` is deliberately left alone: a deal that failed said nothing about
+      // whether anything is left, so the last one that answered stands until another
+      // does. Clearing it here would flash "Finding more recipes…" at the one person
+      // for whom that is untrue.
       if (e instanceof ApiError && e.status === 401) {
         // A lapsed session — drop back to login, the only real recovery.
         queryClient.invalidateQueries({ queryKey: ["session"] });
@@ -184,9 +209,25 @@
     }
   }
 
-  // The pick's decision: the one recipe everyone agreed on (consensus needs 2+).
-  // Sticky — once decided, the pick is done and the swipe gives way to the result.
-  let decided = $state<Match | undefined>();
+  /**
+   * The pick's decision, **as the server recorded it** (#201).
+   *
+   * This page used to work the win condition out for itself — `yes === deciders && no
+   * === 0` over the rehydrated tally — and then stash the winner in `localStorage`. It
+   * does not any more, and the computation is gone rather than kept as a preview: two
+   * evaluators of one win condition are two answers to "what did we pick", and the one
+   * that holds the roster and the votes is the server. What arrives here is a fact
+   * (`ServerMsg::Decided`, or the same record on the lobby read), and this page's job
+   * is to act on it.
+   *
+   * That is also what makes it reach a client that was not watching. A member whose
+   * browser was closed when the last yes landed used to have nothing to come back to,
+   * because "what we decided" lived only in the browsers that were open. Now the socket
+   * hands them the record on connect, and this moves them the same as everybody else.
+   *
+   * Sticky, as it always was: the plan decided once, and a decision has no undo.
+   */
+  let decided = $state<Decided | undefined>();
 
   // Prefetch before the deck runs low, sized to the swiper — the buffer stays ahead
   // of the swiping so the next card is always ready. Stops once the pick is decided.
@@ -222,6 +263,11 @@
           : await getLobby(channel);
       deciders = lobby.voters.length;
       started = lobby.started;
+      // The lobby carries what the plan decided (#201), so a page that has read it
+      // knows the pick is over without waiting for its socket. Same record the
+      // `decided` frame carries, off the same row, so the two cannot disagree —
+      // whichever arrives first moves this client and the other is a no-op.
+      decided = lobby.decided ?? decided;
       lobbyError = undefined;
     } catch (e) {
       // Already started and not on the roster: the join is refused, the plain read is
@@ -232,6 +278,7 @@
         lobby = await getLobby(channel);
         deciders = lobby.voters.length;
         started = lobby.started;
+        decided = lobby.decided ?? decided;
       } catch {
         lobbyError =
           e instanceof Error ? e.message : "Couldn't open this meal plan.";
@@ -367,13 +414,25 @@
           client?.stop();
         }
       },
-      onTally: (participants, votes) => {
-        serverParticipants = participants;
+      // The plan decided (#201). The only thing that ends a pick, and it is a fact
+      // rather than a conclusion this client reached: it arrives when the deciding
+      // vote lands, and again on every connect, so a member who was offline for the
+      // last yes is *told* rather than left to re-derive. Set once — the record is
+      // immutable, so a re-send on a reconnect names the same recipe.
+      onDecided: (d) => {
+        decided ??= d;
+      },
+      // A tally's own count is how many people have swiped **at all**, not how many
+      // are deciding, so it was never what consensus was measured against — the
+      // roster is (#181), and since #201 neither of them is measured here at all.
+      // Ignored on purpose, rather than kept in a variable that would only ever be
+      // the wrong number to reach for.
+      onTally: (_participants, votes) => {
         const y: Record<string, number> = {};
         const n: Record<string, number> = {};
         const who: Record<string, string[]> = {};
         for (const v of votes) {
-          const k = key(v.source, v.id);
+          const k = cardKey(v.source, v.id);
           y[k] = v.yes;
           n[k] = v.no;
           who[k] = v.yes_voters;
@@ -385,7 +444,7 @@
       },
       onVote: (voter, source, id, vote) => {
         if (!voterIds.includes(voter)) voterIds = [...voterIds, voter];
-        const k = key(source, id);
+        const k = cardKey(source, id);
         if (vote) yes = { ...yes, [k]: (yes[k] ?? 0) + 1 };
         else no = { ...no, [k]: (no[k] ?? 0) + 1 };
         // A vote is a current call, not an append (`record_vote`), so a no takes
@@ -424,7 +483,7 @@
    * still shows, by id, because a vote is never withheld over a missing handle.
    */
   const yesVoters = $derived<Voter[]>(
-    (current ? (yesIds[key(current.source, current.id)] ?? []) : []).map(
+    (current ? (yesIds[cardKey(current.source, current.id)] ?? []) : []).map(
       (id) =>
         lobby?.voters.find((v) => v.telegram_user_id === id) ?? {
           telegram_user_id: id,
@@ -433,44 +492,66 @@
     ),
   );
   /**
-   * How many people a recipe has to win over: the lobby roster.
+   * How many people a recipe has to win over: the lobby roster, and `undefined` until
+   * the server has stated it.
    *
    * This is the number the lobby exists to establish. Inferring it was the old bug in
-   * both directions — counting who had voted meant a solo swiper could never reach
-   * agreement with themselves, and counting who was connected meant a reload looked
-   * like somebody leaving. You are deciding because you joined, and you keep deciding
-   * while you make a cup of tea.
+   * every direction (#181) — counting who had voted meant one person's first yes was
+   * already unanimous, and counting who was connected meant a reload looked like
+   * somebody leaving. You are deciding because you joined, and you keep deciding while
+   * you make a cup of tea.
    *
-   * The floor is one: your yes is unanimous when you are the only one in the plan.
+   * **Display only, since #201.** The count this page shows and the count a pick is
+   * decided against were the same number and are not any more: the server holds the
+   * roster and evaluates the win condition inside the vote's own write. So a wrong
+   * number here is now a wrong caption rather than a group sent shopping for a recipe
+   * it never agreed on — which is why `agreed` is gone from this page and
+   * `decidingCount` is not: the floor-of-one and the unknown-is-not-one rule still
+   * decide what the footer says, and both still deserve `$lib/consensus`'s tests.
    */
-  const participants = $derived(Math.max(deciders, 1));
+  const deciding = $derived(decidingCount(deciders));
 
-  // Consensus: the recipes everyone deciding said yes to, and nobody said no to.
-  const consensus = $derived<Match[]>(
-    Object.keys(yes)
-      .filter((k) => (yes[k] ?? 0) === participants && (no[k] ?? 0) === 0)
-      .map((k) => {
-        const card = cardMap[k];
-        return card ? { card, yes: yes[k] ?? 0 } : null;
-      })
-      .filter((m): m is Match => m !== null),
-  );
-
-  // A pick decides on the first recipe to reach consensus (consensus means one).
-  // Stash it and go straight to `buy` — the ingredients for what everyone agreed on.
+  /**
+   * Move everyone the moment the plan decides (#201) — including the person whose
+   * browser was closed when it happened.
+   *
+   * The one thing that ends a pick, and it is the server's record: either the live
+   * `decided` frame, or the same record on the lobby read for a page that has not
+   * finished rehydrating. **There is no client-side win condition left to disagree with
+   * it** — #197's `agreed` was the last one, and it is not called here any more, because
+   * two evaluators of one condition are two answers to "what did we pick" and the
+   * server is the one holding the roster and the votes.
+   *
+   * Both sources name the same recipe, so whichever lands first moves this client and
+   * `leaving` makes the other a no-op — a plain `let`, like `queued` and `pulling`,
+   * because it dedupes and is never rendered, and a `$state` here would put the effect
+   * back into its own dependencies.
+   *
+   * The card may be one this client never walked to, which is the whole offline case,
+   * so it is fetched if it is not already held. A title that cannot be fetched is not
+   * worth blocking on: `getBuyList` reads the recipe straight from Turso and only falls
+   * back to the stashed title when the corpus has no such row, in which case there is
+   * no shopping list to show either.
+   */
+  let leaving = false;
   $effect(() => {
-    if (!decided && consensus.length) {
-      decided = consensus[0];
+    const d = decided;
+    if (!d || leaving) return;
+    leaving = true;
+    void (async () => {
+      const k = cardKey(d.source, d.id);
+      if (!cardMap[k]) await pull(d.source, d.id, false);
       stashConsensus({
-        source: decided.card.source,
-        id: decided.card.id,
-        title: decided.card.title,
+        source: d.source,
+        id: d.id,
+        title: cardMap[k]?.title ?? "",
         // The meal travels with the decision, so `buy`'s checklist lands in the
-        // session the recipe was agreed in rather than in this browser (#131).
+        // session the recipe was agreed in rather than in this browser (#131) — and
+        // is now the session that *holds* the decision the list is for.
         channel,
       });
-      void goto("/buy");
-    }
+      await goto("/buy");
+    })();
   });
 
   const status = $derived<PickStatus>(
@@ -493,7 +574,7 @@
     // which is a change nothing undoes.
     if (watching) return;
     recordSwipe();
-    queued.add(key(c.source, c.id));
+    queued.add(cardKey(c.source, c.id));
     client?.vote(c.source, c.id, y); // the echoed vote updates the tally
     deck = deck.slice(1);
   }
@@ -509,13 +590,17 @@
 </script>
 
 {#if started === true}
+  <!-- The roster and `started` always come off the same lobby read, so a swipe view
+       is never rendered without a count to show — `Pick`'s own default covers the
+       case the types cannot rule out. -->
   <Pick
     {status}
     card={current}
-    {participants}
+    participants={deciding}
     {yesVoters}
     {watching}
     roster={lobby?.voters ?? []}
+    {finished}
     shareUrl={page.url.href}
     {copied}
     onVote={vote}

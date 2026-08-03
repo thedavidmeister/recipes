@@ -83,8 +83,17 @@ enum ClientMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
     /// The full tally, sent on join so a (re)connecting client rehydrates before
-    /// listening. `participants` is the distinct-voter count — the client needs it
-    /// to evaluate the consensus win condition (everyone said yes).
+    /// listening.
+    ///
+    /// `participants` is the distinct-voter count — how many people have swiped at
+    /// all. It is **not** the number a recipe has to win over, and consensus is not
+    /// evaluated against it (#181): one person's first yes arrives here as
+    /// `participants: 1, yes: 1, no: 0`, which is unanimous by this count alone.
+    ///
+    /// Since #201 nothing on either side of the wire decides anything against *either*
+    /// count. The win condition is evaluated here, against the roster, inside the
+    /// vote's own write, and its answer arrives as [`ServerMsg::Decided`]. This is the
+    /// running score, for display.
     Tally {
         participants: i64,
         votes: Vec<TallyRow>,
@@ -134,6 +143,30 @@ enum ServerMsg {
         /// leaver's own second tab, someone watching a lobby they were never
         /// seated into — would otherwise sit on a plan that no longer exists.
         ended: bool,
+    },
+    /// The plan decided (#201): every decider said yes to this recipe, nobody said
+    /// no, and the server has **recorded** it on `pick_sessions`.
+    ///
+    /// The one frame that ends a pick. It is not an announcement of something the
+    /// clients already worked out — since #201 they do not work it out — so it is
+    /// sent twice over, and both sends are the same row read the same way:
+    ///
+    /// - to the room the instant the deciding vote lands, so everyone moves together;
+    /// - to every socket **on connect** (see [`socket_loop`]), which is the durability
+    ///   half of #201. A member whose browser was closed when the last yes arrived
+    ///   opens the plan days later and is *told* what was decided, rather than
+    ///   re-deriving it from a tally that merely still happens to satisfy the
+    ///   condition.
+    ///
+    /// It goes to the **room**, not to the roster, so a watcher (#180) learns it the
+    /// way everyone else does — nobody is left holding a plan whose deck is over.
+    Decided {
+        source: String,
+        id: String,
+        /// When it was recorded, from the database's clock — the same column the
+        /// `WHERE decided_at IS NULL` guard is written against, so what a client is
+        /// shown is the write that *made* this the decision.
+        decided_at: i64,
     },
 }
 
@@ -394,6 +427,24 @@ pub struct BuyCheck {
     pub pantry: Option<String>,
 }
 
+/// What a plan decided (#201): the one recipe its roster agreed on, and when the
+/// server recorded that.
+///
+/// A **record**, not a computation. The win condition is evaluated inside the write
+/// that stores this (see [`decide_if_agreed`]), so the presence of this value is the
+/// decision — nothing downstream re-checks the tally, and nothing can recompute the
+/// answer away if the tally later changes. That is the property #201 exists for: a
+/// plan runs for days, and "what we decided" has to be somewhere rather than being
+/// re-derived by whichever browser happens to be open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecidedRecipe {
+    pub source: String,
+    pub id: String,
+    /// Unix seconds, from the database's clock. The column the first-past-the-post
+    /// guard is written against, so it says *whether* as much as *when*.
+    pub decided_at: i64,
+}
+
 /// A meal's shopping checklist for one recipe (#131) — every line already got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuyList {
@@ -430,6 +481,14 @@ pub struct LobbyView {
     /// of them without a link (#72). Empty when the plan has no kitchen, or once
     /// everyone in the kitchen is already in.
     pub candidates: Vec<Voter>,
+    /// What this plan decided (#201), or `None` while its deck is still running.
+    ///
+    /// Carried here as well as on [`ServerMsg::Decided`] because a lobby read that
+    /// cannot say a plan is over is a silent state: this is the one HTTP answer that
+    /// describes the whole plan, and it is what the page has already read on mount
+    /// before its socket has finished rehydrating. Both are the same three columns of
+    /// the same row, so there is one answer to "what did we pick", not two.
+    pub decided: Option<DecidedRecipe>,
 }
 
 /// `GET /api/session/{channel}` — the lobby: the roster, and whether it has started.
@@ -832,17 +891,54 @@ pub async fn set_cap(
 
 // ---- buy checklist (#131) --------------------------------------------------
 
-/// Which recipe's checklist is being read — the plan's consensus recipe.
+/// Which recipe's checklist is being asked about — the plan's decided recipe.
 ///
-/// The recipe travels in the query rather than being looked up from the session
-/// because the *decision* does not live on the session yet (the browser stashes
-/// it), and inventing a second home for it here would put two answers to "what
-/// did we pick" in the codebase. The checklist is keyed by recipe either way, so
-/// this stays correct when the decision does move server-side.
+/// **It is no longer taken on trust (#201).** The recipe still travels in the query,
+/// because the checklist is keyed by it and a re-decided plan must not inherit a stale
+/// list — but the plan now *holds* its decision ([`DecidedRecipe`]), so what a client
+/// names is checked against it and refused when the two disagree
+/// ([`decided_recipe_or_refuse`]). Before, this was the whole story: any seated
+/// member's client could name any `(source, id)` and the server obliged — built the
+/// list, seeded the pantry, took the ticks — so two clients could shop two different
+/// dinners on one channel and nothing had an opinion about which was the meal.
+///
+/// A plan with **no** recorded decision still admits any recipe, which is the only
+/// honest reading of a column that was not backfilled: migration 0026 could not
+/// reconstruct decisions that were only ever made in browsers, so a list stashed before
+/// this deployed keeps working rather than being told it never happened.
 #[derive(Debug, Deserialize)]
 pub struct BuyQuery {
     pub source: String,
     pub id: String,
+}
+
+/// Refuse a shopping request that names a recipe this plan decided against (#201).
+///
+/// The **honest 4xx**: it names what the plan actually decided, because the caller's
+/// next question is always "then what did we pick", and a bare "no" would send someone
+/// hunting a fault in their own client. A client bug rather than a permissions problem,
+/// so 400 and not 403 — the person is allowed here, the recipe is not.
+///
+/// Read *and* said here so the refusal has a sentence; repeated inside the writes'
+/// own predicates ([`not_against_the_decision`]) so it is also true, which is the same
+/// division of labour [`set_buy_check`] already has for the roster.
+async fn decided_recipe_or_refuse(
+    state: &AppState,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let decided = state
+        .with_db(move |db| async move { load_decision(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    match decided {
+        Some(d) if d.source != source || d.id != id => Err(AppError::BadRequest(format!(
+            "this meal plan decided on {}/{}, not {source}/{id}",
+            d.source, d.id
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// A tick or an untick on one line of the shopping list.
@@ -864,7 +960,14 @@ pub struct BuyCheckBody {
 ///
 /// This is also where a list is **built**, so it is where the pantry seed happens
 /// (#156) — see [`ensure_buy_seed`] for why a read is the right moment and why it is
-/// safe here despite not being roster-gated.
+/// safe here despite not being roster-gated. #170's reasoning survives #201 intact and
+/// gets stronger: the seed still depends on nothing about the caller, and the recipe it
+/// runs for is now a fact the plan holds rather than a string the caller supplied.
+///
+/// **The recipe is checked before anything is built** ([`decided_recipe_or_refuse`]).
+/// A list for a recipe the plan decided against is not a list anyone should be handed,
+/// and building one would also read a kitchen's pantry against a meal nobody agreed to
+/// cook.
 pub async fn buy_list(
     State(state): State<AppState>,
     Extension(_user): Extension<CurrentUser>,
@@ -880,6 +983,7 @@ pub async fn buy_list(
     {
         return Err(AppError::BadRequest(format!("unknown session: {channel}")));
     }
+    decided_recipe_or_refuse(&state, channel, &q.source, &q.id).await?;
     ensure_buy_seed(&state, channel, &q.source, &q.id).await?;
     let checks = state
         .with_db(move |db| async move { load_buy_checks(&db, channel, &q.source, &q.id).await })
@@ -948,6 +1052,9 @@ pub async fn set_buy_check(
             "this meal plan has not started yet".into(),
         ));
     }
+    // And it belongs to the meal this plan *decided* (#201), which the plan itself now
+    // says. Same shape again: said here, true in the write's predicate.
+    decided_recipe_or_refuse(&state, channel, &body.source, &body.id).await?;
 
     // A tick can be the first thing that ever touches this list (a peer opened `buy`
     // and tapped before this client read it), so the seed runs here too — before the
@@ -1121,6 +1228,29 @@ async fn socket_loop(
                 return;
             }
         }
+
+        // And what the plan decided, if it has (#201) — the durability half. This is
+        // the frame a client is *told* the answer by, and it has to arrive here as
+        // well as live, because the person it matters most to is the one whose browser
+        // was closed when the last yes landed. They are not re-deriving it from the
+        // tally above; they are being handed the record, which stands whatever that
+        // tally has since become. It goes to whoever opened the socket, so a watcher
+        // (#180) is told too.
+        //
+        // Last of the three on purpose: a client that reads its frames in order has
+        // the roster and the votes in hand before it is told the deck is over, so the
+        // screen it lands on is never a decision against an empty tally.
+        if let Some(d) = view.decided {
+            if let Ok(txt) = serde_json::to_string(&ServerMsg::Decided {
+                source: d.source,
+                id: d.id,
+                decided_at: d.decided_at,
+            }) {
+                if sink.send(Message::Text(txt.into())).await.is_err() {
+                    return;
+                }
+            }
+        }
     }
 
     // Render's free tier closes a WS idle for 5 min; a ping well inside that keeps
@@ -1163,12 +1293,33 @@ async fn socket_loop(
                         {
                             if let Ok(txt) = serde_json::to_string(&ServerMsg::Vote {
                                 voter: voter.clone(),
-                                source,
-                                id,
+                                source: source.clone(),
+                                id: id.clone(),
                                 vote,
                             }) {
                                 // Err only means no receivers right now — harmless.
                                 let _ = tx.send(txt);
+                            }
+                            // The win condition is evaluated here, on the vote that
+                            // might have met it, and nowhere else (#201) — no poll, no
+                            // sweep, and no browser. `decide_if_agreed` answers only
+                            // for the call that *recorded* the decision, so two votes
+                            // completing at once produce exactly one frame: the loser
+                            // of that race changed no row and says nothing. An `Err`
+                            // is a database fault with nowhere to report it, and it
+                            // leaves the plan undecided rather than announcing a
+                            // decision that was never written — the same rule the vote
+                            // above follows, for the same reason.
+                            if let Ok(Some(d)) =
+                                decide_if_agreed(&db, &channel, &source, &id).await
+                            {
+                                if let Ok(txt) = serde_json::to_string(&ServerMsg::Decided {
+                                    source: d.source,
+                                    id: d.id,
+                                    decided_at: d.decided_at,
+                                }) {
+                                    let _ = tx.send(txt);
+                                }
                             }
                         }
                     }
@@ -1363,7 +1514,8 @@ async fn begin_session(conn: &Connection, channel: &str) -> anyhow::Result<()> {
 async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<LobbyView>> {
     let mut rows = conn
         .query(
-            "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds
+            "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds,
+                    decided_source, decided_id, decided_at
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1387,6 +1539,9 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         anyhow::anyhow!("pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}")
     })?;
     let max_total_seconds: Option<i64> = row.get(5)?;
+    // Read from this row rather than by a second query, so the lobby's `started` and
+    // its `decided` can never describe two different instants of the same plan.
+    let decided = decision_of(row.get(6)?, row.get(7)?, row.get(8)?)?;
 
     let mut vrows = conn
         .query(
@@ -1435,6 +1590,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         max_total_seconds,
         voters,
         candidates,
+        decided,
     }))
 }
 
@@ -1653,15 +1809,42 @@ fn seated_in_a_started_plan(person: &str) -> String {
     )
 }
 
+/// The other half of a vote's precondition since #201: **the plan has not decided**.
+///
+/// A decided plan's deck is over, so a swipe arriving after it is refused rather than
+/// counted — the honest answer, because the alternative is a tally that keeps moving
+/// under a fact that cannot. It is written here rather than folded into
+/// [`seated_in_a_started_plan`] because that fragment is shared with the shopping
+/// writes, and shopping is what happens *after* the decision: one predicate covering
+/// both would make the decision close the shop it opened.
+///
+/// This one **is** a race, unlike the start. `decided_at` goes NULL → set exactly once
+/// and never back, so a socket that read "undecided" a round trip ago may be writing
+/// into a plan that has since decided; the guard has to be inside the insert, which is
+/// the #169/#179 discipline said for the last state a vote can arrive too late for.
+/// The channel is always `?1`, so this fragment takes no argument.
+fn in_an_undecided_plan() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM pick_sessions s
+                  WHERE s.channel_id = ?1 AND s.decided_at IS NOT NULL)"
+}
+
 /// Record (or update) a voter's call on a recipe, reporting whether it was written.
 /// Re-voting overwrites — a swipe is a current decision, not an append.
 ///
-/// Only a decider in a started plan may write one, and that lives in the insert's own
-/// predicate ([`seated_in_a_started_plan`]). A vote is not a private note: the tally
-/// is read as `yes` against the *roster*, so a yes from outside the roster completes
-/// a consensus the people deciding never reached. Nothing before this checked — the
-/// socket upgrade asks only that the channel exist — so a signed-in stranger holding
-/// the invite link voted into somebody else's dinner.
+/// Only a decider in a started, **undecided** plan may write one, and both halves live
+/// in the insert's own predicate ([`seated_in_a_started_plan`],
+/// [`in_an_undecided_plan`]). A vote is not a private note: the tally is read as `yes`
+/// against the *roster*, so a yes from outside the roster completes a consensus the
+/// people deciding never reached. Nothing before this checked — the socket upgrade asks
+/// only that the channel exist — so a signed-in stranger holding the invite link voted
+/// into somebody else's dinner.
+///
+/// A refused vote is silent, and that is the same silence #179/#180 already described:
+/// a vote is a socket frame the server never answers, so there is nothing to report a
+/// refusal *through*. What is not silent is the reason — a decided plan has already
+/// broadcast [`ServerMsg::Decided`] to the whole room and re-sends it on every connect,
+/// so a client swiping into a decided plan is a client that has been told, or is about
+/// to be, by the frame that ends its deck.
 async fn record_vote(
     conn: &Connection,
     channel: &str,
@@ -1674,16 +1857,171 @@ async fn record_vote(
         .execute(
             &format!(
                 "INSERT INTO votes (channel_id, source, id, voter_id, vote)
-                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE {}
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE {} AND {}
                  ON CONFLICT(channel_id, source, id, voter_id) DO UPDATE SET
                     vote = excluded.vote,
                     created_at = unixepoch()",
-                seated_in_a_started_plan("?4")
+                seated_in_a_started_plan("?4"),
+                in_an_undecided_plan()
             ),
             libsql::params![channel, source, id, voter, vote as i64],
         )
         .await?;
     Ok(written > 0)
+}
+
+// ---- the decision (#201) ---------------------------------------------------
+
+/// Evaluate the pick's win condition for one recipe and, if it is met, **record** the
+/// decision — in a single statement, so the condition is the write's own predicate.
+///
+/// Returns the decision when *this* call is the one that recorded it, and `None`
+/// otherwise: not met, or somebody else got there first. So the caller does not have
+/// to ask a second question to know whether to announce anything, and exactly one
+/// [`ServerMsg::Decided`] is ever broadcast per plan.
+///
+/// **The condition, and why each clause is asked separately.**
+///
+/// - `started_at IS NOT NULL` — a lobby decides nothing. No vote can exist before the
+///   start ([`seated_in_a_started_plan`]) so this is already true; it is asked anyway,
+///   for the reason #175 gives: a guard that holds only while a *different* guard holds
+///   is the kind that quietly stops holding when the other one moves.
+/// - `decided_at IS NULL` — **first past the post.** Two votes completing at the same
+///   instant both run this UPDATE; the predicate is re-evaluated inside each write, so
+///   exactly one changes a row. The loser sees zero rows and announces nothing. This is
+///   the clause that makes the record immutable: a decision, once made, is never
+///   overwritten by a later one, however the tally moves afterwards.
+/// - the roster is not empty — arithmetic, not paranoia. With no deciders the count
+///   equality below reads `0 = 0` and every recipe with no votes would be "agreed".
+///   A plan always holds at least its host (#96 deletes an emptied one), so this can
+///   only fire on a plan that no longer exists.
+/// - no decider said **no** — one veto is enough, which is what "everyone likes it"
+///   means. **Redundant today, and kept**: `votes` is keyed
+///   `(channel_id, source, id, voter_id)`, so a person holds one row per recipe and is
+///   either a yes or a no on it, never both. The count below can therefore only reach
+///   the roster size when every decider's single row is a yes — which already means
+///   nobody said no. Dropping this clause changes no answer that any state of the two
+///   tables can produce (an *equivalent* mutation, not an untested one), and it stays
+///   because the rule has two halves and the SQL should say both: the second half would
+///   otherwise be true only by an argument about a primary key two migrations away, and
+///   a `votes` that ever became append-only would silently start deciding over vetoes.
+///   `a_persons_vote_is_one_row_so_a_yes_and_a_no_cannot_coexist` pins the key the
+///   redundancy rests on.
+/// - the distinct deciders who said **yes** number exactly the roster.
+///
+/// **Both counts are taken over the roster**, joined to `pick_voters` rather than read
+/// off `votes` alone. Since #179 nothing else can be in that table, so the join changes
+/// no answer today — but the ruling is that the roster is the deciding body, and saying
+/// that once in each direction is what stops a row predating #179 either completing a
+/// consensus nobody reached or vetoing one everybody did. A voter has at most one row
+/// per recipe (the `votes` primary key), so counting rows *is* counting people.
+async fn decide_if_agreed(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<Option<DecidedRecipe>> {
+    let mut rows = conn
+        .query(
+            "UPDATE pick_sessions
+                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch()
+              WHERE channel_id = ?1
+                AND started_at IS NOT NULL
+                AND decided_at IS NULL
+                AND EXISTS (SELECT 1 FROM pick_voters r WHERE r.channel_id = ?1)
+                AND NOT EXISTS (
+                      SELECT 1 FROM votes v
+                        JOIN pick_voters r
+                          ON r.channel_id = v.channel_id AND r.user_id = v.voter_id
+                       WHERE v.channel_id = ?1 AND v.source = ?2 AND v.id = ?3
+                         AND v.vote = 0)
+                AND (SELECT COUNT(*) FROM votes v
+                       JOIN pick_voters r
+                         ON r.channel_id = v.channel_id AND r.user_id = v.voter_id
+                      WHERE v.channel_id = ?1 AND v.source = ?2 AND v.id = ?3
+                        AND v.vote = 1)
+                  = (SELECT COUNT(*) FROM pick_voters r WHERE r.channel_id = ?1)
+              RETURNING decided_source, decided_id, decided_at",
+            libsql::params![channel, source, id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    decision_of(row.get(0)?, row.get(1)?, row.get(2)?)
+}
+
+/// The three decision columns of one `pick_sessions` row, read as one fact.
+///
+/// All three are written by one statement ([`decide_if_agreed`]) or by none, so the
+/// only two shapes that exist are all-set and all-null. Anything else is corruption and
+/// is refused **loudly**, the same ruling [`load_lobby`] applies to a `meal_type`
+/// outside the vocabulary: a plan is about to be told what it decided, and half a
+/// decision — a recipe with no time on it, or a time with no recipe — is exactly the
+/// kind of wrong database that must not run beautifully. SQLite cannot add a CHECK with
+/// `ALTER TABLE ADD COLUMN`, so this is where the invariant is asserted instead (see
+/// migration 0026 for why the table was not rebuilt to gain one).
+fn decision_of(
+    source: Option<String>,
+    id: Option<String>,
+    decided_at: Option<i64>,
+) -> anyhow::Result<Option<DecidedRecipe>> {
+    match (source, id, decided_at) {
+        (Some(source), Some(id), Some(decided_at)) => Ok(Some(DecidedRecipe {
+            source,
+            id,
+            decided_at,
+        })),
+        (None, None, None) => Ok(None),
+        (source, id, decided_at) => Err(anyhow::anyhow!(
+            "pick_sessions holds half a decision: \
+             decided_source={source:?} decided_id={id:?} decided_at={decided_at:?}"
+        )),
+    }
+}
+
+/// What a plan decided (#201), or `None` if it has not — and `None` too for a channel
+/// that does not exist, which every caller has already established by the time it asks.
+async fn load_decision(conn: &Connection, channel: &str) -> anyhow::Result<Option<DecidedRecipe>> {
+    let mut rows = conn
+        .query(
+            "SELECT decided_source, decided_id, decided_at
+             FROM pick_sessions WHERE channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    decision_of(row.get(0)?, row.get(1)?, row.get(2)?)
+}
+
+/// The predicate every write on a shopping list carries since #201: **this recipe is
+/// not one the plan decided against**.
+///
+/// Phrased as "no recorded decision contradicts it" rather than "the decision names
+/// it", and the difference is the whole transition story. A plan that has decided
+/// admits writes for exactly one recipe. A plan that has not decided admits them for
+/// any, which is what the handlers did before this and is what keeps a shopping list
+/// stashed in a browser before this deployed working — migration 0026 backfills nothing
+/// and could not honestly have.
+///
+/// It is in the write and not only in the handler's read because `decided_at` goes
+/// NULL → set: a caller that read "undecided" can have the decision land underneath it,
+/// and the loser of that race must write nothing rather than build a list for a recipe
+/// the plan turned down. The handler still asks, because that is what gives the refusal
+/// a sentence — the same division of labour [`set_buy_check`] already has between its
+/// roster read and [`seated_in_a_started_plan`].
+///
+/// `source` and `id` are the **placeholders** the caller bound them to; they are `?2`
+/// and `?3` on every statement below, but naming them keeps the fragment honest about
+/// what it reads. The channel is always `?1`.
+fn not_against_the_decision(source: &str, id: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM pick_sessions s
+                      WHERE s.channel_id = ?1 AND s.decided_at IS NOT NULL
+                        AND (s.decided_source <> {source} OR s.decided_id <> {id}))"
+    )
 }
 
 /// Claim one line of a meal's shopping list for `user` (#131).
@@ -1702,7 +2040,9 @@ async fn record_vote(
 /// ([`seated_in_a_started_plan`]), not only in [`set_buy_check`]'s preceding read:
 /// the roster this is judged against is the one that exists when the write lands,
 /// exactly as [`remove_voter`]'s seat delete is judged against the start that exists
-/// when *it* lands.
+/// when *it* lands. Since #201 the **recipe** is judged there too
+/// ([`not_against_the_decision`]): a shopping list belongs to the meal the plan
+/// decided, and the query string is no longer the only thing that says which that is.
 async fn tick_item(
     conn: &Connection,
     channel: &str,
@@ -1715,12 +2055,13 @@ async fn tick_item(
         &format!(
             "INSERT INTO buy_checks
                 (channel_id, source, id, ingredient_index, user_id, pantry_item)
-             SELECT ?1, ?2, ?3, ?4, ?5, NULL WHERE {}
+             SELECT ?1, ?2, ?3, ?4, ?5, NULL WHERE {} AND {}
              ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
                 user_id = excluded.user_id,
                 pantry_item = NULL,
                 created_at = unixepoch()",
-            seated_in_a_started_plan("?5")
+            seated_in_a_started_plan("?5"),
+            not_against_the_decision("?2", "?3")
         ),
         libsql::params![channel, source, id, index, user],
     )
@@ -1736,10 +2077,12 @@ async fn tick_item(
 /// jar was empty, and saying so must not be a special case. The seed marker in
 /// `buy_seeds` is what stops the pantry putting it straight back.
 ///
-/// Clearing is a write on a shared list, so it carries the same predicate the tick
-/// does ([`seated_in_a_started_plan`]) and therefore needs to know *who* is asking,
-/// even though the row it removes records somebody else. Anyone deciding this meal
-/// may put anything back; nobody else may.
+/// Clearing is a write on a shared list, so it carries the same predicates the tick
+/// does ([`seated_in_a_started_plan`], [`not_against_the_decision`]) and therefore
+/// needs to know *who* is asking, even though the row it removes records somebody
+/// else. Anyone deciding this meal may put anything back; nobody else may. A guarded
+/// claim with an unguarded release is not guarded, and that holds for the recipe as
+/// much as for the person.
 async fn untick_item(
     conn: &Connection,
     channel: &str,
@@ -1752,8 +2095,9 @@ async fn untick_item(
         &format!(
             "DELETE FROM buy_checks
               WHERE channel_id = ?1 AND source = ?2 AND id = ?3 AND ingredient_index = ?4
-                AND {}",
-            seated_in_a_started_plan("?5")
+                AND {} AND {}",
+            seated_in_a_started_plan("?5"),
+            not_against_the_decision("?2", "?3")
         ),
         libsql::params![channel, source, id, index, user],
     )
@@ -1841,6 +2185,19 @@ async fn plan_pantry(
 ///
 /// `DO NOTHING` on conflict so a person who ticked a line in the same breath keeps it:
 /// the seed never overwrites a claim.
+///
+/// **Both statements carry [`not_against_the_decision`] since #201**, and that does not
+/// undo the reasoning that leaves this ungated by [`seated_in_a_started_plan`]. A
+/// pre-tick is still nobody's claim and still depends on nothing about the caller; what
+/// this predicate asks about is the *plan and the recipe*, which is precisely what the
+/// seed is a function of. The one thing a stranger holding the channel id could
+/// previously make happen — a list, and a pantry read, for a recipe the plan never
+/// agreed on — is the enforcement gap #201 names, so it goes in the write rather than
+/// resting on the handlers that now ask the same question a round trip earlier.
+///
+/// If the decision lands between the marker and the pre-ticks, the marker stands and
+/// the pre-ticks are refused: **under**-seeded, the safe direction this whole feature
+/// leans in, and for a list nothing will ever read anyway.
 async fn write_seed(
     conn: &Connection,
     channel: &str,
@@ -1849,16 +2206,24 @@ async fn write_seed(
     preticks: &[(usize, String)],
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO buy_seeds (channel_id, source, id) VALUES (?1, ?2, ?3)
-         ON CONFLICT(channel_id, source, id) DO NOTHING",
+        &format!(
+            "INSERT INTO buy_seeds (channel_id, source, id)
+             SELECT ?1, ?2, ?3 WHERE {}
+             ON CONFLICT(channel_id, source, id) DO NOTHING",
+            not_against_the_decision("?2", "?3")
+        ),
         libsql::params![channel, source, id],
     )
     .await?;
     for (index, item) in preticks {
         conn.execute(
-            "INSERT INTO buy_checks (channel_id, source, id, ingredient_index, user_id, pantry_item)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5)
-             ON CONFLICT(channel_id, source, id, ingredient_index) DO NOTHING",
+            &format!(
+                "INSERT INTO buy_checks
+                    (channel_id, source, id, ingredient_index, user_id, pantry_item)
+                 SELECT ?1, ?2, ?3, ?4, NULL, ?5 WHERE {}
+                 ON CONFLICT(channel_id, source, id, ingredient_index) DO NOTHING",
+                not_against_the_decision("?2", "?3")
+            ),
             libsql::params![channel, source, id, *index as i64, item.clone()],
         )
         .await?;
@@ -1957,8 +2322,9 @@ async fn load_buy_checks(
 }
 
 /// The tally for a channel: distinct-voter count plus per-recipe yes/no, ranked by
-/// yeses. The client derives both win conditions from this — plurality (rank by
-/// `yes`) and consensus (`yes == participants && no == 0`).
+/// yeses. Plurality (rank by `yes`) is derived from this alone; consensus is
+/// `yes == deciders && no == 0`, and `deciders` is the **roster** on
+/// [`ServerMsg::Lobby`], not the voter count returned here (#181).
 async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Vec<TallyRow>)> {
     let mut prows = conn
         .query(
@@ -2355,6 +2721,489 @@ mod tests {
             .1
             .iter()
             .any(|r| r.id == "r2"));
+    }
+
+    // ---- the decision is a server fact (#201) -------------------------------
+
+    /// Everyone on the roster said yes to one recipe and nobody said no — the win
+    /// condition, and the only thing that ends a pick.
+    ///
+    /// The deciding count is the **roster**, which is what "everyone needs to be based
+    /// on the lobby" means when the server is the one saying it: bob's yes is the third
+    /// of three and it decides, and it would have decided on nothing before it. The
+    /// recipe alice alone liked never comes near it, however many yeses it has relative
+    /// to who has swiped.
+    #[tokio::test]
+    async fn the_last_yes_from_the_whole_roster_decides_the_plan() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
+
+        for who in ["alice", "carol"] {
+            record_vote(&conn, "c", "t", "r1", who, true).await.unwrap();
+            assert!(
+                decide_if_agreed(&conn, "c", "t", "r1")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{who} agreeing is not everyone agreeing"
+            );
+        }
+        // The recipe only alice wants, so the tally holds something that must never be
+        // mistaken for agreement.
+        record_vote(&conn, "c", "t", "r2", "alice", true)
+            .await
+            .unwrap();
+        assert!(decide_if_agreed(&conn, "c", "t", "r2")
+            .await
+            .unwrap()
+            .is_none());
+
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+        let decided = decide_if_agreed(&conn, "c", "t", "r1")
+            .await
+            .unwrap()
+            .expect("the third yes of three decides");
+        assert_eq!((decided.source.as_str(), decided.id.as_str()), ("t", "r1"));
+        assert!(decided.decided_at > 0, "and it is stamped, not merely true");
+        assert_eq!(
+            load_decision(&conn, "c").await.unwrap(),
+            Some(decided),
+            "recorded on the plan, not returned and forgotten"
+        );
+    }
+
+    /// One short of the roster is not agreement, and the gap is exactly the bug the
+    /// distinct-voter count produces: two of three have said yes, so `yes ==
+    /// participants` is true and `yes == deciders` is not. The roster is what is asked.
+    #[tokio::test]
+    async fn a_roster_one_yes_short_decides_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+
+        let (participants, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(
+            (participants, row(&rows, "r1").yes),
+            (2, 2),
+            "unanimous by turnout, which is the number that must not decide"
+        );
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_none(),
+            "carol has not swiped it, and not swiping is not agreeing"
+        );
+        assert_eq!(load_decision(&conn, "c").await.unwrap(), None);
+    }
+
+    /// One no is a veto, however full the house. Carol's pass holds back a recipe alice
+    /// and bob both wanted — checked as its own clause rather than by subtracting from
+    /// the yes count, because a person's no is a row, not the absence of their yes.
+    #[tokio::test]
+    async fn one_no_holds_back_a_recipe_everyone_else_wanted() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "carol", false)
+            .await
+            .unwrap();
+
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_none(),
+            "two out of three is a majority and a pick is not a vote"
+        );
+
+        // And a change of heart is a change of heart: the same swipe the other way
+        // decides, because a vote is a current call rather than an append.
+        record_vote(&conn, "c", "t", "r1", "carol", true)
+            .await
+            .unwrap();
+        assert!(decide_if_agreed(&conn, "c", "t", "r1")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// Why the veto clause is redundant, asserted rather than assumed.
+    ///
+    /// `votes` is keyed `(channel_id, source, id, voter_id)`, so one person holds one
+    /// row per recipe: they are a yes or a no on it, never both. That is the whole
+    /// reason "every decider said yes" already implies "no decider said no", and so the
+    /// reason a mutation dropping `decide_if_agreed`'s `NOT EXISTS (… vote = 0)` clause
+    /// survives every test — it is an equivalent mutation, not an untested one.
+    ///
+    /// The redundancy is the interesting thing, so the fact underneath it is pinned
+    /// here. If this key ever widened — an append-only vote log, a per-round key — the
+    /// clause stops being redundant and starts being the only thing standing between a
+    /// veto and a decision, which is exactly when nobody would think to add it.
+    #[tokio::test]
+    async fn a_persons_vote_is_one_row_so_a_yes_and_a_no_cannot_coexist() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        // Written straight in, because the API cannot ask for this: `record_vote`'s
+        // upsert would overwrite the yes rather than sit beside it.
+        let refused = conn
+            .execute(
+                "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+                 VALUES ('c', 't', 'r1', 'alice', 0)",
+                (),
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a second row for one person on one recipe is not a state this table has"
+        );
+
+        let (_, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(
+            (row(&rows, "r1").yes, row(&rows, "r1").no),
+            (1, 0),
+            "so a full house of yeses can never have a no hiding under it"
+        );
+    }
+
+    /// **First past the post.** Two recipes reach the condition, and only one is ever
+    /// recorded.
+    ///
+    /// Both calls run the same UPDATE and the guard `decided_at IS NULL` is inside it,
+    /// so the second is judged against the row the first left behind rather than
+    /// against the read that preceded it — which is the state two simultaneously
+    /// completing votes produce. Drop that clause and the second call overwrites the
+    /// first: this test then reports r2 where the room was told r1, which is a group
+    /// standing in a shop holding two different lists.
+    #[tokio::test]
+    async fn only_the_first_completing_vote_records_a_decision() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        for recipe in ["r1", "r2"] {
+            for who in ["alice", "bob"] {
+                record_vote(&conn, "c", "t", recipe, who, true)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let first = decide_if_agreed(&conn, "c", "t", "r1")
+            .await
+            .unwrap()
+            .expect("r1 met the condition");
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r2")
+                .await
+                .unwrap()
+                .is_none(),
+            "r2 meets it too, and the plan has already decided — the loser says nothing"
+        );
+        assert_eq!(
+            load_decision(&conn, "c").await.unwrap(),
+            Some(first),
+            "the first record stands, timestamp and all"
+        );
+    }
+
+    /// A decided plan's deck is over, so a swipe arriving after it is **refused**, not
+    /// counted — the guard is in the insert's own predicate, so it holds for a socket
+    /// that read "undecided" a round trip ago.
+    ///
+    /// Refused rather than ignored: `record_vote` answers `false`, the room is told
+    /// nothing, and the tally is untouched. The client is not left guessing either — it
+    /// has already been sent the decision, or will be the moment it connects.
+    #[tokio::test]
+    async fn a_vote_after_the_decision_is_not_recorded() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+        decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        let (before_participants, before) = load_tally(&conn, "c").await.unwrap();
+
+        assert!(
+            !record_vote(&conn, "c", "t", "r2", "alice", true)
+                .await
+                .unwrap(),
+            "a new recipe cannot be swiped into a plan that has finished"
+        );
+        assert!(
+            !record_vote(&conn, "c", "t", "r1", "bob", false)
+                .await
+                .unwrap(),
+            "and neither can the decided one be taken back"
+        );
+
+        let (after_participants, after) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(before_participants, after_participants);
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "nothing was written, so there is no r2 row"
+        );
+        assert_eq!(
+            (row(&after, "r1").yes, row(&after, "r1").no),
+            (2, 0),
+            "and bob's yes still stands — the refusal did not overwrite it"
+        );
+    }
+
+    /// The record is not recomputable-away. Once written it stands, even against a
+    /// tally that no longer supports it.
+    ///
+    /// The votes should never move — nothing can write one after the decision, which
+    /// the test above pins — but the whole point of recording the fact rather than
+    /// deriving it is that "what we decided" survives whatever the rows do. Deleting
+    /// them directly is the state no API path can reach, asserted where it is claimed.
+    #[tokio::test]
+    async fn the_decision_outlives_the_votes_that_made_it() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        for who in ["alice", "bob"] {
+            record_vote(&conn, "c", "t", "r1", who, true).await.unwrap();
+        }
+        let decided = decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        assert!(decided.is_some());
+
+        conn.execute("DELETE FROM votes WHERE channel_id = 'c'", ())
+            .await
+            .unwrap();
+        let (participants, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(
+            (participants, rows.len()),
+            (0, 0),
+            "the tally now says nothing was ever agreed"
+        );
+        assert_eq!(
+            load_decision(&conn, "c").await.unwrap(),
+            decided,
+            "and the plan still says what it decided"
+        );
+    }
+
+    /// A lobby decides nothing. No vote can exist before the start (#175/#179), so the
+    /// clause can only ever fire on a plan whose votes predate the guard — and it is
+    /// asked anyway, because a guard that holds only while a *different* guard holds is
+    /// the kind that quietly stops holding.
+    #[tokio::test]
+    async fn a_plan_that_has_not_started_decides_nothing() {
+        let conn = conn().await;
+        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
+            .await
+            .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+        // Written straight in: `record_vote` would refuse this, which is the point —
+        // the two guards make each other's gap unreachable, and each still holds alone.
+        conn.execute(
+            "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+             VALUES ('c', 't', 'r1', 'alice', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_none(),
+            "the lobby is where you gather, not where anything is decided"
+        );
+
+        begin_session(&conn, "c").await.unwrap();
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_some(),
+            "and the same votes decide once the swiping has begun"
+        );
+    }
+
+    /// A roster of nobody agrees to nothing — arithmetic, not paranoia. With the
+    /// `EXISTS (roster)` clause dropped the counts read `0 = 0`, so **every** recipe
+    /// nobody voted against would be decided, and the first buy request would name one.
+    #[tokio::test]
+    async fn an_empty_roster_decides_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        conn.execute("DELETE FROM pick_voters WHERE channel_id = 'c'", ())
+            .await
+            .unwrap();
+
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "never-swiped")
+                .await
+                .unwrap()
+                .is_none(),
+            "a recipe with no votes at all is not what a plan with no deciders agreed"
+        );
+        assert_eq!(load_decision(&conn, "c").await.unwrap(), None);
+    }
+
+    /// Both counts are taken over the roster, so a vote from outside it can neither
+    /// complete a consensus nor veto one.
+    ///
+    /// #179 already keeps such a row out of `votes`, so these are written directly —
+    /// the state a row predating that guard would be in. The ruling is that the roster
+    /// is the deciding body, and it is said once in each direction: mallory's yes does
+    /// not stand in for bob, and mallory's no does not overrule him.
+    #[tokio::test]
+    async fn a_vote_from_outside_the_roster_neither_completes_nor_vetoes() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO votes (channel_id, source, id, voter_id, vote)
+             VALUES ('c', 't', 'r1', 'mallory', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_none(),
+            "a stranger's yes is not bob's"
+        );
+
+        conn.execute("UPDATE votes SET vote = 0 WHERE voter_id = 'mallory'", ())
+            .await
+            .unwrap();
+        record_vote(&conn, "c", "t", "r1", "bob", true)
+            .await
+            .unwrap();
+        assert!(
+            decide_if_agreed(&conn, "c", "t", "r1")
+                .await
+                .unwrap()
+                .is_some(),
+            "and a stranger's no does not overrule the people deciding"
+        );
+    }
+
+    /// The lobby read carries the decision, so the one HTTP answer that describes a
+    /// whole plan can say the plan is over — and says it from the same row, so it can
+    /// never disagree with the frame.
+    #[tokio::test]
+    async fn the_lobby_carries_the_decision() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        assert_eq!(
+            load_lobby(&conn, "c").await.unwrap().unwrap().decided,
+            None,
+            "a running plan has decided nothing, and says so rather than omitting it"
+        );
+
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        let decided = decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        assert_eq!(
+            load_lobby(&conn, "c").await.unwrap().unwrap().decided,
+            decided
+        );
+    }
+
+    /// Half a decision is corruption, and it fails loud rather than serving a recipe
+    /// with no time on it or a time with no recipe.
+    ///
+    /// One statement writes all three columns or none, so this state has no producer —
+    /// which is exactly why it is pinned here. SQLite cannot add a CHECK with `ALTER
+    /// TABLE ADD COLUMN` (migration 0026), so the invariant is asserted on the way out,
+    /// the same ruling `load_lobby` gives a `meal_type` outside the vocabulary.
+    #[tokio::test]
+    async fn half_a_decision_is_refused_loudly() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        conn.execute(
+            "UPDATE pick_sessions SET decided_source = 't' WHERE channel_id = 'c'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let err = load_decision(&conn, "c").await.unwrap_err().to_string();
+        assert!(
+            err.contains("half a decision"),
+            "a wrong database must not run beautifully: {err}"
+        );
+        assert!(
+            load_lobby(&conn, "c").await.is_err(),
+            "and the lobby that carries it refuses too"
+        );
+    }
+
+    /// A shopping write for a recipe the plan did not decide is refused **in the
+    /// write**, not merely in the handler's read.
+    ///
+    /// This is the enforcement gap #201 names: `BuyQuery` took the recipe on trust, so
+    /// any seated member could name any `(source, id)` and fill a basket for a dinner
+    /// nobody agreed to. `set_buy_check` now asks first — that is what gives the 400 a
+    /// sentence — and the predicate here is what makes it true when the decision lands
+    /// between that read and this write.
+    #[tokio::test]
+    async fn a_shopping_write_is_judged_against_the_decided_recipe() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        // Undecided: the list still admits any recipe, which is what keeps a decision
+        // stashed in a browser before #201 deployed working (0026 backfills nothing).
+        tick_item(&conn, "c", "t", "r9", 0, "alice").await.unwrap();
+        assert_eq!(
+            load_buy_checks(&conn, "c", "t", "r9").await.unwrap().len(),
+            1
+        );
+
+        record_vote(&conn, "c", "t", "r1", "alice", true)
+            .await
+            .unwrap();
+        decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+
+        tick_item(&conn, "c", "t", "r9", 1, "alice").await.unwrap();
+        assert_eq!(
+            load_buy_checks(&conn, "c", "t", "r9").await.unwrap().len(),
+            1,
+            "the plan decided r1, so nothing more goes on r9's list"
+        );
+        untick_item(&conn, "c", "t", "r9", 0, "alice")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_buy_checks(&conn, "c", "t", "r9").await.unwrap().len(),
+            1,
+            "and a guarded claim with an unguarded release is not guarded"
+        );
+
+        tick_item(&conn, "c", "t", "r1", 0, "alice").await.unwrap();
+        assert_eq!(
+            load_buy_checks(&conn, "c", "t", "r1").await.unwrap().len(),
+            1,
+            "the decided meal shops exactly as it always did"
+        );
     }
 
     /// A channel with no votes yet tallies to nothing — the join rehydrate on a
@@ -3497,6 +4346,72 @@ mod tests {
             "and it is nobody's, so there is no seat to check it against"
         );
         assert_eq!(checks[0].pantry.as_deref(), Some("salt"));
+    }
+
+    /// The one thing the seed *does* now ask about: the recipe (#201).
+    ///
+    /// #170's reasoning is untouched — a pre-tick is still nobody's claim and still
+    /// depends on nothing about the caller, which is why the ungated read may reach it.
+    /// This predicate is about the plan and the recipe, which is precisely what the
+    /// seed is a function of, so it belongs in the write for the same reason the roster
+    /// does not. What it closes is the enforcement gap #201 names: a stranger holding
+    /// the channel id could name any recipe and have a kitchen's pantry read against a
+    /// dinner nobody agreed to cook.
+    #[tokio::test]
+    async fn the_pantry_seed_only_runs_for_the_recipe_the_plan_decided() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        record_vote(&conn, "c", "themealdb", "52772", "alice", true)
+            .await
+            .unwrap();
+        decide_if_agreed(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap()
+            .expect("alice is the whole roster, so her yes decides");
+
+        write_seed(
+            &conn,
+            "c",
+            "themealdb",
+            "52795",
+            &[(0usize, "salt".to_string())],
+        )
+        .await
+        .unwrap();
+        assert!(
+            !buy_list_seeded(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap(),
+            "no marker for a list this plan will never shop"
+        );
+        assert!(
+            load_buy_checks(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap()
+                .is_empty(),
+            "and no pre-ticks either — the cupboard was never asked"
+        );
+
+        write_seed(
+            &conn,
+            "c",
+            "themealdb",
+            "52772",
+            &[(0usize, "salt".to_string())],
+        )
+        .await
+        .unwrap();
+        assert!(buy_list_seeded(&conn, "c", "themealdb", "52772")
+            .await
+            .unwrap());
+        assert_eq!(
+            load_buy_checks(&conn, "c", "themealdb", "52772")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the decided meal is seeded exactly as it always was"
+        );
     }
 
     /// A row cannot claim both a person and the pantry, and cannot claim neither. The
