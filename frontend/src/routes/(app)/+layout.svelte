@@ -2,6 +2,7 @@
   import { page } from "$app/state";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { me, logout, botLink } from "$lib/auth";
+  import { encodeDestination } from "$lib/destination";
   import type { LoginStatus, Section } from "$lib/types";
   import { loginStatus } from "$lib/resource";
   import Login from "$lib/components/Login.svelte";
@@ -224,6 +225,23 @@
   const status = $derived<LoginStatus>(loginStatus(session));
 
   /**
+   * The page the login was reached from, so signing in comes back to it (#206).
+   *
+   * The case that made this necessary is a scanned invite: a QR opens the system
+   * browser, which holds no session however signed in the phone's Telegram is, so
+   * the invite shows this screen — and a login that landed at home dropped the plan
+   * on the floor. It goes out as the bot's deep-link payload and comes back beside
+   * the secret in the bot's reply.
+   *
+   * Home carries nothing, because that is where a bare `/start` already lands, and
+   * `carriesDestination` is what the screen says so out loud — it is false for a
+   * path too long for Telegram to hold, and promising a return that will not happen
+   * is worse than not offering one.
+   */
+  const returnTo = $derived(page.url.pathname + page.url.search);
+  const carriesDestination = $derived(encodeDestination(returnTo) !== null);
+
+  /**
    * Which leg of the meal you are on, or nothing at all.
    *
    * `pick · buy · cook · joy` is the shape of *a meal* — the four things you do to
@@ -265,7 +283,8 @@
 {#if !authed}
   <Login
     {status}
-    link={botLink()}
+    link={botLink(returnTo)}
+    returning={carriesDestination}
     error={session.error instanceof Error ? session.error.message : undefined}
   />
 {:else}

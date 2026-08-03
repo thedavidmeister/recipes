@@ -88,7 +88,19 @@ attacker starts a login, sends you the link, and takes your session when you
 tap. That was built here and reproduced as a full account takeover before this
 design replaced it. The accepted cost: the session lands in whichever browser
 opens the bot's link, so cross-device sign-in does not work. Cross-device
-transfer _is_ the attack.
+transfer _is_ the attack. A shared QR is therefore an **invite** rather than a
+session transfer — it seats whoever opens it, once they have signed in on that
+device.
+
+**The destination travels, though (#206).** A QR scan opens the system browser,
+a different cookie jar from the Telegram webview the session landed in, so an
+invite always meets the login screen — and the login then landed at home, losing
+the invite. The page worth returning to now rides out as the bot's `?start=`
+payload (the path in base64url, which is Telegram's whole alphabet, inside its
+64-character budget) and back beside the secret in the bot's reply. It carries
+**where**, never **who**: anyone can `/start` the bot with anything, so it is no
+part of the secret and is checked as a same-origin relative path at the moment
+the browser navigates, never trusted for the trip it took.
 
 Auth exists because **#20 needs identity** — a group deciding what to cook is a
 headcount, and "everyone said yes" means nothing without knowing who everyone
