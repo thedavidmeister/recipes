@@ -91,10 +91,12 @@ describe("destinationFrom", () => {
   });
 
   it("lands home when the bot's link carried no destination at all", () => {
-    // A bare `/start` is the whole of today's behaviour, and it must stay it.
-    expect(destinationFrom(null)).toBe(HOME);
-    expect(destinationFrom(undefined)).toBe(HOME);
-    expect(destinationFrom("")).toBe(HOME);
+    // Spelled out rather than compared against `HOME`, because "home" is the claim
+    // under test: a bare `/start` landed at the site root before #206 and still does.
+    expect(HOME).toBe("/");
+    expect(destinationFrom(null)).toBe("/");
+    expect(destinationFrom(undefined)).toBe("/");
+    expect(destinationFrom("")).toBe("/");
   });
 
   it("discards an absolute URL", () => {

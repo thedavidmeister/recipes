@@ -885,9 +885,7 @@ pub async fn webhook(
         return Ok(StatusCode::OK);
     }
 
-    // A deep link may say where the person was heading (#206) — a plan they scanned
-    // an invite to, most of the time. It rides along; it is not part of the login.
-    let link = mint_completion(&state, &from, start_payload(&text)).await?;
+    let link = login_reply(&state, &from, &text).await?;
     send(
         &state,
         chat.id,
@@ -955,6 +953,23 @@ async fn kitchen_invite_reply(
     Ok(())
 }
 
+/// The whole answer to a login command: the link [`webhook`] sends back.
+///
+/// A seam rather than an inline expression, because this composition **is** the
+/// feature (#206) — a deep link's payload becomes the destination on the link, and a
+/// bare `/start` produces exactly the link it always did. Written out here it is a
+/// thing a test can hold; folded into [`webhook`] it could only be reached through
+/// Telegram's HTTP API, which is the one thing the test could not have.
+pub(crate) async fn login_reply(
+    state: &AppState,
+    from: &TelegramUser,
+    text: &str,
+) -> Result<String, AppError> {
+    // A deep link may say where the person was heading — a plan they scanned an
+    // invite to, most of the time. It rides along; it is not part of the login.
+    mint_completion(state, from, start_payload(text)).await
+}
+
 /// Mint a completion secret for a **known** Telegram user and build their link.
 ///
 /// The user is not something a caller chose: it arrived from Telegram alongside a
@@ -965,7 +980,7 @@ async fn kitchen_invite_reply(
 /// below this line changes shape when it is `Some`. It is handed to
 /// [`completion_link`] and nowhere else, which is what keeps a payload anybody can
 /// send from being able to say anything about whose session comes out (#25).
-pub(crate) async fn mint_completion(
+async fn mint_completion(
     state: &AppState,
     user: &TelegramUser,
     destination: Option<&str>,
@@ -1240,9 +1255,13 @@ mod tests {
             assert!(!is_carryable_payload(out), "{out:?} is not base64url");
         }
 
-        assert!(is_carryable_payload(&"A".repeat(START_PAYLOAD_MAX)));
+        // Written out rather than as `START_PAYLOAD_MAX`: the ceiling is Telegram's
+        // documented one, so here the constant is what is under test and cannot also
+        // be the oracle for itself.
+        assert_eq!(START_PAYLOAD_MAX, 64);
+        assert!(is_carryable_payload(&"A".repeat(64)));
         assert!(
-            !is_carryable_payload(&"A".repeat(START_PAYLOAD_MAX + 1)),
+            !is_carryable_payload(&"A".repeat(65)),
             "64 is the ceiling Telegram states, so 65 never came from Telegram"
         );
     }

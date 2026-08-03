@@ -3146,14 +3146,17 @@ mod tests {
 
     /// **A destination changes the link and nothing else (#206).**
     ///
+    /// Driven with the message texts Telegram actually delivers — `/start` for the
+    /// Start button, `/start <payload>` for `https://t.me/<bot>?start=<payload>` —
+    /// so this covers the composition and not only its halves.
+    ///
     /// The #25 ruling this must not disturb is about *who* a session belongs to, and
     /// the credential is the whole of that answer: a secret minted for the Telegram
-    /// user who messaged the bot, hashed, and delivered only to their chat. So a
-    /// login is minted with and without a `?start=` payload and the two rows are
-    /// compared — same user, same handle, same lifetime, and each row keyed on the
-    /// hash of the secret in its own link and nothing else. The destination is not
-    /// in the row at all, which is what would notice if somebody later decided it
-    /// ought to be.
+    /// user who messaged the bot, hashed, and delivered only to their chat. So the
+    /// two logins' rows are compared — same user, same handle, same lifetime, and
+    /// each row keyed on the hash of the secret in its own link and nothing else.
+    /// The destination is not in the row at all, which is what would notice if
+    /// somebody later decided it ought to be.
     #[tokio::test]
     async fn a_destination_does_not_touch_the_login_it_rides_beside() {
         let (state, conn) = test_state(None).await;
@@ -3161,6 +3164,7 @@ mod tests {
             id: 4242,
             username: Some("dave".into()),
         };
+        // `/pick/9f4b2c1d8e7a6053` in base64url — see `frontend/src/lib/destination`.
         let payload = "L3BpY2svOWY0YjJjMWQ4ZTdhNjA1Mw";
 
         /// The one live login, as stored: hash, telegram id, handle, expiry.
@@ -3201,20 +3205,23 @@ mod tests {
                 .to_owned()
         }
 
-        let bare_link = auth::mint_completion(&state, &user, None).await.unwrap();
+        let bare_link = auth::login_reply(&state, &user, "/start").await.unwrap();
         let bare_row = only_row(&conn).await;
         conn.execute("DELETE FROM login_completions", ())
             .await
             .unwrap();
 
-        let carried_link = auth::mint_completion(&state, &user, Some(payload))
+        let carried_link = auth::login_reply(&state, &user, &format!("/start {payload}"))
             .await
             .unwrap();
         let carried_row = only_row(&conn).await;
 
         assert_eq!(
             bare_link,
-            format!("https://recipes.test/auth/finish?c={}", secret_in(&bare_link))
+            format!(
+                "https://recipes.test/auth/finish?c={}",
+                secret_in(&bare_link)
+            )
         );
         assert_eq!(
             carried_link,
