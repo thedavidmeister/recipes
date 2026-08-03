@@ -72,11 +72,7 @@ export const JustOnePerson: Story = {
 export const DecidedALongTitle: Story = {
   args: {
     status: "ready",
-    meals: kitchenMeals([
-      {},
-      {},
-      { decided: decidedRecipe("53287") },
-    ]).slice(2),
+    meals: kitchenMeals([{}, {}, { decided: decidedRecipe("53287") }]).slice(2),
   },
 };
 
