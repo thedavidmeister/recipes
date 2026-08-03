@@ -16,12 +16,21 @@
    */
   interface Props {
     status: LoginStatus;
-    /** `https://t.me/<bot>`. */
+    /** `https://t.me/<bot>`, or the same with a `?start=` payload carrying the
+     * page to come back to (#206). */
     link: string;
+    /**
+     * Whether `link` carries somewhere to come back to — a plan someone scanned an
+     * invite to, most of the time. It changes only what the screen *says*: the
+     * whole of a login is still messaging the bot, and this promise is worth making
+     * only where it is true, so a destination too long for Telegram to carry says
+     * nothing rather than something optimistic.
+     */
+    returning?: boolean;
     error?: string;
   }
 
-  let { status, link, error }: Props = $props();
+  let { status, link, returning = false, error }: Props = $props();
 </script>
 
 <div class="mx-auto flex max-w-md flex-col items-center px-4 py-16 text-center">
@@ -39,7 +48,14 @@
       The site can't be reached right now. Try again in a moment.
     </p>
   {:else}
-    <p class="mt-2 text-stone-500">Sign in with Telegram to continue.</p>
+    <!-- Reached from an invite, this screen is in the way of somewhere: say that
+         signing in goes there, so the trip through Telegram reads as the way to
+         the plan rather than a detour away from it. -->
+    <p class="mt-2 text-stone-500">
+      {returning
+        ? "Sign in with Telegram and you'll come back to this page."
+        : "Sign in with Telegram to continue."}
+    </p>
 
     <a
       href={link}

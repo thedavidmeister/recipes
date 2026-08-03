@@ -361,6 +361,38 @@ pub async fn equipment_advice(
     )))
 }
 
+/// `GET /api/kitchens/{id}/meals` — this kitchen's meal plans, newest first (#207).
+///
+/// **An endpoint beside the kitchen, not another field on it.** [`KitchenDetail`] is
+/// what nine other handlers echo back after a rename, a join, an equipment add — so a
+/// meals list carried on it would re-read `pick_sessions` every time somebody ticked a
+/// pantry item, and would be stale on the page that matters most (a plan's roster moves
+/// while its kitchen sits still). [`equipment_advice`] is the same shape for the same
+/// reason: a live fact about something *other* than the kitchen's own row, asked for
+/// when it is wanted.
+///
+/// Gated exactly like the rest of the kitchen surface — [`require_member`] first, so a
+/// non-member gets `Forbidden` and no list. A kitchen's meals are its members' business:
+/// what a room is eating, who is deciding it and what they landed on is precisely the
+/// thing an invite is for.
+///
+/// The read itself lives in [`crate::session`], which owns `pick_sessions` — the same
+/// division [`equipment_advice`] makes when it reaches into [`crate::equipment`].
+pub async fn meals(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::session::KitchenMeal>>, AppError> {
+    let id = id.as_str();
+    let user = &user;
+    require_member(&state, id, &user.telegram_user_id).await?;
+    state
+        .with_db(move |conn| async move { crate::session::kitchen_meals(&conn, id).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+        .map(Json)
+}
+
 /// `POST /api/kitchens/{id}/pantry` — add an ingredient on hand.
 /// A kitchen's pantry holds only ingredients some recipe cooks with (#72). Same
 /// reasoning as equipment: stock nothing uses could never change what you can make.

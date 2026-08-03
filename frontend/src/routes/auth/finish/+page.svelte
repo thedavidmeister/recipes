@@ -3,12 +3,20 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { completeLogin } from "$lib/auth";
+  import { destinationFrom } from "$lib/destination";
 
   /**
    * Where the bot's link lands. It carries the one secret that redeems a
    * session, so opening it here is what signs *this browser* in — which is the
    * point of the design: the session goes to whoever opened the bot's link, and
    * the bot only ever sends it to the person who messaged it.
+   *
+   * Beside the secret it may carry `r`, the page the login started from (#206) —
+   * a plan someone scanned an invite to, most of the time. **This is the point of
+   * use, so this is where it is checked**: `destinationFrom` takes it only if it
+   * decodes to a same-origin relative path, and answers home for everything else.
+   * It is trusted for nothing else at all: the session was already minted, by the
+   * secret, for whoever pressed Start in their own Telegram.
    */
   let error = $state<string | null>(null);
 
@@ -22,7 +30,9 @@
       await completeLogin(c);
       // Replace, so Back does not land on a spent secret — and so the secret
       // stops sitting in the address bar.
-      await goto("/", { replaceState: true });
+      await goto(destinationFrom(page.url.searchParams.get("r")), {
+        replaceState: true,
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }

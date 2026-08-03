@@ -2188,6 +2188,142 @@ async fn load_decision(conn: &Connection, channel: &str) -> anyhow::Result<Optio
     decision_of(row.get(0)?, row.get(1)?, row.get(2)?)
 }
 
+/// The winning recipe of a kitchen's meal (#207): what a plan decided, **named**.
+///
+/// [`DecidedRecipe`] is the same fact for the plan's own screens, and carries
+/// `decided_at` instead of a title because the pick page already holds the card it is
+/// about. A kitchen listing holds nothing: it is looking at a plan it was never in, so
+/// the pair `(source, id)` on its own would be a row saying a meal was decided and
+/// refusing to say what for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecidedMeal {
+    pub source: String,
+    pub id: String,
+    /// The recipe's `recipes.title`, joined in the read below rather than fetched per
+    /// row by whoever renders it.
+    pub title: String,
+}
+
+/// One meal of a kitchen (#207) — a plan on `pick_sessions.kitchen_id`, as a list of
+/// them shows it.
+///
+/// Not a [`LobbyView`]: that is the plan's own screen and carries everything a person
+/// deciding needs — the host, the roster by name, the kitchen's seatable members, the
+/// time cap. A kitchen lists meals it is not in the middle of, so it carries what tells
+/// them apart at a glance and nothing else. The roster arrives as a **count** for the
+/// same reason: how many are in is the fact a list is asking about, and six names per
+/// row would be six lookups per row for a page that is not the lobby.
+///
+/// Three states, and they are exactly the three the columns can be in: gathering
+/// (`started` false), deciding (`started` true, no decision), and decided. A plan
+/// everybody walked out of is a deleted row (#96/#169), so a fourth "over" state is not
+/// something this can hold — such a meal is simply not in the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KitchenMeal {
+    /// The plan's channel — what `/pick/{channel}` is, so the row is a link.
+    pub channel_id: String,
+    /// Which meal this plans (#114), and what comes with it — the words the plan was
+    /// made in, so a list of meals reads as meals.
+    pub meal_type: MealType,
+    pub additions: Vec<MealAddition>,
+    /// Whether the swiping has begun, which is the line between gathering and deciding.
+    pub started: bool,
+    /// How many people are on the roster — who joined the plan, not who is connected
+    /// and not who has voted (the same number [`ServerMsg::Lobby`] carries).
+    pub deciders: i64,
+    /// What this meal decided (#201/#205), or `None` while its deck is still running.
+    pub decided: Option<DecidedMeal>,
+}
+
+/// A kitchen's meals (#207), newest first.
+///
+/// **One query.** The three things a row needs beyond the plan itself — its roster
+/// size, and the title of what it decided — are a correlated count and a left join
+/// against `recipes`, so a kitchen with a dozen meals costs one round trip rather than
+/// a dozen title fetches from a browser. The join is keyed on the decision's own two
+/// columns, which is the same `(source, id)` pair the corpus is keyed by everywhere
+/// (`walk.rs` reads a card by it, `buy` reads a recipe by it).
+///
+/// The join is a LEFT one because most plans have decided nothing: an inner join would
+/// list only the finished meals, which is the opposite of what a kitchen is for. A
+/// decision whose recipe is *missing* is refused loudly instead of rendered as a plan
+/// with no outcome — `recipes` is derived by upsert and nothing deletes from it, so a
+/// decided pair with no row is corruption, and #205 made a decision a server fact
+/// precisely so that nobody has to guess at one.
+///
+/// `created_at` orders it, because that is when the meal was called. Newest first: a
+/// kitchen's meals accumulate and the one somebody is looking for is the one they are
+/// having. `channel_id` breaks the tie — `created_at` is whole seconds, so two plans
+/// called in the same second would otherwise come back in whatever order the storage
+/// engine felt like, and a list that reshuffles between reads is its own bug.
+pub async fn kitchen_meals(
+    conn: &Connection,
+    kitchen_id: &str,
+) -> anyhow::Result<Vec<KitchenMeal>> {
+    let mut rows = conn
+        .query(
+            "SELECT s.channel_id, s.meal_type, s.additions, s.started_at,
+                    (SELECT COUNT(*) FROM pick_voters v WHERE v.channel_id = s.channel_id),
+                    s.decided_source, s.decided_id, s.decided_at, r.title
+             FROM pick_sessions s
+             LEFT JOIN recipes r
+                    ON r.source = s.decided_source AND r.id = s.decided_id
+             WHERE s.kitchen_id = ?1
+             ORDER BY s.created_at DESC, s.channel_id DESC",
+            libsql::params![kitchen_id.to_owned()],
+        )
+        .await?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let channel_id: String = row.get(0)?;
+        // Both vocabularies are validated by every writer, so a stored word outside
+        // one is corruption — the same loud refusal `load_lobby` makes, for the same
+        // reason: a meal the app does not have is not a meal to list.
+        let meal_raw: String = row.get(1)?;
+        let meal_type = MealType::parse(&meal_raw).ok_or_else(|| {
+            anyhow::anyhow!("pick_sessions.meal_type outside the vocabulary: {meal_raw:?}")
+        })?;
+        let additions_raw: String = row.get(2)?;
+        let additions: Vec<MealAddition> = serde_json::from_str(&additions_raw).map_err(|e| {
+            anyhow::anyhow!(
+                "pick_sessions.additions outside the vocabulary: {additions_raw:?}: {e}"
+            )
+        })?;
+        let started_at: Option<i64> = row.get(3)?;
+        let deciders: i64 = row.get(4)?;
+        // The same classifier the plan's own reads use, so "half a decision" is one
+        // rule in one place; the title is the half only this read needs.
+        let decision = decision_of(row.get(5)?, row.get(6)?, row.get(7)?)?;
+        let title: Option<String> = row.get(8)?;
+        let decided = match (decision, title) {
+            (Some(d), Some(title)) => Some(DecidedMeal {
+                source: d.source,
+                id: d.id,
+                title,
+            }),
+            (Some(d), None) => {
+                return Err(anyhow::anyhow!(
+                    "plan {channel_id} decided {}/{}, which the corpus does not hold",
+                    d.source,
+                    d.id
+                ))
+            }
+            (None, _) => None,
+        };
+
+        out.push(KitchenMeal {
+            channel_id,
+            meal_type,
+            additions,
+            started: started_at.is_some(),
+            deciders,
+            decided,
+        });
+    }
+    Ok(out)
+}
+
 /// The predicate every write on a shopping list carries since #201: **this recipe is
 /// not one the plan decided against**.
 ///
@@ -5142,5 +5278,235 @@ mod tests {
             .unwrap(),
             r#"{"type":"timers","source":"themealdb","id":"52795","timers":[{"step":7,"started_at":1700000000000,"deadline":1700000300000,"started_by":{"telegram_user_id":"5150","username":"mel"}}]}"#
         );
+    }
+
+    // ---- a kitchen's meals (#207) -------------------------------------------
+
+    /// A plan for `kitchen`, called at `at`, with `who` gathered in it. `at` is stated
+    /// rather than left to the clock because `created_at` is whole seconds: three plans
+    /// made in one test would share a moment, and an ordering these tests cannot tell
+    /// apart is an ordering they cannot pin.
+    async fn kitchen_plan(conn: &Connection, channel: &str, kitchen: &str, at: i64, who: &[&str]) {
+        create_session(
+            conn,
+            channel,
+            who.first().copied().unwrap_or("alice"),
+            None,
+            Some(kitchen),
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        for person in who {
+            seat_voter(conn, channel, person).await.unwrap();
+        }
+        conn.execute(
+            "UPDATE pick_sessions SET created_at = ?2 WHERE channel_id = ?1",
+            libsql::params![channel, at],
+        )
+        .await
+        .unwrap();
+    }
+
+    fn channels(meals: &[KitchenMeal]) -> Vec<&str> {
+        meals.iter().map(|m| m.channel_id.as_str()).collect()
+    }
+
+    /// A kitchen's meals are its own, and the newest is first — the order somebody
+    /// looking for the meal they are having needs it in.
+    ///
+    /// The two exclusions are the same rule from both sides: another kitchen's plan is
+    /// not this kitchen's business, and a plan called outside any kitchen belongs to
+    /// nobody's page. Both would surface if the list were "every plan".
+    #[tokio::test]
+    async fn a_kitchens_meals_are_its_own_newest_first() {
+        let conn = conn().await;
+        kitchen_plan(&conn, "oldest", "k1", 1_000, &["alice"]).await;
+        kitchen_plan(&conn, "middle", "k1", 2_000, &["alice"]).await;
+        kitchen_plan(&conn, "newest", "k1", 3_000, &["alice"]).await;
+        kitchen_plan(&conn, "theirs", "k2", 2_500, &["bob"]).await;
+        create_session(
+            &conn,
+            "loose",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        seat_voter(&conn, "loose", "alice").await.unwrap();
+
+        let meals = kitchen_meals(&conn, "k1").await.unwrap();
+        assert_eq!(
+            channels(&meals),
+            vec!["newest", "middle", "oldest"],
+            "newest first, and only this kitchen's"
+        );
+        assert_eq!(
+            channels(&kitchen_meals(&conn, "k2").await.unwrap()),
+            vec!["theirs"],
+            "the other kitchen sees its own meal and not k1's three"
+        );
+    }
+
+    /// The three states a kitchen lists, each read straight off the columns that make
+    /// it: gathering, deciding, decided.
+    ///
+    /// The roster count is per meal, which is the half a shared count would get wrong:
+    /// these three plans hold one, three and two people, and each row has to say its
+    /// own number rather than the kitchen's total.
+    #[tokio::test]
+    async fn the_three_states_of_a_meal_read_back_as_they_are() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO recipes (source, id, title, ingredients, instructions)
+             VALUES ('themealdb', '52795', 'Chicken Handi', '[]', 'Cook.')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Gathering: the lobby is open, one person is in, dessert comes with it.
+        create_session(
+            &conn,
+            "gathering",
+            "alice",
+            None,
+            Some("k1"),
+            MealType::Lunch,
+            &[MealAddition::Dessert],
+            None,
+        )
+        .await
+        .unwrap();
+        seat_voter(&conn, "gathering", "alice").await.unwrap();
+        conn.execute(
+            "UPDATE pick_sessions SET created_at = 3000 WHERE channel_id = 'gathering'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Deciding: three in, swiping begun, nothing landed yet.
+        kitchen_plan(&conn, "deciding", "k1", 2_000, &["alice", "bob", "carol"]).await;
+        begin_session(&conn, "deciding").await.unwrap();
+
+        // Decided: two in, and both said yes to the same recipe.
+        kitchen_plan(&conn, "decided", "k1", 1_000, &["alice", "bob"]).await;
+        begin_session(&conn, "decided").await.unwrap();
+        for who in ["alice", "bob"] {
+            record_vote(&conn, "decided", "themealdb", "52795", who, true)
+                .await
+                .unwrap();
+        }
+        decide_if_agreed(&conn, "decided", "themealdb", "52795")
+            .await
+            .unwrap()
+            .expect("both of two agreeing decides it");
+
+        let meals = kitchen_meals(&conn, "k1").await.unwrap();
+        assert_eq!(channels(&meals), vec!["gathering", "deciding", "decided"]);
+
+        assert_eq!(meals[0].meal_type, MealType::Lunch, "the plan's own word");
+        assert_eq!(meals[0].additions, vec![MealAddition::Dessert]);
+        assert!(!meals[0].started, "the lobby is still open");
+        assert_eq!(meals[0].deciders, 1);
+        assert_eq!(meals[0].decided, None);
+
+        assert!(meals[1].started, "the swiping has begun");
+        assert_eq!(meals[1].deciders, 3, "its own roster, not the kitchen's");
+        assert_eq!(meals[1].decided, None, "deciding is not decided");
+
+        assert!(meals[2].started);
+        assert_eq!(meals[2].deciders, 2);
+        assert_eq!(
+            meals[2].decided,
+            Some(DecidedMeal {
+                source: "themealdb".to_owned(),
+                id: "52795".to_owned(),
+                title: "Chicken Handi".to_owned(),
+            }),
+            "a decided meal names the recipe it landed on"
+        );
+    }
+
+    /// The decided title is the title of *that* recipe.
+    ///
+    /// Two recipes sit in the corpus and one of them was decided on, so a join keyed on
+    /// the source alone — or on nothing but the row order — hands back the wrong meal
+    /// while still looking like a title. That is the failure this pins: an entry naming
+    /// a dish the plan did not choose is worse than one naming none.
+    #[tokio::test]
+    async fn a_decided_meal_carries_the_title_of_the_recipe_it_chose() {
+        let conn = conn().await;
+        for (id, title) in [("52795", "Chicken Handi"), ("52820", "Katsu Chicken curry")] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, ingredients, instructions)
+                 VALUES ('themealdb', ?1, ?2, '[]', 'Cook.')",
+                libsql::params![id, title],
+            )
+            .await
+            .unwrap();
+        }
+        kitchen_plan(&conn, "c", "k1", 1_000, &["alice"]).await;
+        begin_session(&conn, "c").await.unwrap();
+        record_vote(&conn, "c", "themealdb", "52820", "alice", true)
+            .await
+            .unwrap();
+        decide_if_agreed(&conn, "c", "themealdb", "52820")
+            .await
+            .unwrap()
+            .expect("the only decider agreed");
+
+        let meals = kitchen_meals(&conn, "k1").await.unwrap();
+        assert_eq!(meals.len(), 1);
+        let decided = meals[0].decided.as_ref().expect("this meal decided");
+        assert_eq!(decided.id, "52820");
+        assert_eq!(
+            decided.title, "Katsu Chicken curry",
+            "the title joined is the decided recipe's, not the other row's"
+        );
+    }
+
+    /// A decision naming a recipe the corpus does not hold is refused out loud rather
+    /// than listed as a meal that decided nothing.
+    ///
+    /// Nothing deletes from `recipes` — it is rebuilt by upsert — so this state is
+    /// corruption, and a silent `None` here would render a decided plan as one still
+    /// swiping: the kitchen would offer a deck for a meal that is already settled.
+    #[tokio::test]
+    async fn a_decision_the_corpus_cannot_name_is_refused() {
+        let conn = conn().await;
+        kitchen_plan(&conn, "c", "k1", 1_000, &["alice"]).await;
+        begin_session(&conn, "c").await.unwrap();
+        record_vote(&conn, "c", "themealdb", "52795", "alice", true)
+            .await
+            .unwrap();
+        decide_if_agreed(&conn, "c", "themealdb", "52795")
+            .await
+            .unwrap()
+            .expect("the only decider agreed");
+
+        let err = kitchen_meals(&conn, "k1")
+            .await
+            .expect_err("a decision with no recipe row is corruption");
+        assert!(
+            err.to_string().contains("themealdb"),
+            "and it says which recipe: {err}"
+        );
+    }
+
+    /// An empty kitchen answers with an empty list, not a failure. Nobody has planned a
+    /// meal here yet, and that is a state the page shows rather than an error it
+    /// reports.
+    #[tokio::test]
+    async fn a_kitchen_with_no_meals_lists_none() {
+        let conn = conn().await;
+        assert_eq!(kitchen_meals(&conn, "k1").await.unwrap(), vec![]);
     }
 }

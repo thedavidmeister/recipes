@@ -42,6 +42,23 @@
 //! the waiting device would restore it, at the price of a code that can be talked
 //! out of someone.
 //!
+//! ## What a deep link may carry, and what it may not (#206)
+//!
+//! The same cost bites on one phone: a QR scan opens the *system* browser, which
+//! holds no session however signed in that phone's Telegram is, so an invite always
+//! meets the login screen — and a login that landed at home lost the invite. So the
+//! **destination** travels with the login. `?start=<payload>` arrives here as the
+//! message `/start <payload>`, and [`start_payload`] hands it to [`completion_link`]
+//! to sit *beside* the secret in the bot's reply.
+//!
+//! It carries **where**, never **who**. Anyone at all can `/start` this bot with any
+//! payload, so it is deliberately inert: not minted, not hashed, not stored, not read
+//! at redemption. Nothing above this line changes shape when it is present. All it
+//! can do is move a browser that has already signed *itself* in — and even that only
+//! once the browser has checked it is a same-origin relative path, which it does at
+//! the point it navigates (`frontend/src/lib/destination.ts`), never on the strength
+//! of having come through us.
+//!
 //! A bot cannot message someone who has not contacted it first
 //! (`Forbidden: bot can't initiate conversation with a user`), which is why the
 //! user messages the bot rather than us messaging them — and why the
@@ -745,6 +762,72 @@ fn is_login_command(text: &str) -> bool {
     cmd.starts_with("/start") || cmd.starts_with("/login")
 }
 
+/// Telegram's own ceiling on a `?start=` deep-link payload: 64 characters of
+/// `A-Z a-z 0-9 _ -`. Nothing longer or otherwise spelled can have come from a
+/// Telegram deep link, so nothing longer or otherwise spelled is carried.
+const START_PAYLOAD_MAX: usize = 64;
+
+/// Could Telegram have carried this as a `?start=` payload?
+///
+/// The charset and the length are Telegram's, and applying them here is this
+/// function's whole job: [`completion_link`] splices what comes back into a URL, so
+/// the alphabet is also exactly what makes that splice safe — no `&`, no `#`, no
+/// `?`, no space, nothing that could add a second parameter to a link the bot is
+/// about to send someone.
+///
+/// It says nothing about *where* the payload points. The backend is a courier here
+/// and deliberately not a judge: the destination is a path only the browser can
+/// resolve, and it is checked as a same-origin relative path at the point it is
+/// used to navigate (`$lib/destination`), not because a hop it took looked right.
+fn is_carryable_payload(payload: &str) -> bool {
+    !payload.is_empty()
+        && payload.len() <= START_PAYLOAD_MAX
+        && payload
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The deep-link payload on a login command, when it has one worth carrying (#206).
+///
+/// `https://t.me/<bot>?start=<payload>` arrives as the message text `/start <payload>`
+/// — one command, one argument, and Telegram never sends more — so anything else is
+/// not a deep link and gets a bare login, which is exactly today's behaviour. That
+/// includes a plain `/start`, the `/start@thebot` a group adds, and `/login`, which is
+/// ours rather than Telegram's and so normally arrives typed and bare.
+///
+/// The command itself is matched the way [`is_login_command`] matches it, on the first
+/// whitespace-separated token, so the two cannot disagree about what a login is.
+fn start_payload(text: &str) -> Option<&str> {
+    let mut parts = text.split_whitespace();
+    let command = parts.next()?;
+    if !is_login_command(command) {
+        return None;
+    }
+    let payload = parts.next()?;
+    // A second argument is not something a deep link can produce, so it is not a deep
+    // link. Falling back to a bare login is the safe reading of a message we do not
+    // recognise; guessing which token was meant is not.
+    if parts.next().is_some() {
+        return None;
+    }
+    is_carryable_payload(payload).then_some(payload)
+}
+
+/// The link the bot replies with: the secret that redeems a session and, **beside it,
+/// never inside it**, where to land once the cookie is set (#206).
+///
+/// The `c=` half is byte-for-byte what it has always been, whatever the destination
+/// is or is not — which is the property that matters. A destination cannot influence
+/// who a session belongs to, because it is not part of the secret, not part of what
+/// is hashed, and not part of what `/auth/complete` looks up. It only reaches the
+/// browser's own navigation, after that browser has signed *itself* in (#25).
+fn completion_link(base: &str, secret: &str, destination: Option<&str>) -> String {
+    match destination {
+        Some(r) => format!("{base}/auth/finish?c={secret}&r={r}"),
+        None => format!("{base}/auth/finish?c={secret}"),
+    }
+}
+
 /// Does this message ask for an invite to the sender's kitchen? Same tolerance as
 /// [`is_login_command`] for Telegram's padding and `@bot` suffixes.
 fn is_kitchen_invite_command(text: &str) -> bool {
@@ -787,9 +870,6 @@ pub async fn webhook(
         return Ok(StatusCode::OK);
     };
 
-    // Telegram sends a bare `/start` when the deep link carries no payload, which
-    // is the normal case here: the link exists to open a chat, not to carry state.
-    // A payload would be ignored — there is nothing a caller could usefully say.
     if is_kitchen_invite_command(&text) {
         kitchen_invite_reply(&state, &chat, &from).await?;
         return Ok(StatusCode::OK);
@@ -805,7 +885,7 @@ pub async fn webhook(
         return Ok(StatusCode::OK);
     }
 
-    let link = mint_completion(&state, &from).await?;
+    let link = login_reply(&state, &from, &text).await?;
     send(
         &state,
         chat.id,
@@ -873,11 +953,38 @@ async fn kitchen_invite_reply(
     Ok(())
 }
 
+/// The whole answer to a login command: the link [`webhook`] sends back.
+///
+/// A seam rather than an inline expression, because this composition **is** the
+/// feature (#206) — a deep link's payload becomes the destination on the link, and a
+/// bare `/start` produces exactly the link it always did. Written out here it is a
+/// thing a test can hold; folded into [`webhook`] it could only be reached through
+/// Telegram's HTTP API, which is the one thing the test could not have.
+pub(crate) async fn login_reply(
+    state: &AppState,
+    from: &TelegramUser,
+    text: &str,
+) -> Result<String, AppError> {
+    // A deep link may say where the person was heading — a plan they scanned an
+    // invite to, most of the time. It rides along; it is not part of the login.
+    mint_completion(state, from, start_payload(text)).await
+}
+
 /// Mint a completion secret for a **known** Telegram user and build their link.
 ///
 /// The user is not something a caller chose: it arrived from Telegram alongside a
 /// verified webhook secret.
-async fn mint_completion(state: &AppState, user: &TelegramUser) -> Result<String, AppError> {
+///
+/// `destination` is [`start_payload`]'s answer and is **not part of the login**. It
+/// is not minted, not hashed, not stored, and not read back at redemption — nothing
+/// below this line changes shape when it is `Some`. It is handed to
+/// [`completion_link`] and nowhere else, which is what keeps a payload anybody can
+/// send from being able to say anything about whose session comes out (#25).
+async fn mint_completion(
+    state: &AppState,
+    user: &TelegramUser,
+    destination: Option<&str>,
+) -> Result<String, AppError> {
     // Minted outside the retryable closure: every attempt writes the same hash, so
     // a re-run after a lost response collides on the primary key and fails honestly
     // instead of leaving a second live login link (#130).
@@ -914,9 +1021,10 @@ async fn mint_completion(state: &AppState, user: &TelegramUser) -> Result<String
         tracing::warn!("could not sweep expired auth rows: {e:#}");
     }
 
-    Ok(format!(
-        "{}/auth/finish?c={secret}",
-        state.telegram.frontend_base_url
+    Ok(completion_link(
+        &state.telegram.frontend_base_url,
+        &secret,
+        destination,
     ))
 }
 
@@ -1072,6 +1180,157 @@ mod tests {
         assert!(!is_login_command("/help"));
         assert!(!is_login_command("hello"));
         assert!(!is_login_command("start"), "a slash is required");
+    }
+
+    /// The payload `frontend/src/lib/destination.ts` produces for a pick invite, and
+    /// the path it decodes back to. Written out rather than computed so the two halves
+    /// of the round trip meet on a literal: this side proves the payload reaches the
+    /// bot's link unchanged, and `destination.test.ts` proves it decodes to this path.
+    const INVITE_PAYLOAD: &str = "L3BpY2svOWY0YjJjMWQ4ZTdhNjA1Mw";
+
+    /// A `/start` with nothing after it is the whole of today's behaviour and stays
+    /// exactly it — including the `@thebot` suffix a group adds and our own typed
+    /// `/login`, neither of which is a deep link.
+    #[test]
+    fn a_bare_login_command_carries_no_destination() {
+        for bare in [
+            "/start",
+            "/login",
+            "  /start",
+            "/start ",
+            "/start@lehlehlehbot",
+            "/login@lehlehlehbot",
+        ] {
+            assert_eq!(start_payload(bare), None, "{bare:?} carries nothing");
+        }
+        assert_eq!(
+            start_payload("/help L3BpY2sveA"),
+            None,
+            "a payload on something that is not a login is not a login"
+        );
+    }
+
+    /// `https://t.me/<bot>?start=<payload>` arrives as `/start <payload>`.
+    #[test]
+    fn a_deep_link_payload_is_carried() {
+        assert_eq!(
+            start_payload(&format!("/start {INVITE_PAYLOAD}")),
+            Some(INVITE_PAYLOAD)
+        );
+        assert_eq!(
+            start_payload(&format!("/start@lehlehlehbot {INVITE_PAYLOAD}")),
+            Some(INVITE_PAYLOAD),
+            "a group adds the @mention and the deep link still works"
+        );
+        assert_eq!(
+            start_payload(&format!("  /start   {INVITE_PAYLOAD}  ")),
+            Some(INVITE_PAYLOAD),
+            "Telegram pads"
+        );
+        assert_eq!(
+            start_payload(&format!("/login {INVITE_PAYLOAD}")),
+            Some(INVITE_PAYLOAD),
+            "/login is our alias for the same thing, so it carries the same thing"
+        );
+    }
+
+    /// The rule itself, apart from the message it was pulled out of.
+    ///
+    /// Telegram's alphabet is also what makes [`completion_link`]'s splice safe, so
+    /// this is two properties in one predicate: nothing here could have arrived from
+    /// a deep link, and nothing here could add a second parameter to a URL.
+    #[test]
+    fn a_carryable_payload_is_telegrams_own_alphabet_and_length() {
+        assert!(is_carryable_payload(INVITE_PAYLOAD));
+        assert!(is_carryable_payload("A"), "one character is a payload");
+        assert!(is_carryable_payload("a_b"), "underscore is base64url");
+        assert!(is_carryable_payload("a-b"), "so is hyphen");
+        assert!(is_carryable_payload("09azAZ"));
+
+        assert!(
+            !is_carryable_payload(""),
+            "nothing at all is not a destination"
+        );
+        for out in ["a+b", "a/b", "a=", "a b", "a&b", "a?b", "a#b", "a.b", "é"] {
+            assert!(!is_carryable_payload(out), "{out:?} is not base64url");
+        }
+
+        // Written out rather than as `START_PAYLOAD_MAX`: the ceiling is Telegram's
+        // documented one, so here the constant is what is under test and cannot also
+        // be the oracle for itself.
+        assert_eq!(START_PAYLOAD_MAX, 64);
+        assert!(is_carryable_payload(&"A".repeat(64)));
+        assert!(
+            !is_carryable_payload(&"A".repeat(65)),
+            "64 is the ceiling Telegram states, so 65 never came from Telegram"
+        );
+    }
+
+    /// The alphabet is Telegram's, and it is also what makes the splice into the
+    /// completion URL safe: none of these could add a second query parameter to a
+    /// link the bot is about to send someone.
+    #[test]
+    fn a_payload_telegram_could_not_have_sent_is_dropped() {
+        for impossible in [
+            "a&r=b", "a?b", "a#b", "a/b", "a+b", "a.b", "a=", "a%2Fb", "a\"b",
+        ] {
+            assert_eq!(
+                start_payload(&format!("/start {impossible}")),
+                None,
+                "{impossible:?} is not a Telegram start payload"
+            );
+        }
+
+        let longest = "A".repeat(START_PAYLOAD_MAX);
+        assert_eq!(
+            start_payload(&format!("/start {longest}")).map(str::len),
+            Some(START_PAYLOAD_MAX),
+            "64 characters is the ceiling, not past it"
+        );
+        let too_long = "A".repeat(START_PAYLOAD_MAX + 1);
+        assert_eq!(start_payload(&format!("/start {too_long}")), None);
+
+        assert_eq!(
+            start_payload("/start one two"),
+            None,
+            "a deep link sends one argument, so two is not a deep link"
+        );
+    }
+
+    /// **The redemption half of the link does not move.** This is the property that
+    /// keeps #25 intact through #206: a destination anybody can send the bot rides
+    /// beside the secret and never inside it, so the string `/auth/complete` looks up
+    /// — and the digest `login_completions` was keyed on — is the same either way.
+    #[test]
+    fn a_destination_leaves_the_secret_byte_identical() {
+        let base = "https://recipes.lehlehleh.com";
+        let secret = mint_secret();
+
+        let bare = completion_link(base, &secret, None);
+        let carried = completion_link(base, &secret, Some(INVITE_PAYLOAD));
+
+        assert_eq!(bare, format!("{base}/auth/finish?c={secret}"));
+        assert_eq!(carried, format!("{bare}&r={INVITE_PAYLOAD}"));
+        assert!(
+            carried.starts_with(&bare),
+            "the destination is appended after the secret, never woven into it"
+        );
+
+        let c_of = |link: &str| {
+            link.split_once("?c=")
+                .map(|(_, rest)| rest.split('&').next().unwrap().to_owned())
+        };
+        assert_eq!(c_of(&bare).as_deref(), Some(secret.as_str()));
+        assert_eq!(
+            c_of(&bare),
+            c_of(&carried),
+            "the same secret redeems the same session with or without a destination"
+        );
+        assert_eq!(
+            hash_secret(&c_of(&bare).unwrap()),
+            hash_secret(&c_of(&carried).unwrap()),
+            "so the row the redemption looks up is the same row"
+        );
     }
 
     #[test]

@@ -312,6 +312,10 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens/{id}", get(kitchens::get))
         .route("/kitchens/{id}/name", post(kitchens::rename))
         .route("/kitchens/{id}/invite", post(kitchens::invite))
+        // The meals planned in this kitchen (#207). A read beside the kitchen rather
+        // than a field on it: a plan's roster moves while the kitchen sits still, and
+        // every kitchen write echoes the kitchen back.
+        .route("/kitchens/{id}/meals", get(kitchens::meals))
         // The vocabulary a kitchen picks from — a person's list, so session-gated.
         .route("/equipment", get(equipment_api::vocabulary))
         .route("/pantry", get(equipment_api::pantry_vocabulary))
@@ -2030,6 +2034,93 @@ mod tests {
         );
     }
 
+    /// Reading a kitchen's meals is gated like everything else a person reaches (#25).
+    #[tokio::test]
+    async fn reading_a_kitchens_meals_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/kitchens/{id}/meals"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The boundary (#207): a kitchen's meals are its members' business. A signed-in
+    /// stranger holding the kitchen's id is refused and shown nothing — what a room is
+    /// eating, how many are deciding it and what they landed on all travel together, so
+    /// leaking the list would leak the room.
+    ///
+    /// 403 rather than 404: the session is valid and the identity simply is not in the
+    /// kitchen, which is the same answer minting an invite gives them.
+    #[tokio::test]
+    async fn a_stranger_cannot_read_a_kitchens_meals() {
+        let (app, conn) = test_app().await;
+        let mine = auth::issue_test_session(&conn, "4242").await;
+        let theirs = auth::issue_test_session(&conn, "9317").await;
+        let cookie = format!("recipes_session={mine}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+        make_plan(&app, &cookie, &id).await;
+
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/kitchens/{id}/meals"),
+                &format!("recipes_session={theirs}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // And the member it belongs to still sees it, so the refusal is about who is
+        // asking rather than the list being empty.
+        let res = app
+            .oneshot(get_req(&format!("/api/kitchens/{id}/meals"), &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+    }
+
+    /// A member reads their kitchen's meals end to end, in the shape the page renders
+    /// (#207): the channel to link to, the plan's own words, whether it has begun, how
+    /// many are in it, and what it decided.
+    ///
+    /// A plan made through `POST /api/session` seats its host at once, so a fresh one is
+    /// one person gathering for a dinner — the state a kitchen most often has in it.
+    #[tokio::test]
+    async fn a_member_reads_the_meals_planned_in_their_kitchen() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &id).await;
+
+        let res = app
+            .oneshot(get_req(&format!("/api/kitchens/{id}/meals"), &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        let meals = body.as_array().expect("a list of meals");
+        assert_eq!(meals.len(), 1);
+        assert_eq!(meals[0]["channel_id"], channel);
+        assert_eq!(meals[0]["meal_type"], "dinner");
+        assert_eq!(meals[0]["additions"].as_array().unwrap().len(), 0);
+        assert_eq!(meals[0]["started"], false);
+        assert_eq!(meals[0]["deciders"], 1, "the host is in their own plan");
+        assert!(meals[0]["decided"].is_null(), "nothing decided yet");
+    }
+
     #[tokio::test]
     async fn session_create_requires_a_session() {
         let (app, _conn) = test_app().await;
@@ -3142,6 +3233,127 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "{path} must not exist: a caller-initiated login is what let an \
                  attacker hand a victim a link and redeem their session"
+            );
+        }
+    }
+
+    /// **A destination changes the link and nothing else (#206).**
+    ///
+    /// Driven with the message texts Telegram actually delivers — `/start` for the
+    /// Start button, `/start <payload>` for `https://t.me/<bot>?start=<payload>` —
+    /// so this covers the composition and not only its halves.
+    ///
+    /// The #25 ruling this must not disturb is about *who* a session belongs to, and
+    /// the credential is the whole of that answer: a secret minted for the Telegram
+    /// user who messaged the bot, hashed, and delivered only to their chat. So the
+    /// two logins' rows are compared — same user, same handle, same lifetime, and
+    /// each row keyed on the hash of the secret in its own link and nothing else.
+    /// The destination is not in the row at all, which is what would notice if
+    /// somebody later decided it ought to be.
+    #[tokio::test]
+    async fn a_destination_does_not_touch_the_login_it_rides_beside() {
+        let (state, conn) = test_state(None).await;
+        let user = auth::TelegramUser {
+            id: 4242,
+            username: Some("dave".into()),
+        };
+        // `/pick/9f4b2c1d8e7a6053` in base64url — see `frontend/src/lib/destination`.
+        let payload = "L3BpY2svOWY0YjJjMWQ4ZTdhNjA1Mw";
+
+        /// The one live login, as stored: hash, telegram id, handle, expiry.
+        async fn only_row(conn: &libsql::Connection) -> (String, String, Option<String>, i64) {
+            let mut rows = conn
+                .query(
+                    "SELECT completion_hash, telegram_user_id, username, expires_at
+                     FROM login_completions",
+                    (),
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().expect("one login row");
+            // Read before stepping: a `Row` reads the cursor's *current* position, so
+            // the emptiness check below would blank this one if it ran first.
+            let read = (
+                row.get::<String>(0).unwrap(),
+                row.get::<String>(1).unwrap(),
+                row.get::<Option<String>>(2).unwrap(),
+                row.get::<i64>(3).unwrap(),
+            );
+            assert!(
+                rows.next().await.unwrap().is_none(),
+                "each mint leaves exactly one live login"
+            );
+            read
+        }
+
+        /// The secret a link hands to `/auth/complete` — the `c` parameter, whatever
+        /// else the link carries after it.
+        fn secret_in(link: &str) -> String {
+            link.split("?c=")
+                .nth(1)
+                .expect("a completion link states its secret")
+                .split('&')
+                .next()
+                .unwrap()
+                .to_owned()
+        }
+
+        let bare_link = auth::login_reply(&state, &user, "/start").await.unwrap();
+        let bare_row = only_row(&conn).await;
+        conn.execute("DELETE FROM login_completions", ())
+            .await
+            .unwrap();
+
+        let carried_link = auth::login_reply(&state, &user, &format!("/start {payload}"))
+            .await
+            .unwrap();
+        let carried_row = only_row(&conn).await;
+
+        assert_eq!(
+            bare_link,
+            format!(
+                "https://recipes.test/auth/finish?c={}",
+                secret_in(&bare_link)
+            )
+        );
+        assert_eq!(
+            carried_link,
+            format!(
+                "https://recipes.test/auth/finish?c={}&r={payload}",
+                secret_in(&carried_link)
+            ),
+            "the destination is appended after the secret, never woven into it"
+        );
+
+        assert_eq!(
+            (bare_row.1.as_str(), bare_row.2.as_deref()),
+            (carried_row.1.as_str(), carried_row.2.as_deref()),
+            "the login is for the same Telegram user, named the same way"
+        );
+        assert!(
+            (bare_row.3 - carried_row.3).abs() <= 1,
+            "and lives exactly as long: {} vs {}",
+            bare_row.3,
+            carried_row.3
+        );
+
+        // The lookup key is the hash of the link's secret — with a destination and
+        // without one — so the destination is no part of what redeems a session.
+        assert_eq!(bare_row.0, auth::hash_secret(&secret_in(&bare_link)));
+        assert_eq!(carried_row.0, auth::hash_secret(&secret_in(&carried_link)));
+        assert_ne!(
+            bare_row.0, carried_row.0,
+            "two logins are two secrets, which is true with or without a destination"
+        );
+
+        for stored in [
+            carried_row.0.as_str(),
+            carried_row.1.as_str(),
+            carried_row.2.as_deref().unwrap_or(""),
+        ] {
+            assert!(
+                !stored.contains(payload),
+                "the destination is not the credential and is not stored: {stored}"
             );
         }
     }
