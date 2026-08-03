@@ -15,8 +15,14 @@ import type { BuyRecipe, Ingredient, StructuredMeasure } from "./types";
  * The **checklist** no longer lives here (#131). Ticks moved to the meal session,
  * server-side, because a shopping list private to one device was the wrong object:
  * two people shopping the same meal each ticked their own copy and neither ever saw
- * the other's. See {@link getChecks}/{@link setCheck} — and {@link loadChecks} for
- * what is left of the device-local list, and when it is still the right answer.
+ * the other's. See {@link getChecks} — and {@link loadChecks} for what is left of the
+ * device-local list, and when it is still the right answer.
+ *
+ * **Reading the list is the only half that is HTTP** (#209). Ticking used to be a
+ * `POST` beside it here; it is a `buy_tick` event on the plan's socket now
+ * (`PickClient.tick`), through the one path every session write takes, and the answer
+ * comes back as the `buy` frame the server sends the whole room. There is nothing left
+ * to export for it: raising an event is the socket's job, not this module's.
  */
 
 const KEY = "recipes:consensus";
@@ -128,9 +134,7 @@ function checksFailed(status: number, action: string): ApiError {
     status,
     status === 401
       ? "You've been signed out. Sign in again to carry on."
-      : status === 403
-        ? "Only the people having this meal can tick things off its list."
-        : `Couldn't ${action} (${status}).`,
+      : `Couldn't ${action} (${status}).`,
   );
 }
 
@@ -150,31 +154,6 @@ export async function getChecks(
     `/api/session/${encodeURIComponent(channel)}/buy?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
   );
   if (!res.ok) throw checksFailed(res.status, "open the shopping list");
-  return (await res.json()) as BuyList;
-}
-
-/**
- * `POST /api/session/{channel}/buy` — tick a line off, or put it back.
- *
- * Returns the whole list rather than the one line, because the server does: a tick
- * can take an item off somebody else (last writer wins), so the answer to "what
- * changed" is never confined to the row you touched.
- */
-export async function setCheck(
-  channel: string,
-  source: string,
-  id: string,
-  index: number,
-  checked: boolean,
-): Promise<BuyList> {
-  const res = await apiFetch(
-    `/api/session/${encodeURIComponent(channel)}/buy`,
-    {
-      method: "POST",
-      body: JSON.stringify({ source, id, index, checked }),
-    },
-  );
-  if (!res.ok) throw checksFailed(res.status, "update the shopping list");
   return (await res.json()) as BuyList;
 }
 

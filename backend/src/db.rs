@@ -112,6 +112,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 27 by the same rule: production `_migrations` is at 26, so this is the next number
     // above everything, including the branches in flight beside it (#206, #207).
     (27, include_str!("../migrations/0027_plan_timers.sql")),
+    // 28 by the same rule: 0027 (#208) is the highest number in the tree and has landed
+    // on `main`, so this is the next number above everything.
+    (28, include_str!("../migrations/0028_event_instants.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

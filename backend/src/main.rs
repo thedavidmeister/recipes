@@ -294,12 +294,15 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
-        // The meal's shopping checklist (#131) — read by anyone holding the channel
-        // id (like the lobby it belongs to), written only by the people deciding it.
-        .route(
-            "/session/{channel}/buy",
-            get(session::buy_list).post(session::set_buy_check),
-        )
+        // The meal's shopping checklist (#131) — read by anyone holding the channel id,
+        // like the lobby it belongs to.
+        //
+        // **Read only, since #209.** Ticking used to be a `POST` here; it is a
+        // `buy_tick` event on the socket below now, through the one choke point every
+        // session write goes through (`events::ingest`). The verb is gone rather than
+        // kept as an alias, because a second door onto a guarded write is a second place
+        // for the guard to be wrong.
+        .route("/session/{channel}/buy", get(session::buy_list))
         .route("/session/{channel}/ws", get(session::ws))
         // Admin-only health dashboard: session-gated here, then narrowed to the
         // configured admin inside the handler ([`admin::health`]).
@@ -3400,8 +3403,56 @@ mod tests {
 
     // ---- buy checklist (#131) ----------------------------------------------
 
-    /// The meal's shopping list is a person-facing surface, so both halves of it are
-    /// session-gated like the rest (#25).
+    /// Tick (or untick) a line the way a client does since #209: **an event through the
+    /// framework's one choke point** (`events::ingest`), which is where the guard is
+    /// asked and where the room's frames come from.
+    ///
+    /// This is the transport half of what `POST /api/session/{channel}/buy` used to be,
+    /// and the tests below are the same tests it had — a refusal is now an empty answer
+    /// (nothing written, nothing announced) instead of a status code, because a socket
+    /// event has nowhere to carry a sentence (#179/#180).
+    ///
+    /// The instant is `now` on both sides of `normalize`, which is what an unmeasured
+    /// connection tapping right now looks like; none of these tests is about the clock.
+    async fn tick_event(
+        conn: &libsql::Connection,
+        channel: &str,
+        who: &str,
+        source: &str,
+        id: &str,
+        index: i64,
+        checked: bool,
+    ) -> Vec<session::ServerMsg> {
+        let now = events::server_now_ms();
+        events::ingest(
+            conn,
+            channel,
+            who,
+            &events::ClockOffset::new(),
+            now,
+            now,
+            events::SessionEvent::BuyTick {
+                source: source.to_owned(),
+                id: id.to_owned(),
+                index,
+                checked,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The one `buy` frame an accepted tick announces to the room, unwrapped.
+    fn announced(frames: &[session::ServerMsg]) -> &[session::BuyCheck] {
+        match frames {
+            [session::ServerMsg::Buy { checks, .. }] => checks,
+            other => panic!("expected one buy frame, got {other:?}"),
+        }
+    }
+
+    /// The meal's shopping list is a person-facing surface, so every way to reach it is
+    /// session-gated like the rest (#25) — the read over HTTP, and the socket a tick
+    /// travels on since #209.
     #[tokio::test]
     async fn the_buy_checklist_requires_a_session() {
         let (app, conn) = test_app().await;
@@ -3423,21 +3474,32 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
+        // The write half is a socket event now, so what has to be gated is the socket:
+        // an unauthenticated upgrade never reaches a handler to be refused by one.
         let res = app
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                None,
-                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
-            ))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/session/{channel}/ws"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// End to end through the router (#131): a decider ticks a line, it comes back
-    /// attributed to them, a second decider takes it over, and an untick clears it.
+    /// End to end (#131/#209): a decider ticks a line, it comes back attributed to
+    /// them, a second decider takes it over, and an untick clears it.
+    ///
+    /// **Adapted for the transport, not for the claim.** The tick used to be a `POST`
+    /// on this router and is a framework event now, so what is asserted moved from the
+    /// handler's answer to the frame the room is sent — the same whole list, reaching
+    /// the tapper and everybody shopping beside them in one message instead of two. The
+    /// reads are still the real router, so the identity a tick carries is still the one
+    /// the session established rather than one a test handed in.
     #[tokio::test]
-    async fn a_tick_round_trips_through_the_router_carrying_who_ticked_it() {
+    async fn a_tick_round_trips_through_the_framework_carrying_who_ticked_it() {
         let (app, conn) = test_app().await;
         let host = auth::issue_test_session(&conn, "host").await;
         let host_cookie = format!("recipes_session={host}");
@@ -3456,8 +3518,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let mel = auth::issue_test_session(&conn, "mel").await;
-        let mel_cookie = format!("recipes_session={mel}");
+        // Mel signs in, which is what registers the person a tick gets attributed to.
+        // No cookie is kept for them: a tick is an event on Mel's own socket now, and
+        // who raised it is that socket's authenticated session.
+        auth::issue_test_session(&conn, "mel").await;
         // Logging in registers the person; the handle comes from Telegram after, so
         // it is set here rather than before (`upsert_user` writes what it was told,
         // which for a test login is no handle at all).
@@ -3486,53 +3550,48 @@ mod tests {
         assert_eq!(body["checks"].as_array().unwrap().len(), 0);
 
         // The host grabs the flour.
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&host_cookie),
-                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let checks = body_json(res).await["checks"].clone();
-        assert_eq!(checks[0]["index"], 1);
-        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
+        let frames = tick_event(&conn, &channel, "host", "themealdb", "52772", 1, true).await;
+        let checks = announced(&frames);
+        assert_eq!(checks[0].index, 1);
+        assert_eq!(
+            checks[0].by.as_ref().unwrap().telegram_user_id,
+            "host",
+            "the tick wears the session that raised the event"
+        );
 
         // Mel had already picked it up — last writer wins, and there is still one row.
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&mel_cookie),
-                r#"{"source":"themealdb","id":"52772","index":1,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let checks = body_json(res).await["checks"].clone();
-        assert_eq!(checks.as_array().unwrap().len(), 1);
-        assert_eq!(checks[0]["by"]["telegram_user_id"], "mel");
-        assert_eq!(checks[0]["by"]["username"], "mel");
+        let frames = tick_event(&conn, &channel, "mel", "themealdb", "52772", 1, true).await;
+        let checks = announced(&frames);
+        assert_eq!(checks.len(), 1);
+        let by = checks[0].by.as_ref().unwrap();
+        assert_eq!(by.telegram_user_id, "mel");
+        assert_eq!(by.username.as_deref(), Some("mel"));
 
         // Put it back.
+        let frames = tick_event(&conn, &channel, "host", "themealdb", "52772", 1, false).await;
+        assert!(announced(&frames).is_empty());
+
+        // And the router agrees with the room, because both read the same table.
         let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&host_cookie),
-                r#"{"source":"themealdb","id":"52772","index":1,"checked":false}"#,
+            .oneshot(get_req(
+                &format!("/api/session/{channel}/buy?source=themealdb&id=52772"),
+                &host_cookie,
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_json(res).await["checks"].as_array().unwrap().len(), 0);
     }
 
     /// A signed-in stranger holding the channel id must not be able to write into
-    /// someone else's basket — the roster is who is having this meal (#131). 403,
-    /// not 401: the session is fine, the identity just is not on the list.
+    /// someone else's basket — the roster is who is having this meal (#131/#200).
+    ///
+    /// **Adapted for the transport** (#209): the refusal was a 403 with a sentence and
+    /// is silence now, because the tick travels on a socket the server never answers a
+    /// frame on. What it means is unchanged and is what this asserts — the room is told
+    /// nothing, and nothing was written. The plan is **started** here where it was not
+    /// before, so the only thing that can refuse this tick is the roster: the guard asks
+    /// one question about a person and a plan, and a lobby would have failed the other
+    /// half of it for a different reason.
     #[tokio::test]
     async fn a_non_member_cannot_tick_someone_elses_list() {
         let (app, conn) = test_app().await;
@@ -3540,18 +3599,14 @@ mod tests {
         let host_cookie = format!("recipes_session={host}");
         let kid = make_kitchen(&app, &host_cookie, "Home").await;
         let channel = make_plan(&app, &host_cookie, &kid).await;
+        begin_plan(&app, &host_cookie, &channel).await;
 
-        let stranger = auth::issue_test_session(&conn, "stranger").await;
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&format!("recipes_session={stranger}")),
-                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        auth::issue_test_session(&conn, "stranger").await;
+        let frames = tick_event(&conn, &channel, "stranger", "themealdb", "52772", 0, true).await;
+        assert!(
+            frames.is_empty(),
+            "refused at the guard, so the room hears nothing at all"
+        );
 
         // And the refusal is real: nothing was written.
         let res = app
@@ -3565,12 +3620,12 @@ mod tests {
     }
 
     /// A plan still in its lobby has no list to shop (#175). `buy` is reached
-    /// *through* a decision, so a tick before the swiping has begun is a client bug —
-    /// 400, the answer every other write against the wrong stage of a plan gives.
+    /// *through* a decision, so a tick before the swiping has begun writes nothing.
     ///
-    /// The refusal is checked for what it left behind, not just for its status: the
-    /// sentence comes from the handler's read, but what actually keeps the row out is
-    /// the same fact repeated inside the write's own predicate.
+    /// **Adapted for the transport** (#209): the refusal was a 400 and is silence now.
+    /// The refusal is checked for what it left behind rather than for a status — which
+    /// is what this test always did in its second half, because what actually keeps the
+    /// row out is the fact repeated inside the write's own predicate.
     #[tokio::test]
     async fn a_shopping_list_belongs_to_a_started_plan() {
         let (app, conn) = test_app().await;
@@ -3579,16 +3634,8 @@ mod tests {
         let kid = make_kitchen(&app, &host_cookie, "Home").await;
         let channel = make_plan(&app, &host_cookie, &kid).await;
 
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&host_cookie),
-                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let frames = tick_event(&conn, &channel, "host", "themealdb", "52772", 0, true).await;
+        assert!(frames.is_empty(), "a lobby has no list to announce");
 
         let res = app
             .clone()
@@ -3606,23 +3653,19 @@ mod tests {
 
         // The same tap, once the plan is under way.
         begin_plan(&app, &host_cookie, &channel).await;
-        let res = app
-            .clone()
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&host_cookie),
-                r#"{"source":"themealdb","id":"52772","index":0,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let checks = body_json(res).await["checks"].clone();
-        assert_eq!(checks[0]["by"]["telegram_user_id"], "host");
+        let frames = tick_event(&conn, &channel, "host", "themealdb", "52772", 0, true).await;
+        let checks = announced(&frames);
+        assert_eq!(checks[0].by.as_ref().unwrap().telegram_user_id, "host");
     }
 
-    /// A checklist for a channel that does not exist is refused on both verbs — a
-    /// mistyped channel must never conjure a room, the same rule the WS upgrade and
+    /// A checklist for a channel that does not exist is refused however it is reached —
+    /// a mistyped channel must never conjure a room, the same rule the WS upgrade and
     /// the walk already hold to.
+    ///
+    /// **Adapted for the transport** (#209): the second half was a `POST` on this
+    /// router and is a framework event now, so the 400 it used to get is the guard's
+    /// silence instead. There is no plan, so there is no roster and no start — the one
+    /// question the guard asks cannot be answered yes by a channel that is not there.
     #[tokio::test]
     async fn a_checklist_for_an_unknown_session_is_refused() {
         let (app, conn) = test_app().await;
@@ -3630,25 +3673,28 @@ mod tests {
         let cookie = format!("recipes_session={token}");
 
         let res = app
-            .clone()
             .oneshot(get_req("/api/session/nope/buy?source=t&id=1", &cookie))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-        let res = app
-            .oneshot(json_post(
-                "/api/session/nope/buy",
-                Some(&cookie),
-                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
-            ))
+        let frames = tick_event(&conn, "nope", "4242", "t", "1", 0, true).await;
+        assert!(frames.is_empty());
+        assert!(session::load_buy_checks(&conn, "nope", "t", "1")
             .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+            .unwrap()
+            .is_empty());
     }
 
     /// A negative ingredient index names no line of any recipe, so it is an author
     /// error rather than a row to write.
+    ///
+    /// **Adapted for the transport** (#209): this was a sentence the handler said before
+    /// writing, and the handler is gone — so the check moved into `tick_item`'s own
+    /// predicate, where a second caller cannot miss it, and the refusal is silence. The
+    /// plan is **started** here where it was not before, so a passing test cannot be a
+    /// test that was refused for being a lobby: the only thing wrong with this tap is
+    /// the index.
     #[tokio::test]
     async fn a_negative_ingredient_index_is_refused() {
         let (app, conn) = test_app().await;
@@ -3656,16 +3702,18 @@ mod tests {
         let cookie = format!("recipes_session={token}");
         let kid = make_kitchen(&app, &cookie, "Home").await;
         let channel = make_plan(&app, &cookie, &kid).await;
+        begin_plan(&app, &cookie, &channel).await;
 
-        let res = app
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&cookie),
-                r#"{"source":"t","id":"1","index":-1,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let frames = tick_event(&conn, &channel, "4242", "t", "1", -1, true).await;
+        assert!(
+            announced(&frames).is_empty(),
+            "the guard passed, so the room is told the list — and it is empty"
+        );
+
+        // The same tap on a line that exists does land, so the refusal above is about
+        // the index and not about the plan.
+        let frames = tick_event(&conn, &channel, "4242", "t", "1", 0, true).await;
+        assert_eq!(announced(&frames).len(), 1);
     }
 
     // ---- leaving a plan (#96) ----------------------------------------------
@@ -3871,16 +3919,10 @@ mod tests {
 
         // …and mel is still a decider, not a half-removed one: the roster is the
         // membership every other write is judged against, so a refused departure has
-        // to leave her able to act.
-        let res = app
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&format!("recipes_session={mel}")),
-                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        // to leave her able to act. Her shopping tick is a framework event since #209,
+        // and an accepted one announces the list it landed on.
+        let frames = tick_event(&conn, &channel, "mel", "t", "1", 0, true).await;
+        assert_eq!(announced(&frames).len(), 1);
     }
 
     /// The host is not trapped in their own plan: leaving hands it to the next person
@@ -4014,15 +4056,9 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-        // The shopping list is a decider-only write, and she is not one now.
-        let res = app
-            .oneshot(json_post(
-                &format!("/api/session/{channel}/buy"),
-                Some(&mcookie),
-                r#"{"source":"t","id":"1","index":0,"checked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        // The shopping list is a decider-only write, and she is not one now — refused
+        // in silence at the framework's guard since #209, so the room hears nothing.
+        let frames = tick_event(&conn, &channel, "mel", "t", "1", 0, true).await;
+        assert!(frames.is_empty());
     }
 }

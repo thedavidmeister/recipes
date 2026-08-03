@@ -49,17 +49,36 @@
 //! Each stage is framework code and each is asked once, so a new event kind supplies a
 //! payload, a [`Guard`], and an `apply` arm — never its own copy of that choreography.
 //!
-//! ## The events that have not migrated yet
+//! ## Everything a session raises comes through here (#209)
 //!
-//! Votes, shopping ticks, the pantry seed and the decision predate this and still run
-//! through their own handlers in [`crate::session`]; migrating them is separate work
-//! and this module is shaped for it. Nothing here is timer-shaped: [`EventEnvelope`] is
-//! generic over its payload, [`normalize`] knows only about instants, [`Guard`] names a
-//! predicate rather than a feature, and [`announce`] carries whatever frames a handler
-//! returns. A vote arrives here as a `Vote` payload with [`Guard::SeatedInStartedPlan`]
-//! and an apply arm that is the existing `record_vote`; its `at` becomes the swipe's
-//! instant instead of the row's `unixepoch()` default. Nothing about that migration
-//! needs this file to change.
+//! Cook timers were the first consumer; the events that predate the framework — a
+//! **vote**, a **shopping tick**, the **pantry seed** it triggers and the **decision**
+//! that a vote can complete — are the rest of them, and since #209 they arrive by this
+//! path too. There is no second door: [`crate::session::socket_loop`] reads one client
+//! frame kind that writes anything (`ClientMsg::Event`), and the shopping tick's old
+//! `POST /api/session/{channel}/buy` is gone rather than kept beside it.
+//!
+//! The migration cost this module nothing, which is the claim #208 made and this is the
+//! test of it: [`EventEnvelope`] is generic over its payload, [`normalize`] knows only
+//! about instants, [`Guard`] names a predicate about a person and a plan rather than a
+//! feature, and [`ingest`] carries whatever frames a handler returns. Each event that
+//! moved supplied a [`SessionEvent`] variant, a guard (all of them want the one that
+//! already existed) and an [`apply`] arm calling the *same* handler it always did — the
+//! same SQL, the same predicates inside each write, the same frames to the room.
+//!
+//! What each of them **gained** is the fact this framework exists to carry: the instant
+//! the initiator raised it, normalised through that participant's measured drift. A
+//! swipe now knows when it was swiped rather than when its row was written; a tick knows
+//! when the hand closed on the flour; and the decision knows the instant of the tap that
+//! completed it, which is the only honest answer for an event nobody sends and everybody
+//! caused (migration 0028).
+//!
+//! Two things deliberately did **not** move. The decision is not a wire kind — no client
+//! may raise it, so it stays what #205 made it: a consequence evaluated inside the
+//! deciding vote's own write. And the pantry seed is not one either: nobody taps a
+//! pre-tick, so it runs where it always ran (the first time a list is asked for, by a
+//! read or by a tick) and is stamped with the server's own clock, which *is* the shared
+//! timeline.
 
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -285,6 +304,37 @@ pub enum SessionEvent {
         id: String,
         step: i64,
     },
+    /// **This client's yes or no on a recipe** (#209, formerly `{"type":"vote"}`).
+    ///
+    /// The voter is not here for the reason nobody else is: it is the authenticated
+    /// session. What it gained by moving is `at` — the instant of the swipe itself,
+    /// rather than the `unixepoch()` the row defaulted to whenever the write landed.
+    ///
+    /// It is also the event that can end the pick, because the win condition is
+    /// evaluated inside this vote's own write (#205). That is not a second kind: no
+    /// client raises a decision, and one that could would be a client deciding.
+    Vote {
+        source: String,
+        id: String,
+        vote: bool,
+    },
+    /// **A line of the meal's shopping list, claimed or put back** (#131/#209, formerly
+    /// `POST /api/session/{channel}/buy`).
+    ///
+    /// `checked` carries both directions rather than there being two kinds, because that
+    /// is what the tap is: one control with two states, and a claim whose release is a
+    /// separate event kind is a claim whose release could be guarded differently.
+    ///
+    /// `index` is a position in the recipe's shopping-list projection, so a negative one
+    /// names no line of any recipe. It is refused in [`crate::session::tick_item`]'s own
+    /// predicate rather than here — the wire cannot express "a non-negative integer", and
+    /// a check that lives anywhere but the write is a check a second caller can miss.
+    BuyTick {
+        source: String,
+        id: String,
+        index: i64,
+        checked: bool,
+    },
 }
 
 /// **What a kind requires of whoever raised it** — policy, named once per kind and
@@ -307,9 +357,14 @@ impl SessionEvent {
     /// somebody has said who may raise it.
     pub fn guard(&self) -> Guard {
         match self {
-            SessionEvent::TimerStart { .. } | SessionEvent::TimerDismiss { .. } => {
-                Guard::SeatedInStartedPlan
-            }
+            // Every kind wants the same one, and that is the finding rather than a
+            // shortcut: `seated_in_a_started_plan` is the predicate the vote, the tick
+            // and the timer each hand-rolled before they arrived here, so migrating them
+            // added no policy — it removed three copies of one (#175/#179/#209).
+            SessionEvent::TimerStart { .. }
+            | SessionEvent::TimerDismiss { .. }
+            | SessionEvent::Vote { .. }
+            | SessionEvent::BuyTick { .. } => Guard::SeatedInStartedPlan,
         }
     }
 }
@@ -414,7 +469,115 @@ async fn apply(
                 .await?;
             announce_timers(conn, &event.channel, source, id).await
         }
+        // The swipe, and the one thing a swipe can finish (#205/#209).
+        //
+        // **Announce nothing unless the row was written**, which is the rule this arm
+        // brought with it from the socket loop rather than a new one: peers apply a vote
+        // frame to their tally incrementally, so announcing a vote the database declined
+        // would put a phantom yes on every open client until each next rehydrates.
+        // `false` here is the write's own predicate refusing — not a decider, the
+        // swiping has not begun, or the plan has already decided (`in_an_undecided_plan`,
+        // which the framework's guard deliberately does not cover: shopping happens
+        // *after* the decision, so one predicate for both would make the decision close
+        // the shop it opened).
+        //
+        // The decision is asked **only on the vote that might have met it**, and only
+        // when that vote was recorded — no poll, no sweep, no browser. It answers for
+        // the call that recorded it and for no other, so two votes completing at once
+        // produce exactly one `Decided`: the loser of that race changed no row and says
+        // nothing.
+        SessionEvent::Vote { source, id, vote } => {
+            if !crate::session::record_vote(
+                conn,
+                &event.channel,
+                source,
+                id,
+                &event.initiator,
+                *vote,
+                event.at,
+            )
+            .await?
+            {
+                return Ok(Vec::new());
+            }
+            let mut frames = vec![ServerMsg::Vote {
+                voter: event.initiator.clone(),
+                source: source.to_owned(),
+                id: id.to_owned(),
+                vote: *vote,
+            }];
+            if let Some(d) =
+                crate::session::decide_if_agreed(conn, &event.channel, source, id, event.at).await?
+            {
+                frames.push(ServerMsg::Decided {
+                    source: d.source,
+                    id: d.id,
+                    decided_at: d.decided_at,
+                });
+            }
+            Ok(frames)
+        }
+        // A line of the shopping list, taken or put back (#131/#209).
+        //
+        // The **seed runs first** (#156), exactly as it did when this was an HTTP
+        // handler and for the same reason: a tick can be the first thing that ever
+        // touches this list — somebody opened `buy` on a peer's phone and tapped before
+        // this client read it — so a first tap has to land *on top of* the pantry's
+        // answer rather than be overwritten by a seed arriving after it.
+        //
+        // Unlike the vote, the list is announced **whether or not the write changed a
+        // row**, which is again what this arm inherited: the old handler re-read and
+        // announced unconditionally after the write. It is also the right rule
+        // ([`announce_timers`] gives it) — a whole-list frame is self-healing, so a tick
+        // the write predicate refused corrects the tapper's screen with the truth
+        // instead of leaving it showing a claim nobody holds.
+        SessionEvent::BuyTick {
+            source,
+            id,
+            index,
+            checked,
+        } => {
+            crate::session::seed_buy_list(conn, &event.channel, source, id).await?;
+            if *checked {
+                crate::session::tick_item(
+                    conn,
+                    &event.channel,
+                    source,
+                    id,
+                    *index,
+                    &event.initiator,
+                    event.at,
+                )
+                .await?;
+            } else {
+                crate::session::untick_item(
+                    conn,
+                    &event.channel,
+                    source,
+                    id,
+                    *index,
+                    &event.initiator,
+                )
+                .await?;
+            }
+            announce_buy(conn, &event.channel, source, id).await
+        }
     }
+}
+
+/// The room's whole shopping checklist for one recipe, as a frame — [`announce_timers`]'
+/// rule, on the table it was written for (#131).
+async fn announce_buy(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<Vec<ServerMsg>> {
+    Ok(vec![ServerMsg::Buy {
+        source: source.to_owned(),
+        id: id.to_owned(),
+        checks: crate::session::load_buy_checks(conn, channel, source, id).await?,
+    }])
 }
 
 /// The room's whole timer state for one recipe, as a frame.
