@@ -23,6 +23,14 @@
    * cross-pollination is — so the people who already said yes are named under it,
    * each in their own colour (#131/#145). It turns a solitary sort into the
    * conversation it actually is: you are not rating recipes, you are answering Mel.
+   *
+   * **Watching is one of its states (#180).** Someone who opened the link after the
+   * swiping began has no seat, so their vote is refused where it is written — and a
+   * vote is a socket frame the server never answers, so a swipe from them lands
+   * nowhere and says nothing. There is no error to render after the fact, which is
+   * why the state is on screen before it: the card and the tally stay (watching is
+   * seeing what is being decided), and the two buttons give way to one line naming
+   * whose decision this is.
    */
   interface Props {
     status: PickStatus;
@@ -34,6 +42,21 @@
     /** Who has already said yes to this card. */
     yesVoters?: Voter[];
     /**
+     * Watching rather than deciding (#180) — this plan started without you.
+     *
+     * The vote controls go; nothing else does. It is not a lesser view of the pick,
+     * it is the same view with the half you cannot use taken off it.
+     */
+    watching?: boolean;
+    /**
+     * Who is deciding — the plan's roster, for the watching line to name.
+     *
+     * Only read while `watching`: a decider is one of these people and does not need
+     * telling. Empty falls back to the count, which is a lobby not read yet rather
+     * than a plan with nobody in it — a started plan always holds at least its host.
+     */
+    roster?: Voter[];
+    /**
      * Whether this person has answered every recipe the plan can currently deal them
      * (#202), so an empty deck is **finished** rather than loading.
      *
@@ -42,6 +65,13 @@
      * false independently of every one of them. As a status it would have had to lose a
      * race with `reconnecting`, which would put "Finding more recipes…" back in front of
      * exactly the person this state exists for.
+     *
+     * **`watching` outranks it.** Both can arrive true — the walk deals a watcher a deck
+     * like anyone else and an empty deal sets this — but the notice is a decider's: a
+     * watcher swipes nothing, so "you've seen every recipe that fits this plan" is a
+     * claim about answers they were never able to give, and the others it says are still
+     * deciding are a roster they are not on. So a watcher's empty deck stays the watching
+     * one (#180), whose footer already says whose decision this is.
      */
     finished?: boolean;
     error?: string;
@@ -57,6 +87,8 @@
     card,
     participants = 1,
     yesVoters = [],
+    watching = false,
+    roster = [],
     finished = false,
     error,
     shareUrl,
@@ -159,13 +191,14 @@
         </p>
       {/if}
 
-      {#if !card && finished}
+      {#if !card && finished && !watching}
         <!-- An empty deck, for the other reason: everything this plan can deal you has
              been answered (see the `finished` prop). Waiting on the others is a real
              state and it says so, rather than hunting for a card that is not coming.
              Not an error and nothing to do, so it wears the same quiet Notice the other
              empty states wear, with the roster it is waiting on named under it the way
-             the footer already names it. -->
+             the footer already names it. A decider's state only — a watcher has answered
+             nothing and is on no roster to be waited on, so `watching` takes it off. -->
         <Notice>
           <p class="font-display text-stone-900">Nothing left to swipe.</p>
           <p class="mt-1 text-sm text-stone-600">
@@ -244,26 +277,64 @@
           </ul>
         {/if}
 
-        <div class="mt-5 flex items-center justify-center gap-4">
-          <button
-            onclick={() => onVote?.(false)}
-            class="rounded-pill font-display bg-cream-50 border border-stone-200 px-8 py-3 font-medium text-stone-600 transition-colors hover:border-stone-400"
-          >
-            Pass
-          </button>
-          <button
-            onclick={() => onVote?.(true)}
-            class="rounded-pill font-display bg-pesto-500 text-cream-50 hover:bg-pesto-500/90 px-8 py-3 font-medium transition-colors"
-          >
-            Yes
-          </button>
-        </div>
+        {#if !watching}
+          <!-- Absent, not disabled, for a watcher. A greyed-out Yes still offers
+             itself and still explains nothing; the honest thing is that there is
+             no vote here to cast, and the footer says whose it is. -->
+          <div class="mt-5 flex items-center justify-center gap-4">
+            <button
+              onclick={() => onVote?.(false)}
+              class="rounded-pill font-display bg-cream-50 border border-stone-200 px-8 py-3 font-medium text-stone-600 transition-colors hover:border-stone-400"
+            >
+              Pass
+            </button>
+            <button
+              onclick={() => onVote?.(true)}
+              class="rounded-pill font-display bg-pesto-500 text-cream-50 hover:bg-pesto-500/90 px-8 py-3 font-medium transition-colors"
+            >
+              Yes
+            </button>
+          </div>
+        {/if}
       {/if}
 
       <footer class="mt-6 border-t border-stone-200 pt-4">
-        <p class="text-sm text-stone-500">
-          {participants} deciding · swipe to find something everyone likes
-        </p>
+        {#if watching}
+          <!-- The line that says whose decision this is. It takes the slot the count
+             already had, because it answers the same question with the part a
+             watcher is missing — not how many, but who, and why there is nothing to
+             press. It sits here rather than where the buttons were so that it is on
+             screen in *every* watching state, including the ones with no card yet.
+             Each name wears its own colour, the app's one device for whose a thing
+             is, and the sentence around them wears the resting voice every other
+             quiet line in this panel wears. -->
+          <p class="text-sm text-stone-500">
+            {#if roster.length}
+              <!-- Each name keeps its own separator so the punctuation cannot
+                 drift away from the name it belongs to, and the spacing is in the
+                 string rather than between the tags: Svelte trims the whitespace
+                 at an each block's edges, so a space left to the markup vanishes
+                 and the next person's colour lands against the comma. -->
+              {#each roster as v, i (v.telegram_user_id)}
+                <span
+                  ><UserName user={v} inline />{i < roster.length - 2
+                    ? ", "
+                    : i === roster.length - 2
+                      ? " and "
+                      : ""}</span
+                >
+              {/each}
+              {roster.length === 1 ? "is" : "are"} deciding.
+            {:else}
+              {participants} deciding.
+            {/if}
+            You're watching — this plan started without you.
+          </p>
+        {:else}
+          <p class="text-sm text-stone-500">
+            {participants} deciding · swipe to find something everyone likes
+          </p>
+        {/if}
       </footer>
     {/if}
   </Panel>

@@ -23,6 +23,7 @@
     type Voter,
   } from "$lib/pick";
   import PlanLobby from "$lib/components/PlanLobby.svelte";
+  import { isWatching } from "$lib/roster";
   import { cardKey, decidingCount } from "$lib/consensus";
   import { me } from "$lib/auth";
   import { stashConsensus } from "$lib/buy";
@@ -269,7 +270,10 @@
       decided = lobby.decided ?? decided;
       lobbyError = undefined;
     } catch (e) {
-      // Already started and not on the roster: you can watch, not vote.
+      // Already started and not on the roster: the join is refused, the plain read is
+      // not, and that read is the point — it carries the roster `watching` below
+      // measures this viewer against (#180). Watching is a state this page renders,
+      // so a refused seat is something to go and find out about, not an error.
       try {
         lobby = await getLobby(channel);
         deciders = lobby.voters.length;
@@ -362,6 +366,28 @@
     queryKey: ["session"],
     queryFn: me,
   }));
+
+  /**
+   * Watching, not deciding (#180) — the plan started and this viewer has no seat.
+   *
+   * Derived from the roster rather than latched when the join was refused, because a
+   * flag set once goes stale and the roster does not: it is re-read on every lobby
+   * announcement, so this answer is only ever as old as the last one. It is also what
+   * keeps the two states apart. **A seat is what is asked, never when somebody
+   * arrived** — a kitchen member the host seated before the start (#72) who opens the
+   * link an hour in is on the roster and votes, which is exactly what `join_lobby`
+   * says by re-seating them (its refusal is `started` *and* off the roster).
+   *
+   * `isWatching` holds the three-way guard and its reasoning; it is a pure module so
+   * a story and a unit test can both reach it (`lint:env`).
+   */
+  const watching = $derived(
+    isWatching({
+      started,
+      roster: lobby?.voters,
+      viewer: session.data?.telegram_user_id,
+    }),
+  );
 
   let client: PickClient | null = null;
 
@@ -541,6 +567,12 @@
   function vote(y: boolean) {
     const c = current;
     if (!c) return;
+    // A watcher has no buttons to press, and this is the same sentence said where the
+    // frame would be sent: `record_vote` refuses the write and the socket has nowhere
+    // to answer, so a vote from here would be swallowed in silence rather than
+    // refused out loud — and it would still take the card off this client's deck,
+    // which is a change nothing undoes.
+    if (watching) return;
     recordSwipe();
     queued.add(cardKey(c.source, c.id));
     client?.vote(c.source, c.id, y); // the echoed vote updates the tally
@@ -566,6 +598,8 @@
     card={current}
     participants={deciding}
     {yesVoters}
+    {watching}
+    roster={lobby?.voters ?? []}
     {finished}
     shareUrl={page.url.href}
     {copied}
