@@ -55,7 +55,10 @@ describe("raise", () => {
   it("says nothing about who raised it", () => {
     // Identity is the authenticated session. A field here would be a claim this side
     // cannot back, and the server would have to ignore it anyway.
-    const frame = raise({ kind: "timer_dismiss", source: "s", id: "i", step: 1 }, 1);
+    const frame = raise(
+      { kind: "timer_dismiss", source: "s", id: "i", step: 1 },
+      1,
+    );
     expect(JSON.stringify(frame)).not.toContain("initiator");
     expect(JSON.stringify(frame)).not.toContain("user");
   });

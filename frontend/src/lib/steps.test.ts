@@ -207,7 +207,11 @@ describe("sharedTimers", () => {
   it("renders the room's deadline on this device's clock", () => {
     // A device a minute fast: the shared deadline is 5 minutes out, and it reads 5
     // minutes out here too, because the offset is added back before the subtraction.
-    const timers = sharedTimers([running(7, now + 300_000)], 60_000, now + 60_000);
+    const timers = sharedTimers(
+      [running(7, now + 300_000)],
+      60_000,
+      now + 60_000,
+    );
     expect(timers[7].remaining).toBe(300);
     expect(timers[7].done).toBe(false);
   });
@@ -231,7 +235,9 @@ describe("sharedTimers", () => {
   });
 
   it("never counts below zero", () => {
-    expect(sharedTimers([running(7, now - 90_000)], 0, now)[7].remaining).toBe(0);
+    expect(sharedTimers([running(7, now - 90_000)], 0, now)[7].remaining).toBe(
+      0,
+    );
   });
 
   it("carries who started it, the way a ticked shopping line carries who got it", () => {

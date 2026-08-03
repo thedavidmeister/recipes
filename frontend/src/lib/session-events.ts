@@ -88,7 +88,10 @@ export interface TimePongFrame {
  * `now` is a parameter so a test can state the instant rather than race one. Callers
  * pass nothing.
  */
-export function raise(event: SessionEvent, now: number = Date.now()): EventFrame {
+export function raise(
+  event: SessionEvent,
+  now: number = Date.now(),
+): EventFrame {
   return { type: "event", at: now, event };
 }
 
