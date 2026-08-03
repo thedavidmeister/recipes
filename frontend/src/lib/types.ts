@@ -352,6 +352,41 @@ export interface KitchenDetail {
 }
 
 /**
+ * The recipe a kitchen's meal landed on (#205/#207). Mirrors `session::DecidedMeal`.
+ *
+ * The title is joined on the server, off `recipes`, so the list is one read: a kitchen
+ * page showing five decided meals is not five recipe fetches from the browser. It is a
+ * real corpus record — the decision is a stored `(source, id)` and this is that row's
+ * own title.
+ */
+export interface DecidedMeal {
+  source: string;
+  id: string;
+  title: string;
+}
+
+/**
+ * One meal planned in a kitchen (#207). Mirrors `session::KitchenMeal`.
+ *
+ * The three states are read off two fields and are exactly what a plan can be in:
+ * gathering (`started` false), deciding (`started` true, `decided` null), and decided.
+ * A plan everybody left is a deleted row (#96/#169), so there is no fourth state and
+ * nothing to render for one — such a meal is simply not in the list.
+ *
+ * `deciders` is the roster count: who joined the plan, not who is connected and not who
+ * has voted.
+ */
+export interface KitchenMeal {
+  /** The plan's channel — `/pick/{channel_id}` is the way back into it. */
+  channel_id: string;
+  meal_type: MealType;
+  additions: MealAddition[];
+  started: boolean;
+  deciders: number;
+  decided: DecidedMeal | null;
+}
+
+/**
  * One line of a kitchen's "add these next" list (#83). Mirrors
  * `recipe_core::equipment::Addition`.
  */

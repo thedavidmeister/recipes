@@ -1,5 +1,10 @@
 import { ApiError, apiFetch } from "./client";
-import type { EquipmentAdvice, KitchenDetail, KitchenSummary } from "./types";
+import type {
+  EquipmentAdvice,
+  KitchenDetail,
+  KitchenMeal,
+  KitchenSummary,
+} from "./types";
 
 /**
  * Kitchens (#72): the durable shared space that scopes the meal flow. Unlike the
@@ -36,6 +41,20 @@ export async function getKitchen(id: string): Promise<KitchenDetail> {
   const res = await apiFetch(`/api/kitchens/${encodeURIComponent(id)}`);
   if (!res.ok) throw failed(res.status, "open this kitchen");
   return (await res.json()) as KitchenDetail;
+}
+
+/**
+ * The meals planned in a kitchen (#207), newest first. Members only — a 403 otherwise.
+ *
+ * Asked for separately rather than read off {@link getKitchen}, because it moves on its
+ * own: people join a plan and a plan decides while the kitchen's name, members and
+ * shelves sit still. Carrying it on the kitchen would also re-read every plan each time
+ * somebody added a pantry item, since every kitchen write answers with the kitchen.
+ */
+export async function kitchenMeals(id: string): Promise<KitchenMeal[]> {
+  const res = await apiFetch(`/api/kitchens/${encodeURIComponent(id)}/meals`);
+  if (!res.ok) throw failed(res.status, "load this kitchen's meals");
+  return (await res.json()) as KitchenMeal[];
 }
 
 /** Create a kitchen owned by the caller. */
