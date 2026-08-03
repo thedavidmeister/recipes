@@ -401,7 +401,20 @@ writes" — there are none.
   link", not "the person who sent me this link is the attacker".
 - **Accepted cost**: the session lands in whichever browser opens the bot's
   link, so phone-Telegram cannot sign in a desktop. Cross-device transfer _is_
-  the attack.
+  the attack. A QR is therefore an **invite**, not a session transfer: it seats
+  whoever opens it once they log in _on that device_.
+- **The destination travels; the session still does not (#206).** A scan opens
+  the system browser — a different cookie jar from the Telegram webview the
+  session landed in — so an invite always meets the login screen, and a login
+  that landed at home dropped the invite on the floor. The page worth returning
+  to now rides **out** as the bot's `?start=` payload (the path in base64url,
+  ≤64 characters of `A–Z a–z 0–9 _ -`, which is Telegram's whole alphabet) and
+  **back** as a query parameter beside the secret in the bot's reply;
+  `/auth/finish` navigates there once the cookie is set. It carries **where**,
+  never **who**: anyone can `/start` the bot with any payload, so it is no part
+  of the secret, is never stored, and is **validated as a same-origin relative
+  path at the point of use** (`$lib/destination`) rather than trusted for the
+  hop it took. A bare `/start` behaves exactly as it always did.
 - **The webhook secret is not optional.** Without
   `X-Telegram-Bot-Api-Secret-Token` anyone can POST a forged `/start` claiming
   any Telegram id — a forged login.

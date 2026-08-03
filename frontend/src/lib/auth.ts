@@ -1,5 +1,6 @@
 import { env } from "$env/dynamic/public";
 import { apiFetch } from "./client";
+import { encodeDestination } from "./destination";
 import type { User } from "./types";
 
 /**
@@ -21,11 +22,29 @@ import type { User } from "./types";
  * cookie) lives in `./client`, shared with every other `/api` caller.
  */
 
-/** The bot to send people to, e.g. `lehlehlehbot`. Public by nature. */
-export function botLink(): string {
+/**
+ * The bot to send people to, e.g. `lehlehlehbot`. Public by nature.
+ *
+ * `returnTo` is the page the login was reached from, and it makes the link a deep
+ * link: `?start=<payload>` comes back to the bot as the message `/start <payload>`,
+ * so the destination travels out with the person and back in the link the bot
+ * replies with (#206). A scan lands in a browser with no session, and without this
+ * the invite is simply lost — you sign in and arrive at home, seated nowhere.
+ *
+ * It carries **where**, never **who**. The session is still minted for whoever
+ * pressed Start in their own Telegram and delivered only to their chat (#25);
+ * nothing here starts a login, and this argument could not if it tried.
+ *
+ * A destination that will not fit, or that is not a path on this site, is simply not
+ * carried — the plain bot link is the answer, and the landing is home.
+ */
+export function botLink(returnTo?: string): string {
   const bot = env.PUBLIC_TELEGRAM_BOT;
   if (!bot) throw new Error("PUBLIC_TELEGRAM_BOT is not set");
-  return `https://t.me/${bot}`;
+  const payload = returnTo ? encodeDestination(returnTo) : null;
+  return payload
+    ? `https://t.me/${bot}?start=${payload}`
+    : `https://t.me/${bot}`;
 }
 
 /**

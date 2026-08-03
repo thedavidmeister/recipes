@@ -3144,6 +3144,120 @@ mod tests {
         }
     }
 
+    /// **A destination changes the link and nothing else (#206).**
+    ///
+    /// The #25 ruling this must not disturb is about *who* a session belongs to, and
+    /// the credential is the whole of that answer: a secret minted for the Telegram
+    /// user who messaged the bot, hashed, and delivered only to their chat. So a
+    /// login is minted with and without a `?start=` payload and the two rows are
+    /// compared — same user, same handle, same lifetime, and each row keyed on the
+    /// hash of the secret in its own link and nothing else. The destination is not
+    /// in the row at all, which is what would notice if somebody later decided it
+    /// ought to be.
+    #[tokio::test]
+    async fn a_destination_does_not_touch_the_login_it_rides_beside() {
+        let (state, conn) = test_state(None).await;
+        let user = auth::TelegramUser {
+            id: 4242,
+            username: Some("dave".into()),
+        };
+        let payload = "L3BpY2svOWY0YjJjMWQ4ZTdhNjA1Mw";
+
+        /// The one live login, as stored: hash, telegram id, handle, expiry.
+        async fn only_row(conn: &libsql::Connection) -> (String, String, Option<String>, i64) {
+            let mut rows = conn
+                .query(
+                    "SELECT completion_hash, telegram_user_id, username, expires_at
+                     FROM login_completions",
+                    (),
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().expect("one login row");
+            // Read before stepping: a `Row` reads the cursor's *current* position, so
+            // the emptiness check below would blank this one if it ran first.
+            let read = (
+                row.get::<String>(0).unwrap(),
+                row.get::<String>(1).unwrap(),
+                row.get::<Option<String>>(2).unwrap(),
+                row.get::<i64>(3).unwrap(),
+            );
+            assert!(
+                rows.next().await.unwrap().is_none(),
+                "each mint leaves exactly one live login"
+            );
+            read
+        }
+
+        /// The secret a link hands to `/auth/complete` — the `c` parameter, whatever
+        /// else the link carries after it.
+        fn secret_in(link: &str) -> String {
+            link.split("?c=")
+                .nth(1)
+                .expect("a completion link states its secret")
+                .split('&')
+                .next()
+                .unwrap()
+                .to_owned()
+        }
+
+        let bare_link = auth::mint_completion(&state, &user, None).await.unwrap();
+        let bare_row = only_row(&conn).await;
+        conn.execute("DELETE FROM login_completions", ())
+            .await
+            .unwrap();
+
+        let carried_link = auth::mint_completion(&state, &user, Some(payload))
+            .await
+            .unwrap();
+        let carried_row = only_row(&conn).await;
+
+        assert_eq!(
+            bare_link,
+            format!("https://recipes.test/auth/finish?c={}", secret_in(&bare_link))
+        );
+        assert_eq!(
+            carried_link,
+            format!(
+                "https://recipes.test/auth/finish?c={}&r={payload}",
+                secret_in(&carried_link)
+            ),
+            "the destination is appended after the secret, never woven into it"
+        );
+
+        assert_eq!(
+            (bare_row.1.as_str(), bare_row.2.as_deref()),
+            (carried_row.1.as_str(), carried_row.2.as_deref()),
+            "the login is for the same Telegram user, named the same way"
+        );
+        assert!(
+            (bare_row.3 - carried_row.3).abs() <= 1,
+            "and lives exactly as long: {} vs {}",
+            bare_row.3,
+            carried_row.3
+        );
+
+        // The lookup key is the hash of the link's secret — with a destination and
+        // without one — so the destination is no part of what redeems a session.
+        assert_eq!(bare_row.0, auth::hash_secret(&secret_in(&bare_link)));
+        assert_eq!(carried_row.0, auth::hash_secret(&secret_in(&carried_link)));
+        assert_ne!(
+            bare_row.0, carried_row.0,
+            "two logins are two secrets, which is true with or without a destination"
+        );
+
+        for stored in [
+            carried_row.0.as_str(),
+            carried_row.1.as_str(),
+            carried_row.2.as_deref().unwrap_or(""),
+        ] {
+            assert!(
+                !stored.contains(payload),
+                "the destination is not the credential and is not stored: {stored}"
+            );
+        }
+    }
+
     /// The webhook is public, so its own secret is the only thing standing
     /// between a stranger and a forged login for any Telegram id.
     #[tokio::test]
