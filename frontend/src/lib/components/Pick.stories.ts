@@ -299,3 +299,25 @@ export const WatchingWhileTheDeckRefills: Story = {
     shareUrl: share,
   },
 };
+
+/**
+ * Watching *and* finished (#180 × #202) — the plan's round deals this viewer nothing, so
+ * the same empty deal that means "you have answered everything" for a decider arrives for
+ * someone who has answered nothing.
+ *
+ * Watching wins, and this story is what that looks like: the deck's own empty line, not
+ * "Nothing left to swipe". A watcher never swipes, so they cannot have seen every recipe
+ * that fits this plan, and the others the finished notice waits on are a roster they are
+ * not on — the sentence would be wrong twice over. What they are owed instead is the one
+ * the footer already gives them, whose decision this is.
+ */
+export const WatchingWithNothingDealt: Story = {
+  args: {
+    status: "loading",
+    finished: true,
+    participants: 3,
+    watching: true,
+    roster: deciders,
+    shareUrl: share,
+  },
+};

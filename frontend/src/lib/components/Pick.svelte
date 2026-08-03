@@ -65,6 +65,13 @@
      * false independently of every one of them. As a status it would have had to lose a
      * race with `reconnecting`, which would put "Finding more recipes…" back in front of
      * exactly the person this state exists for.
+     *
+     * **`watching` outranks it.** Both can arrive true — the walk deals a watcher a deck
+     * like anyone else and an empty deal sets this — but the notice is a decider's: a
+     * watcher swipes nothing, so "you've seen every recipe that fits this plan" is a
+     * claim about answers they were never able to give, and the others it says are still
+     * deciding are a roster they are not on. So a watcher's empty deck stays the watching
+     * one (#180), whose footer already says whose decision this is.
      */
     finished?: boolean;
     error?: string;
@@ -184,13 +191,14 @@
         </p>
       {/if}
 
-      {#if !card && finished}
+      {#if !card && finished && !watching}
         <!-- An empty deck, for the other reason: everything this plan can deal you has
              been answered (see the `finished` prop). Waiting on the others is a real
              state and it says so, rather than hunting for a card that is not coming.
              Not an error and nothing to do, so it wears the same quiet Notice the other
              empty states wear, with the roster it is waiting on named under it the way
-             the footer already names it. -->
+             the footer already names it. A decider's state only — a watcher has answered
+             nothing and is on no roster to be waited on, so `watching` takes it off. -->
         <Notice>
           <p class="font-display text-stone-900">Nothing left to swipe.</p>
           <p class="mt-1 text-sm text-stone-600">
