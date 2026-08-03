@@ -486,6 +486,19 @@ async fn apply(
         // the call that recorded it and for no other, so two votes completing at once
         // produce exactly one `Decided`: the loser of that race changed no row and says
         // nothing.
+        //
+        // Worth stating, because a mutation pass finds it and a reader should not have
+        // to: for **this** kind the choke point's guard is currently *equivalent* to the
+        // write's own predicate. `record_vote` asks `seated_in_a_started_plan` and then
+        // some, and this arm announces nothing when it answers `false`, so making
+        // [`authorized`] pass a vote unconditionally changes no observable behaviour —
+        // an equivalent mutation, in the sense `crate::session::decide_if_agreed`'s
+        // redundant veto clause already names. It is not so for a timer or a tick, which
+        // announce whether or not the write moved a row (see
+        // `a_watcher_ticks_nothing_and_the_room_hears_nothing`), and the guard stays here
+        // for all four because policy belongs on the framework: the next kind to arrive
+        // gets asked whether it may run *before* anybody has remembered to put the
+        // predicate inside its write.
         SessionEvent::Vote { source, id, vote } => {
             if !crate::session::record_vote(
                 conn,
