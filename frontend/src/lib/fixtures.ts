@@ -376,6 +376,8 @@ export function buyRecipe(): BuyRecipe {
 export function cookRecipe(id: string = BASE_ID): CookRecipe {
   const r = row(id);
   return {
+    source: r.source,
+    id: r.id,
     title: r.title,
     image: r.image,
     ingredients: r.ingredients

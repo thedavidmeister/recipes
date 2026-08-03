@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { cookStages, formatClock, formatEstimate, stepDepths } from "./steps";
+import {
+  cookStages,
+  formatClock,
+  formatEstimate,
+  localTimers,
+  sharedTimers,
+  stepDepths,
+} from "./steps";
+import type { RunningTimer } from "./session-events";
 import type { StructuredStep } from "./types";
 
 /**
@@ -173,5 +181,86 @@ describe("cookStages", () => {
     ];
     const stages = cookStages(steps);
     expect(stages.map((s) => s.steps.map((x) => x.id))).toEqual([[1, 2], [3]]);
+  });
+});
+
+/**
+ * The two timer paths (#208), which have to agree about everything except where the
+ * deadline came from.
+ *
+ * `sharedTimers` is the plan's — instants on a shared timeline, translated through what
+ * the server measured *this* device's clock to be doing. `localTimers` is the solo
+ * path, whose deadlines this browser wrote off its own clock. A disagreement between
+ * them about what "done" means, or about how a remaining second is rounded, would be a
+ * cook seeing one thing alone and another thing in company, which is the bug the whole
+ * feature exists to remove.
+ */
+const mel = { telegram_user_id: "5150", username: "mel" };
+
+function running(step: number, deadline: number): RunningTimer {
+  return { step, started_at: deadline - 300_000, deadline, started_by: mel };
+}
+
+describe("sharedTimers", () => {
+  const now = 1_700_000_000_000;
+
+  it("renders the room's deadline on this device's clock", () => {
+    // A device a minute fast: the shared deadline is 5 minutes out, and it reads 5
+    // minutes out here too, because the offset is added back before the subtraction.
+    const timers = sharedTimers([running(7, now + 300_000)], 60_000, now + 60_000);
+    expect(timers[7].remaining).toBe(300);
+    expect(timers[7].done).toBe(false);
+  });
+
+  it("shows the same countdown on two devices whose clocks disagree wildly", () => {
+    // The feature, stated as a test: one recorded deadline, two badly-set clocks, one
+    // number of seconds left.
+    const deadline = now + 300_000;
+    const fast = sharedTimers([running(7, deadline)], 60_000, now + 60_000);
+    const slow = sharedTimers([running(7, deadline)], -10_000, now - 10_000);
+    expect(fast[7].remaining).toBe(slow[7].remaining);
+  });
+
+  it("reads done off the deadline, so a finished timer survives everyone being away", () => {
+    // Nobody writes "done" anywhere — there is no writer guaranteed to be awake at the
+    // moment a deadline passes. A pot whose time went while every browser was closed is
+    // still a pot to take off the heat.
+    const timers = sharedTimers([running(7, now - 1)], 0, now);
+    expect(timers[7].done).toBe(true);
+    expect(timers[7].remaining).toBe(0);
+  });
+
+  it("never counts below zero", () => {
+    expect(sharedTimers([running(7, now - 90_000)], 0, now)[7].remaining).toBe(0);
+  });
+
+  it("carries who started it, the way a ticked shopping line carries who got it", () => {
+    expect(sharedTimers([running(7, now + 1_000)], 0, now)[7].by).toEqual(mel);
+  });
+});
+
+describe("localTimers", () => {
+  const now = 1_700_000_000_000;
+
+  it("reads done off the deadline, exactly as the shared path does", () => {
+    const timers = localTimers({ 7: now - 1, 6: now + 300_000 }, now);
+    expect(timers[7].done).toBe(true);
+    expect(timers[6].done).toBe(false);
+    expect(timers[6].remaining).toBe(300);
+  });
+
+  it("attributes nothing, because a solo cook has nobody to attribute to", () => {
+    // Not an oversight and not a gap to fill in later: there is no plan here, so a name
+    // on this timer would be an invented person.
+    expect(localTimers({ 7: now + 1_000 }, now)[7].by).toBeUndefined();
+  });
+
+  it("rounds a remaining second the same way the shared path does", () => {
+    // The two must not disagree by a second, or a cook alone and a cook in company see
+    // different numbers for the same recipe.
+    const deadline = now + 1_500;
+    expect(localTimers({ 7: deadline }, now)[7].remaining).toBe(
+      sharedTimers([running(7, deadline)], 0, now)[7].remaining,
+    );
   });
 });

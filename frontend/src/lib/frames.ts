@@ -19,6 +19,12 @@ import type { PickHandlers, ServerMsg } from "./pick";
  * frame that ends a pick, and losing it strands whoever was not watching when the last
  * yes landed on a deck that is over. So the reading is a pure function with a test on
  * it, rather than a chain of `else if`s inside a class nothing can construct.
+ *
+ * The event framework's two clock frames (#208) are read here like any other, but the
+ * handlers that answer them come from `PickClient` rather than from a page: keeping the
+ * drift measurement going is the socket's business, and a page that had to remember to
+ * answer a ping is a page that could forget and then render a countdown off a clock
+ * nobody measured.
  */
 export function applyFrame(msg: ServerMsg, handlers: PickHandlers): void {
   if (msg.type === "tally") {
@@ -37,5 +43,11 @@ export function applyFrame(msg: ServerMsg, handlers: PickHandlers): void {
       id: msg.id,
       decided_at: msg.decided_at,
     });
+  } else if (msg.type === "time_ping") {
+    handlers.onTimePing?.(msg.server_ms);
+  } else if (msg.type === "time_sync") {
+    handlers.onTimeSync?.(msg.offset_ms, msg.rtt_ms);
+  } else if (msg.type === "timers") {
+    handlers.onTimers?.(msg.source, msg.id, msg.timers);
   }
 }

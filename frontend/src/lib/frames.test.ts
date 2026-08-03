@@ -28,8 +28,19 @@ function spies() {
     onBuy: vi.fn(),
     onLeft: vi.fn(),
     onDecided: vi.fn(),
+    onTimePing: vi.fn(),
+    onTimeSync: vi.fn(),
+    onTimers: vi.fn(),
   } satisfies PickHandlers;
 }
+
+/** One step's shared countdown, as the room announces it (#208). */
+const timer = {
+  step: 7,
+  started_at: 1_700_000_000_000,
+  deadline: 1_700_000_300_000,
+  started_by: { telegram_user_id: "5150", username: "mel" },
+};
 
 const decided: ServerMsg = {
   type: "decided",
@@ -102,6 +113,40 @@ describe("applyFrame", () => {
       h.onDecided,
       "and none of them is a decision",
     ).not.toHaveBeenCalled();
+  });
+
+  it("routes the event framework's three frames, each to its own handler", () => {
+    // The two clock frames are the ones this test is really for. Nothing renders them,
+    // so a branch that quietly stopped firing would show up only as countdowns that
+    // drift apart between two phones — days later, and blamed on anything but this.
+    const h = spies();
+    applyFrame({ type: "time_ping", server_ms: 1_000 }, h);
+    applyFrame({ type: "time_sync", offset_ms: -250, rtt_ms: 40 }, h);
+    applyFrame(
+      { type: "timers", source: "themealdb", id: "52795", timers: [timer] },
+      h,
+    );
+
+    expect(h.onTimePing).toHaveBeenCalledWith(1_000);
+    expect(h.onTimeSync).toHaveBeenCalledWith(-250, 40);
+    expect(h.onTimers).toHaveBeenCalledWith("themealdb", "52795", [timer]);
+    // Whole, not merged: the timer list arrives as the server stated it, untouched on
+    // the way through, so a screen that replaces its list is replacing it with the room's.
+    expect(h.onTimers.mock.calls[0][2][0]).toBe(timer);
+    expect(h.onVote, "and none of them is a vote").not.toHaveBeenCalled();
+    expect(h.onBuy).not.toHaveBeenCalled();
+  });
+
+  it("hands a timers frame to nothing else, so a pot is never read as a decision", () => {
+    const h = spies();
+    applyFrame(
+      { type: "timers", source: "themealdb", id: "52795", timers: [] },
+      h,
+    );
+    for (const [name, fn] of Object.entries(h)) {
+      if (name === "onTimers") continue;
+      expect(fn, `${name} must not see a timers frame`).not.toHaveBeenCalled();
+    }
   });
 
   it("drops a frame it does not know rather than throwing", () => {

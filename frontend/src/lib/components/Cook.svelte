@@ -1,6 +1,7 @@
 <script lang="ts">
   import Alert from "./Alert.svelte";
   import Notice from "./Notice.svelte";
+  import UserName from "./UserName.svelte";
   import type {
     CookRecipe,
     CookStatus,
@@ -20,15 +21,31 @@
    *
    * Presentational: the page owns the query and the live timer machinery (ticking,
    * alerts, persistence) and passes `timers` per step id, so every state — idle,
-   * running, done — is a deterministic story rather than a live clock.
+   * running, done — is a deterministic story rather than a live clock. That stays true
+   * of the plan's **shared** timers (#208): a shared countdown reaches here as the same
+   * `StepTimer`, carrying the person who started it, so the room's pot and this
+   * device's are one rendering and there is no second way for a timer to look.
    */
   interface Props {
     status: CookStatus;
     /** The picked recipe in full, or `null` if no pick has decided yet. */
     recipe?: CookRecipe | null;
     error?: string;
-    /** Live timer state per step id (seconds left + whether it fired); absent = idle. */
+    /** Live timer state per step id (seconds left, whether it is done, and whose it is
+     * on a shared one); absent = idle. */
     timers?: Record<number, StepTimer>;
+    /**
+     * Watching the plan rather than cooking it (#180/#200) — every countdown is
+     * visible, no control is offered.
+     *
+     * Not a disabled button: the server refuses a watcher's start with silence (a
+     * socket frame has nowhere to carry a refusal), so a control that looked pressable
+     * would be a control that did nothing without saying why. A timed step a watcher
+     * cannot start still shows how long it takes, because that is a fact about the
+     * recipe and withholding it would be inventing a difference the corpus does not
+     * have.
+     */
+    watching?: boolean;
     onStartTimer?: (id: number) => void;
     onDismissTimer?: (id: number) => void;
   }
@@ -38,6 +55,7 @@
     recipe,
     error,
     timers = {},
+    watching = false,
     onStartTimer,
     onDismissTimer,
   }: Props = $props();
@@ -173,7 +191,9 @@
   {/if}
 </div>
 
-<!-- One step's timer: a Start control, a live countdown, or a done flag. -->
+<!-- One step's timer: a Start control, a live countdown, or a done flag — and, on a
+     plan's shared timer, whose pot it is. A watcher gets the same countdowns with no
+     controls at all. -->
 {#snippet timer(step: StructuredStep)}
   {#if step.seconds != null}
     {@const t = timers[step.id]}
@@ -183,26 +203,40 @@
       >
         Done · time's up
       </span>
-      <button
-        type="button"
-        class="text-sm text-stone-500 underline"
-        onclick={() => onDismissTimer?.(step.id)}
-      >
-        Dismiss
-      </button>
+      {@render startedBy(t)}
+      {#if !watching}
+        <button
+          type="button"
+          class="text-sm text-stone-500 underline"
+          onclick={() => onDismissTimer?.(step.id)}
+        >
+          Dismiss
+        </button>
+      {/if}
     {:else if t}
       <span
         class="rounded-pill bg-paprika-100 text-paprika-500 flex-none px-3 py-1 text-sm font-medium tabular-nums"
       >
         {formatClock(t.remaining)}
       </span>
-      <button
-        type="button"
-        class="text-sm text-stone-500 underline"
-        onclick={() => onDismissTimer?.(step.id)}
+      {@render startedBy(t)}
+      {#if !watching}
+        <button
+          type="button"
+          class="text-sm text-stone-500 underline"
+          onclick={() => onDismissTimer?.(step.id)}
+        >
+          Stop
+        </button>
+      {/if}
+    {:else if watching}
+      <!-- The step's duration, stated rather than offered: how long it takes is the
+           recipe's fact, and only starting it is somebody's to do. -->
+      <span
+        class="rounded-pill flex-none border border-stone-200 px-3 py-1 text-sm text-stone-500 tabular-nums"
       >
-        Stop
-      </button>
+        {formatClock(step.seconds)}
+      </span>
     {:else}
       <button
         type="button"
@@ -212,5 +246,16 @@
         Start {formatClock(step.seconds)}
       </button>
     {/if}
+  {/if}
+{/snippet}
+
+<!-- Whose timer it is, on a plan's shared one — the peer of a ticked shopping line's
+     colour and name. Absent on a device-local timer, where there is nobody to name and
+     naming one would be inventing a person. -->
+{#snippet startedBy(t: StepTimer)}
+  {#if t.by}
+    <span class="flex items-center gap-1 text-sm text-stone-500">
+      by <UserName user={t.by} inline />
+    </span>
   {/if}
 {/snippet}
