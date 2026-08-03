@@ -310,6 +310,10 @@ pub fn app(state: AppState) -> Router {
         .route("/kitchens/{id}", get(kitchens::get))
         .route("/kitchens/{id}/name", post(kitchens::rename))
         .route("/kitchens/{id}/invite", post(kitchens::invite))
+        // The meals planned in this kitchen (#207). A read beside the kitchen rather
+        // than a field on it: a plan's roster moves while the kitchen sits still, and
+        // every kitchen write echoes the kitchen back.
+        .route("/kitchens/{id}/meals", get(kitchens::meals))
         // The vocabulary a kitchen picks from — a person's list, so session-gated.
         .route("/equipment", get(equipment_api::vocabulary))
         .route("/pantry", get(equipment_api::pantry_vocabulary))
@@ -2026,6 +2030,93 @@ mod tests {
             expires_at > now && expires_at <= now + two_hours + 5,
             "expires about two hours out, not never: {expires_at} vs {now}"
         );
+    }
+
+    /// Reading a kitchen's meals is gated like everything else a person reaches (#25).
+    #[tokio::test]
+    async fn reading_a_kitchens_meals_requires_a_session() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/kitchens/{id}/meals"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The boundary (#207): a kitchen's meals are its members' business. A signed-in
+    /// stranger holding the kitchen's id is refused and shown nothing — what a room is
+    /// eating, how many are deciding it and what they landed on all travel together, so
+    /// leaking the list would leak the room.
+    ///
+    /// 403 rather than 404: the session is valid and the identity simply is not in the
+    /// kitchen, which is the same answer minting an invite gives them.
+    #[tokio::test]
+    async fn a_stranger_cannot_read_a_kitchens_meals() {
+        let (app, conn) = test_app().await;
+        let mine = auth::issue_test_session(&conn, "4242").await;
+        let theirs = auth::issue_test_session(&conn, "9317").await;
+        let cookie = format!("recipes_session={mine}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+        make_plan(&app, &cookie, &id).await;
+
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/kitchens/{id}/meals"),
+                &format!("recipes_session={theirs}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // And the member it belongs to still sees it, so the refusal is about who is
+        // asking rather than the list being empty.
+        let res = app
+            .oneshot(get_req(&format!("/api/kitchens/{id}/meals"), &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+    }
+
+    /// A member reads their kitchen's meals end to end, in the shape the page renders
+    /// (#207): the channel to link to, the plan's own words, whether it has begun, how
+    /// many are in it, and what it decided.
+    ///
+    /// A plan made through `POST /api/session` seats its host at once, so a fresh one is
+    /// one person gathering for a dinner — the state a kitchen most often has in it.
+    #[tokio::test]
+    async fn a_member_reads_the_meals_planned_in_their_kitchen() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let id = make_kitchen(&app, &cookie, "Home").await;
+        let channel = make_plan(&app, &cookie, &id).await;
+
+        let res = app
+            .oneshot(get_req(&format!("/api/kitchens/{id}/meals"), &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        let meals = body.as_array().expect("a list of meals");
+        assert_eq!(meals.len(), 1);
+        assert_eq!(meals[0]["channel_id"], channel);
+        assert_eq!(meals[0]["meal_type"], "dinner");
+        assert_eq!(meals[0]["additions"].as_array().unwrap().len(), 0);
+        assert_eq!(meals[0]["started"], false);
+        assert_eq!(meals[0]["deciders"], 1, "the host is in their own plan");
+        assert!(meals[0]["decided"].is_null(), "nothing decided yet");
     }
 
     #[tokio::test]

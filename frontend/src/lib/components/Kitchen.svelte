@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import Skeleton from "./Skeleton.svelte";
   import Panel from "./Panel.svelte";
   import Button from "./Button.svelte";
@@ -31,9 +32,16 @@
     error?: string;
     /** Start a meal plan in this kitchen — the lobby is the next page. */
     onPlan?: () => void;
+    /**
+     * The meals in this kitchen (#207), under the action that starts one. A slot
+     * rather than a field, because it is a read of its own: a plan's roster moves
+     * while the kitchen sits still, so it has its own query and its own waiting and
+     * failing states — the same arrangement the equipment page makes for its advice.
+     */
+    meals?: Snippet;
   }
 
-  let { status, kitchen, error, onPlan }: Props = $props();
+  let { status, kitchen, error, onPlan, meals }: Props = $props();
 </script>
 
 <div class="pt-48 pb-16">
@@ -59,6 +67,11 @@
       <div class="mt-8">
         <Button onclick={onPlan} dot="pesto">Let's cook!</Button>
       </div>
+
+      <!-- The meals already in this kitchen, under the button that starts one:
+           starting is what you came here to do, and the list is how you get back
+           to what is already going. -->
+      {#if meals}{@render meals()}{/if}
 
       <div class="mt-8 flex gap-5">
         <a

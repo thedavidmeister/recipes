@@ -4,6 +4,7 @@ import type {
   CookRecipe,
   HealthStats,
   KitchenDetail,
+  KitchenMeal,
   KitchenSummary,
   Recipe,
   RecipeCard,
@@ -429,4 +430,64 @@ export function kitchenDetail(): KitchenDetail {
     // basmati rice 10 · eggs 82 · olive oil 153 · soy sauce 53 (readings naming each).
     pantry: ["basmati rice", "eggs", "olive oil", "soy sauce"],
   };
+}
+
+/**
+ * The meals planned in a kitchen (#207), newest first — one in each state a plan can
+ * be in: gathering, deciding, decided.
+ *
+ * **The plans are invented, and have to be.** A plan is a room of people who followed a
+ * link — the corpus holds no record of one, exactly as it holds none of a kitchen (see
+ * [`kitchenList`]), and `Pick.stories.ts` says the same of a roster. The channels are
+ * the ones those stories already use — `8f2a1c4e9b7d` from `PlanLobby.stories.ts` and
+ * `ab12cd34ef56` from `Pick.stories.ts` — so a plan reads as the same plan wherever it
+ * turns up, with a third minted in the same shape for the meal that has finished.
+ *
+ * **The recipe is not free to be invented.** A decided meal names a real corpus record
+ * (#157/#205): the title is read out of the sample, never typed here, because a decided
+ * entry is the app stating what a group is having and a made-up dish is the invented-id
+ * failure with a different picture on it.
+ *
+ * Rosters are small on purpose: these are households, and the counts here (2, 4, 3) are
+ * what makes the singular/plural copy on each row visible in one screenshot.
+ */
+export function kitchenMeals(over: Partial<KitchenMeal>[] = []): KitchenMeal[] {
+  const base: KitchenMeal[] = [
+    {
+      channel_id: "8f2a1c4e9b7d",
+      meal_type: "dinner",
+      additions: [],
+      started: false,
+      deciders: 2,
+      decided: null,
+    },
+    {
+      channel_id: "ab12cd34ef56",
+      meal_type: "lunch",
+      additions: ["side"],
+      started: true,
+      deciders: 4,
+      decided: null,
+    },
+    {
+      channel_id: "7e3b5a1d9c04",
+      meal_type: "dinner",
+      additions: ["dessert"],
+      started: true,
+      deciders: 3,
+      decided: decidedRecipe(BASE_ID),
+    },
+  ];
+  return base.map((meal, i) => ({ ...meal, ...over[i] }));
+}
+
+/**
+ * What the server joins onto a decision: the sampled recipe's own `(source, id, title)`.
+ *
+ * Read from the sample rather than written out, so a row on the kitchen page names a
+ * meal the corpus actually holds — the same rule every card fixture follows.
+ */
+export function decidedRecipe(id: string): NonNullable<KitchenMeal["decided"]> {
+  const r = row(id);
+  return { source: r.source, id: r.id, title: r.title };
 }

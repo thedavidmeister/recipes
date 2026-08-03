@@ -3,6 +3,7 @@ import sample from "./corpus-sample.json";
 import {
   BASE_ID,
   cookRecipe,
+  kitchenMeals,
   longTitleRecipe,
   recipe,
   recipeSteps,
@@ -260,6 +261,49 @@ describe("the walk fixture", () => {
       expect(typeof r.kcal_complete, `${r.title} kcal_complete`).toBe(
         "boolean",
       );
+    }
+  });
+});
+
+describe("the kitchen's meals fixture", () => {
+  const meals = kitchenMeals();
+
+  /**
+   * The half a kitchen listing cannot invent (#157/#205). A plan is a room of people
+   * who followed a link and the corpus holds no record of one, so the channels and
+   * rosters here are written by hand — but a decided meal states what a group is
+   * having, and that is a corpus record. A made-up title would be the invented-id
+   * failure with the recipe's own name on it, and nobody reading the story could tell.
+   */
+  it("names only recipes the corpus sample holds", () => {
+    for (const meal of meals) {
+      if (!meal.decided) continue;
+      const r = sampled(meal.decided.id);
+      expect(meal.decided.source).toBe(r.source);
+      expect(meal.decided.title).toBe(r.title);
+    }
+  });
+
+  /**
+   * The list declares all three states a plan can be in, which is what the kitchen
+   * page's headline story is claiming to show. A fixture that quietly lost one would
+   * leave that state visible in no story at all.
+   */
+  it("holds one meal in each of the three states", () => {
+    expect(meals.filter((m) => !m.started && !m.decided)).toHaveLength(1);
+    expect(meals.filter((m) => m.started && !m.decided)).toHaveLength(1);
+    expect(meals.filter((m) => m.decided)).toHaveLength(1);
+  });
+
+  /**
+   * A decided meal has necessarily been swiped, so `started` is not free to be false
+   * beside a decision: that pair is a plan that decided without ever dealing a card,
+   * which the server cannot produce (a vote is refused until the lobby closes) and a
+   * fixture must not draw.
+   */
+  it("never shows a decision on a plan that never started", () => {
+    for (const meal of meals) {
+      if (meal.decided) expect(meal.started).toBe(true);
     }
   });
 });
