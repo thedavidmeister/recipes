@@ -117,6 +117,29 @@ describe("runningOrder", () => {
     expect(orders.size).toBeGreaterThan(1);
   });
 
+  /**
+   * **The whole seed is used, not just its low 32 bits.**
+   *
+   * A seed is 53 bits precisely so it survives JSON into a browser's `Number` exactly,
+   * and folding it into the PRNG's 32-bit state has to *combine* its halves rather than
+   * truncate — otherwise the seed space is really 2^32 and two plans that differ only
+   * above that boundary are dealt the same station while looking perfectly random.
+   *
+   * Eight seeds identical below 2^32: a shuffle that reads the whole number puts them on
+   * more than one order (`buy` has 24), and one that truncates puts all eight on exactly
+   * one. Stated as a property rather than a golden pair, so it cannot pass by luck.
+   */
+  it("uses the whole seed, not just its low 32 bits", () => {
+    const orders = new Set(
+      Array.from({ length: 8 }, (_, k) =>
+        runningOrder(12345 + k * 0x100000000, "buy")
+          .map((t) => t.src)
+          .join(","),
+      ),
+    );
+    expect(orders.size).toBeGreaterThan(1);
+  });
+
   /** A lone track loops: the relaxation, from the same construction rather than a
    * special case. */
   it("deals a single-track section that one track", () => {
@@ -335,8 +358,12 @@ describe("POOLS", () => {
    * length — exact for constant and variable bitrate alike, and no dependency.
    */
   it("declares, for every track, the length the file actually is", () => {
-    const V1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-    const V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+    const V1 = [
+      0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+    ];
+    const V2 = [
+      0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+    ];
     const RATES: Record<number, number[]> = {
       3: [44100, 48000, 32000],
       2: [22050, 24000, 16000],

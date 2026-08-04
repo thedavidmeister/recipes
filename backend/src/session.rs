@@ -703,6 +703,24 @@ pub struct LobbyView {
     pub created_at: i64,
 }
 
+impl LobbyView {
+    /// **This plan, as the room's frame states it.**
+    ///
+    /// Built here rather than at each site that sends it, because there are two of them
+    /// — every socket on connect, and the whole room on every change — and two hand-copied
+    /// constructions are two chances to state a different plan, or to quietly drop a
+    /// field that everything downstream is computed from (#212's seed and birth instant
+    /// are exactly that). One description, from the row that was read.
+    fn frame(&self) -> ServerMsg {
+        ServerMsg::Lobby {
+            deciders: self.voters.len() as i64,
+            started: self.started,
+            seed: self.seed,
+            created_at: self.created_at,
+        }
+    }
+}
+
 /// `GET /api/session/{channel}` — the lobby: the roster, and whether it has started.
 pub async fn lobby(
     State(state): State<AppState>,
@@ -1286,12 +1304,7 @@ async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyVie
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
     let tx = room(&state.rooms, channel);
-    if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
-        deciders: view.voters.len() as i64,
-        started: view.started,
-        seed: view.seed,
-        created_at: view.created_at,
-    }) {
+    if let Ok(txt) = serde_json::to_string(&view.frame()) {
         // No receivers is an error and also a non-event: nobody is listening yet.
         let _ = tx.send(txt);
     }
@@ -1397,12 +1410,7 @@ async fn socket_loop(
     // The lobby, so a (re)connecting client knows how many it has to convince and
     // whether the swiping has begun, without a second round trip.
     if let Ok(Some(view)) = load_lobby(&db, &channel).await {
-        if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
-            deciders: view.voters.len() as i64,
-            started: view.started,
-            seed: view.seed,
-            created_at: view.created_at,
-        }) {
+        if let Ok(txt) = serde_json::to_string(&view.frame()) {
             if sink.send(Message::Text(txt.into())).await.is_err() {
                 return;
             }
@@ -3310,7 +3318,54 @@ mod tests {
 
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(view.seed, None, "absent, not zero");
-        assert!(view.created_at > 0, "and the anchor is still a real instant");
+        assert!(
+            view.created_at > 0,
+            "and the anchor is still a real instant"
+        );
+    }
+
+    /// **The frame states the plan that was read.**
+    ///
+    /// The two sites that send it — every socket on connect, and the whole room on every
+    /// change — go through one constructor, so neither can state a different plan or
+    /// quietly drop a field. The seed and the birth instant are the two everything
+    /// downstream is computed from, so dropping either is a room silently falling back to
+    /// each phone's own dice roll, which looks exactly like it working.
+    #[tokio::test]
+    async fn the_lobby_frame_states_the_plan_that_was_read() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        seat_voter(&conn, "c", "alice").await.unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        match view.frame() {
+            ServerMsg::Lobby {
+                deciders,
+                started,
+                seed,
+                created_at,
+            } => {
+                assert_eq!(deciders, 1);
+                assert!(!started);
+                assert!(seed.is_some(), "the plan's own seed, not None");
+                assert_eq!(seed, view.seed);
+                assert_eq!(created_at, view.created_at);
+            }
+            other => panic!("the lobby's frame is a lobby frame: {other:?}"),
+        }
     }
 
     /// **The lobby frame carries the two facts and nothing about anybody's speaker.**
