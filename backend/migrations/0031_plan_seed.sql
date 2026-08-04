@@ -1,0 +1,53 @@
+-- A plan gets a seed at birth: the one number all of its shared randomness dangles off.
+--
+-- ## Why a plan needs one at all
+--
+-- Everything a room does together that involves a *choice nobody makes* has the same
+-- problem, and #212 is the first time it bit: the soundtrack was a per-device dice roll,
+-- so two people shopping the same list heard different songs at different points. The
+-- obvious fix — write down what the room chose and race over who gets to change it — is a
+-- table, a wire kind, a guard and a race, for a fact nobody actually decides.
+--
+-- The seed removes the question instead of answering it. **Shared randomness is a pure
+-- function of a number every participant already has**, so there is nothing to write, no
+-- authority to establish, no event to miss, and no state to rehydrate — a device that has
+-- been asleep for an hour computes the same answer as one that has been watching all
+-- along, because they are computing rather than remembering.
+--
+-- It is deliberately **general-purpose and not a music column**. Music is its first
+-- consumer; anything else a plan needs to shuffle, deal or vary — and to have every
+-- device agree about without asking — dangles off this same number. A `music_seed` would
+-- have to be joined by a `deal_seed` and a `something_seed`, and a plan whose randomness
+-- came from four unrelated places is four places for one of them to be missing.
+--
+-- ## Additive, nullable, and nothing is backfilled
+--
+-- SQLite cannot add a NOT NULL column without a default, and a *default* seed is the one
+-- thing this column must never have: a constant would make every plan that took it the
+-- same plan, and `random()` as a column default is evaluated per row in a way that is
+-- deliberately not part of the contract here. So the column is nullable and
+-- `session::create_session` supplies a seed for every plan it creates — new plans always
+-- have one, and the schema does not pretend to enforce what the writer does.
+--
+-- **Old plans are left NULL, honestly.** A plan created before this deployed has no seed,
+-- and inventing one now would be inventing a shared past those participants did not have.
+-- NULL reads as "this plan has no shared randomness", and the surfaces that consume it
+-- degrade to their own local behaviour — for music, exactly the per-device random pick
+-- that a plan without a room already gets. #146's degrade-not-die, on a column.
+--
+-- ## What the number is
+--
+-- A non-negative integer below 2^53. Not an accident of range: every consumer of this is
+-- a browser, `Number` is a double, and 2^53 is the last integer a double holds exactly —
+-- so a seed round-trips through JSON to the *same* number on every device, which is the
+-- entire point of there being one. A wider column that sometimes lost its low bits would
+-- give two phones two different "shared" sequences and look like the bug it fixes.
+--
+-- ## The other half of the pair is already here
+--
+-- `pick_sessions.created_at` (0006) is a plan's birth instant, `unixepoch()` seconds, and
+-- it is the anchor everything derived from the seed is measured from. Whole seconds are
+-- enough *because every device reads the same stored value*: the coarseness is shared, so
+-- it moves the whole room by the same fraction of a second and disagrees with nobody. It
+-- needs no new column and gets none.
+ALTER TABLE pick_sessions ADD COLUMN seed INTEGER;

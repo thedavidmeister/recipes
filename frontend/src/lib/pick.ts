@@ -150,7 +150,15 @@ export interface Cooking {
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
-  | { type: "lobby"; deciders: number; started: boolean }
+  | {
+      type: "lobby";
+      deciders: number;
+      started: boolean;
+      /** The plan's seed (#212); null for a plan created before plans had one. */
+      seed: number | null;
+      /** When the plan was born, unix seconds. */
+      created_at: number;
+    }
   | { type: "vote"; voter: string; source: string; id: string; vote: boolean }
   | {
       type: "buy";
@@ -205,7 +213,22 @@ export interface PickHandlers {
   /** The roster size and whether the swiping has begun — on join, and on every
    * change to either. `deciders` is the roster, which the server decides against
    * (#201); this side shows it. */
-  onLobby?: (deciders: number, started: boolean) => void;
+  onLobby?: (
+    deciders: number,
+    started: boolean,
+    /** **The plan's seed** (#212) — the number everything the room derives together is
+     * derived from, or `null` for a plan created before plans had one, which has no
+     * shared randomness and falls back to this device's own.
+     *
+     * It rides the lobby frame because that is the frame every client already receives on
+     * connect and on every change, and because a seed is a fact about the plan exactly as
+     * its roster size is. Both it and `createdAt` are immutable for the plan's life, so a
+     * handler that only wants the roster simply declares two parameters and ignores them. */
+    seed?: number | null,
+    /** When the plan was born, unix **seconds** — the anchor a station's elapsed time is
+     * measured from (`$lib/music`). */
+    createdAt?: number,
+  ) => void;
   /** **The plan decided** (#201) — the one frame that ends a pick.
    *
    * Sent to the room the instant the deciding vote lands, and again to every socket on
@@ -465,6 +488,12 @@ export interface Lobby {
   voters: Voter[];
   /** Kitchen members not yet deciding — the host can add any without a link (#72). */
   candidates: Voter[];
+  /** The plan's seed (#212) — what its shared randomness dangles off. Null for a plan
+   * created before plans had one (migration 0031): an honest absence, not a zero. */
+  seed: number | null;
+  /** When the plan was born, unix seconds — the anchor derived-shared things measure
+   * from. */
+  created_at: number;
   /** What this plan decided (#201), or null while its deck is still running.
    *
    * The same record the `decided` frame carries, on the one HTTP answer that describes

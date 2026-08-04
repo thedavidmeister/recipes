@@ -30,7 +30,7 @@ export function applyFrame(msg: ServerMsg, handlers: PickHandlers): void {
   if (msg.type === "tally") {
     handlers.onTally?.(msg.participants, msg.votes);
   } else if (msg.type === "lobby") {
-    handlers.onLobby?.(msg.deciders, msg.started);
+    handlers.onLobby?.(msg.deciders, msg.started, msg.seed, msg.created_at);
   } else if (msg.type === "vote") {
     handlers.onVote?.(msg.voter, msg.source, msg.id, msg.vote);
   } else if (msg.type === "buy") {

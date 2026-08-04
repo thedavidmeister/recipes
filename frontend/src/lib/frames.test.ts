@@ -94,7 +94,16 @@ describe("applyFrame", () => {
     // everywhere except here.
     const h = spies();
     applyFrame({ type: "tally", participants: 2, votes: [] }, h);
-    applyFrame({ type: "lobby", deciders: 3, started: true }, h);
+    applyFrame(
+      {
+        type: "lobby",
+        deciders: 3,
+        started: true,
+        seed: 12345,
+        created_at: 1_700_000_000,
+      },
+      h,
+    );
     applyFrame(
       { type: "vote", voter: "5150", source: "t", id: "r1", vote: true },
       h,
@@ -110,7 +119,10 @@ describe("applyFrame", () => {
     );
 
     expect(h.onTally).toHaveBeenCalledWith(2, []);
-    expect(h.onLobby).toHaveBeenCalledWith(3, true);
+    // The seed and the plan's birth instant ride the lobby frame (#212) — the two facts
+    // a station is computed from. Dropping either here is a room whose music silently
+    // falls back to each phone's own dice roll, which looks exactly like it working.
+    expect(h.onLobby).toHaveBeenCalledWith(3, true, 12345, 1_700_000_000);
     expect(h.onVote).toHaveBeenCalledWith("5150", "t", "r1", true);
     expect(h.onBuy).toHaveBeenCalledWith("t", "r1", []);
     expect(h.onLeft).toHaveBeenCalledWith(
@@ -189,6 +201,23 @@ describe("applyFrame", () => {
     // The pick page shares this room and has no business in the cook; its handler is
     // simply absent, and the socket's read must not throw over that.
     expect(() => applyFrame(cooking, {})).not.toThrow();
+  });
+
+  /** A plan created before plans had a seed says so, rather than arriving as a zero —
+   * which would be a perfectly good seed and would put every such plan on one station. */
+  it("passes a missing seed through as null", () => {
+    const h = spies();
+    applyFrame(
+      {
+        type: "lobby",
+        deciders: 1,
+        started: false,
+        seed: null,
+        created_at: 1_600_000_000,
+      },
+      h,
+    );
+    expect(h.onLobby).toHaveBeenCalledWith(1, false, null, 1_600_000_000);
   });
 
   it("drops a frame it does not know rather than throwing", () => {

@@ -61,6 +61,25 @@ fn mint_channel_id() -> String {
     hex::encode(buf)
 }
 
+/// **A plan's seed** — the one number all of its shared randomness dangles off (#212).
+///
+/// Not a music number. Anything a room has to agree about that nobody decides — which
+/// song is playing, and whatever comes next — is a pure function of this and how long the
+/// plan has existed, so there is no state to write, no authority to establish and nothing
+/// to rehydrate. A device that has been asleep for an hour computes the same answer as
+/// one that has been watching all along.
+///
+/// **Below 2^53**, and that bound is the contract rather than an implementation detail:
+/// every consumer is a browser, `Number` is a double, and 2^53 is the last integer a
+/// double holds exactly. A wider seed would sometimes arrive as a *different* number on
+/// two phones, which is the disagreement the seed exists to remove. 53 bits from the OS
+/// CSPRNG is far more than the choices it feeds need.
+fn mint_seed() -> i64 {
+    let mut buf = [0u8; 8];
+    OsRng.fill_bytes(&mut buf);
+    (i64::from_be_bytes(buf) & ((1 << 53) - 1)).abs()
+}
+
 // ---- WS protocol -----------------------------------------------------------
 
 /// A frame from a client.
@@ -123,7 +142,25 @@ pub(crate) enum ServerMsg {
     /// from who *joined the plan*, not from who has voted or who happens to be
     /// connected: a person who steps away is still deciding, and a person who has not
     /// swiped yet has not agreed to anything.
-    Lobby { deciders: i64, started: bool },
+    /// The lobby: how many people are deciding, whether the swiping has begun — **and
+    /// the two facts everything a room derives is derived from** (#212).
+    ///
+    /// `seed` and `created_at` ride here rather than on a frame of their own because
+    /// this is the frame every client already receives on connect and on every change,
+    /// and because they are facts *about the plan* exactly as its roster size and its
+    /// startedness are. They are immutable for the life of the plan, so re-stating them
+    /// costs two numbers and means a client can never be holding one without the other.
+    ///
+    /// `seed` is `None` for a plan created before plans had one (migration 0031), which
+    /// has no shared randomness — the honest absence, not a zero.
+    Lobby {
+        deciders: i64,
+        started: bool,
+        /// The number this plan's shared randomness dangles off.
+        seed: Option<i64>,
+        /// When the plan was born, unix seconds — the anchor it is measured from.
+        created_at: i64,
+    },
     /// One live vote — drives both the incremental tally and peer-injection (a
     /// client slips `source`/`id` into its own deck if it has not seen it).
     Vote {
@@ -582,6 +619,14 @@ pub struct LobbyView {
     /// before its socket has finished rehydrating. Both are the same three columns of
     /// the same row, so there is one answer to "what did we pick", not two.
     pub decided: Option<DecidedRecipe>,
+    /// **This plan's seed** (#212) — the number its shared randomness dangles off, or
+    /// `None` for a plan created before plans had one, which has no shared randomness
+    /// and honestly says so (migration 0031).
+    pub seed: Option<i64>,
+    /// **When the plan was born**, unix seconds — the anchor everything derived from the
+    /// seed is measured from. Whole seconds because every device reads *this* stored
+    /// value, so the coarseness is shared and disagrees with nobody.
+    pub created_at: i64,
 }
 
 /// `GET /api/session/{channel}` — the lobby: the roster, and whether it has started.
@@ -1095,6 +1140,8 @@ async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyVie
     if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
         deciders: view.voters.len() as i64,
         started: view.started,
+        seed: view.seed,
+        created_at: view.created_at,
     }) {
         // No receivers is an error and also a non-event: nobody is listening yet.
         let _ = tx.send(txt);
@@ -1204,6 +1251,8 @@ async fn socket_loop(
         if let Ok(txt) = serde_json::to_string(&ServerMsg::Lobby {
             deciders: view.voters.len() as i64,
             started: view.started,
+            seed: view.seed,
+            created_at: view.created_at,
         }) {
             if sink.send(Message::Text(txt.into())).await.is_err() {
                 return;
@@ -1560,7 +1609,7 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     let mut rows = conn
         .query(
             "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds,
-                    decided_source, decided_id, decided_at
+                    decided_source, decided_id, decided_at, seed, created_at
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1587,6 +1636,11 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     // Read from this row rather than by a second query, so the lobby's `started` and
     // its `decided` can never describe two different instants of the same plan.
     let decided = decision_of(row.get(6)?, row.get(7)?, row.get(8)?)?;
+    // Read from this same row for the same reason the decision is: a plan's seed and its
+    // birth instant are the pair every derived-shared thing is computed from, and reading
+    // them separately would be two reads that could describe two plans.
+    let seed: Option<i64> = row.get(9)?;
+    let created_at: i64 = row.get(10)?;
 
     let mut vrows = conn
         .query(
@@ -1636,6 +1690,8 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         voters,
         candidates,
         decided,
+        seed,
+        created_at,
     }))
 }
 
@@ -1666,9 +1722,13 @@ pub async fn create_session(
     max_total_seconds: Option<i64>,
 ) -> anyhow::Result<()> {
     conn.execute(
+        // The seed is minted here and never again: it is a fact about the plan's birth,
+        // like `created_at` beside it, and a plan whose seed could change is a plan whose
+        // room could be dealt two different sequences of the same thing.
         "INSERT INTO pick_sessions
-            (channel_id, created_by, filter, kitchen_id, meal_type, additions, max_total_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (channel_id, created_by, filter, kitchen_id, meal_type, additions,
+             max_total_seconds, seed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         libsql::params![
             channel_id,
             created_by,
@@ -1676,7 +1736,8 @@ pub async fn create_session(
             kitchen_id,
             meal_type.as_str(),
             serde_json::to_string(&normalize_additions(additions))?,
-            max_total_seconds
+            max_total_seconds,
+            mint_seed()
         ],
     )
     .await?;
@@ -2943,6 +3004,143 @@ mod tests {
     /// Two voters, two recipes: the tally counts yes/no per recipe and the distinct
     /// voters, and ranks by yeses — enough for the client to read both plurality and
     /// consensus off it.
+    /// **Every plan is born with a seed** (#212), and no two plans share one.
+    ///
+    /// The seed is the whole feature: a room's soundtrack is a pure function of it and
+    /// of how long the plan has existed, so nothing is stored, announced or raced over.
+    /// A plan created without one has no shared randomness at all, which is why this is
+    /// asserted on `create_session` rather than left to a column default — SQLite cannot
+    /// require it, so the writer must.
+    #[tokio::test]
+    async fn every_plan_is_born_with_its_own_seed() {
+        let conn = conn().await;
+        let mut seen = std::collections::BTreeSet::new();
+        for channel in ["c", "d", "e", "f"] {
+            create_session(
+                &conn,
+                channel,
+                "alice",
+                None,
+                None,
+                MealType::Dinner,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+            let view = load_lobby(&conn, channel).await.unwrap().unwrap();
+            let seed = view.seed.expect("a new plan has a seed");
+            assert!(
+                (0..(1i64 << 53)).contains(&seed),
+                "a seed must survive JSON into a browser's Number exactly: {seed}"
+            );
+            assert!(seen.insert(seed), "two plans dealt the same seed: {seed}");
+        }
+    }
+
+    /// **And the birth instant beside it** — the anchor everything derived from the seed
+    /// is measured from. The pair travels together on one read of one row, so a plan can
+    /// never be described by one plan's seed and another's clock.
+    #[tokio::test]
+    async fn the_lobby_carries_the_seed_and_the_plans_birth_instant() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert!(view.seed.is_some());
+        // `created_at` defaults to `unixepoch()` (0006), so it is a real second in the
+        // present rather than a zero nobody set.
+        assert!(
+            view.created_at > 1_700_000_000,
+            "a plan is born now, not in 1970: {}",
+            view.created_at
+        );
+    }
+
+    /// **A plan from before plans had seeds says so.** Migration 0031 is additive and
+    /// backfills nothing, because inventing a seed for a plan now would be inventing a
+    /// shared past its participants never had — and a *default* would be worse, putting
+    /// every such plan on one station. `None` reads as "no shared randomness", and the
+    /// surface that consumes it falls back to each device's own (#146: degrade, do not
+    /// die).
+    #[tokio::test]
+    async fn a_plan_from_before_the_seed_has_none() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "UPDATE pick_sessions SET seed = NULL WHERE channel_id = ?1",
+            libsql::params!["c"],
+        )
+        .await
+        .unwrap();
+
+        let view = load_lobby(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(view.seed, None, "absent, not zero");
+        assert!(view.created_at > 0, "and the anchor is still a real instant");
+    }
+
+    /// **The lobby frame carries the two facts and nothing about anybody's speaker.**
+    ///
+    /// The on/off switch is personal: sync decides *what* plays and *where in it we are*,
+    /// never whether a given device makes a sound. There is no music frame at all any
+    /// more, and this one has nowhere to say so — asserted as the **whole key set**,
+    /// because a field nobody thought to look for is exactly what this has to catch.
+    #[test]
+    fn the_lobby_frame_says_nothing_about_whether_a_device_is_audible() {
+        let wire = serde_json::to_string(&ServerMsg::Lobby {
+            deciders: 2,
+            started: true,
+            seed: Some(4242),
+            created_at: 1_700_000_000,
+        })
+        .unwrap();
+        let keys: std::collections::BTreeSet<String> =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&wire)
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+        assert_eq!(
+            keys,
+            ["created_at", "deciders", "seed", "started", "type"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+        );
+
+        // A plan with no seed is `null` on the wire, not missing and not 0.
+        let none = serde_json::to_string(&ServerMsg::Lobby {
+            deciders: 1,
+            started: false,
+            seed: None,
+            created_at: 1_600_000_000,
+        })
+        .unwrap();
+        assert!(none.contains(r#""seed":null"#), "{none}");
+    }
+
     /// A plan is never roster-less and never double-counts: the host is seated once,
     /// however many times they arrive.
     #[tokio::test]
