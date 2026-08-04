@@ -118,6 +118,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 29 by the same rule: 0028 (#209) is the highest number in the tree and has landed
     // on `main`, so this is the next number above everything.
     (29, include_str!("../migrations/0029_cook_started.sql")),
+    // 30 was numbered above 29 while both were in flight on separate branches; 29
+    // (#211) landed first, so the ledger reads in order with no hole.
+    (
+        30,
+        include_str!("../migrations/0030_pick_calorie_range.sql"),
+    ),
 ];
 
 /// Open the database described by `DATABASE_URL`.

@@ -459,6 +459,15 @@ export interface Lobby {
   started: boolean;
   /** The plan's total-time cap in seconds (#80); null = "Any". */
   max_total_seconds: number | null;
+  /** The plan's calorie range in **kcal a serving** (#213) — the number the card
+   * shows, not the whole-recipe total. Null at either end is an open end; both null
+   * is "Any", which is what every plan is born as.
+   *
+   * The bound is strict (#193): while it is set, only recipes whose calorie reading
+   * explicitly fits are dealt, so an unread reading — or one that is only a floor —
+   * is out and the deck honestly thins. */
+  min_kcal_per_serving: number | null;
+  max_kcal_per_serving: number | null;
   /** Whether we know what this plan's kitchen owns (#82). The walk is always limited
    * to what the kitchen can make; `false` means its equipment is unrecorded — a gap,
    * not a claim that it owns nothing — so nothing limits the deck. */
@@ -587,6 +596,36 @@ export async function setPlanCap(
     },
   );
   if (!res.ok) throw lobbyFailed(res.status, "set the time cap");
+  return (await res.json()) as Lobby;
+}
+
+/**
+ * Set (or lift, with two `null`s) the plan's calorie range in kcal a serving (#213).
+ * Host only, and only while the lobby is open — the range freezes when the swiping
+ * starts, exactly like the time cap.
+ *
+ * Both ends go on every call rather than one at a time: a range is one setting with two
+ * edges, and a body that could name one edge would make "clear the min" and "leave the
+ * min alone" the same request. The server refuses `min > max` — it selects nothing, so
+ * honouring it would deal an empty deck indistinguishable from the honest thinning the
+ * strict filter produces.
+ */
+export async function setPlanCalories(
+  channel: string,
+  min: number | null,
+  max: number | null,
+): Promise<Lobby> {
+  const res = await apiFetch(
+    `/api/session/${encodeURIComponent(channel)}/calories`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        min_kcal_per_serving: min,
+        max_kcal_per_serving: max,
+      }),
+    },
+  );
+  if (!res.ok) throw lobbyFailed(res.status, "set the calorie range");
   return (await res.json()) as Lobby;
 }
 

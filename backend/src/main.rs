@@ -294,6 +294,9 @@ pub fn app(state: AppState) -> Router {
         .route("/session/{channel}/meal-type", post(session::set_meal_type))
         .route("/session/{channel}/additions", post(session::set_additions))
         .route("/session/{channel}/cap", post(session::set_cap))
+        // The calorie range (#213), beside the cap it mirrors: one bound per plan, the
+        // host's to set while the lobby is open, frozen at start.
+        .route("/session/{channel}/calories", post(session::set_calories))
         // The meal's shopping checklist (#131) — read by anyone holding the channel id,
         // like the lobby it belongs to.
         //
@@ -2604,6 +2607,304 @@ mod tests {
             .unwrap();
         let stops = body_json(res).await["stops"].clone();
         assert_eq!(stops.as_array().unwrap().len(), 3);
+    }
+
+    /// A nonsense calorie range is refused at create (#213) — either end outside what a
+    /// serving could be, and the upside-down pair that no recipe can satisfy.
+    #[tokio::test]
+    async fn a_plan_with_a_nonsense_calorie_range_is_refused() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        for body in [
+            r#"{"min_kcal_per_serving":0}"#,
+            r#"{"max_kcal_per_serving":0}"#,
+            r#"{"min_kcal_per_serving":-100}"#,
+            r#"{"max_kcal_per_serving":10001}"#,
+            r#"{"min_kcal_per_serving":800,"max_kcal_per_serving":200}"#,
+        ] {
+            let res = app
+                .clone()
+                .oneshot(json_post("/api/session", Some(&cookie), body))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "{body} must be refused"
+            );
+        }
+    }
+
+    /// A plan is born with **no** calorie range (#213) — both ends null, "Any" — which
+    /// is the opposite of the time cap beside it (#163) and deliberate: a plan born
+    /// inside a range would thin its own deck to whatever the nutrition worker had
+    /// reached, which is a bound nobody chose standing in for a data gap.
+    #[tokio::test]
+    async fn a_plan_is_born_with_no_calorie_range() {
+        let (app, conn) = test_app().await;
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&cookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let res = app
+            .oneshot(get_req(&format!("/api/session/{channel}"), &cookie))
+            .await
+            .unwrap();
+        let view = body_json(res).await;
+        assert!(view["min_kcal_per_serving"].is_null());
+        assert!(view["max_kcal_per_serving"].is_null());
+    }
+
+    /// The calorie range is the host's to move, and only while the lobby is open: a
+    /// guest cannot rebound someone else's plan, and once the swiping starts the corpus
+    /// everyone is voting within must not shift under them (#213, the cap's rule).
+    ///
+    /// The lobby the write answers with is **re-read from the database**, not echoed
+    /// from the request, so this is also what a returning client rehydrates to.
+    #[tokio::test]
+    async fn the_calorie_range_is_the_hosts_and_freezes_at_start() {
+        let (app, conn) = test_app().await;
+        let host = auth::issue_test_session(&conn, "host").await;
+        let guest = auth::issue_test_session(&conn, "guest").await;
+        let hcookie = format!("recipes_session={host}");
+        let gcookie = format!("recipes_session={guest}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&hcookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let uri = format!("/api/session/{channel}/calories");
+
+        // Not the host → forbidden.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &uri,
+                Some(&gcookie),
+                r#"{"max_kcal_per_serving":500}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // The host, lobby open → the range lands and the new lobby comes back.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &uri,
+                Some(&hcookie),
+                r#"{"min_kcal_per_serving":500,"max_kcal_per_serving":800}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let view = body_json(res).await;
+        assert_eq!(view["min_kcal_per_serving"], 500);
+        assert_eq!(view["max_kcal_per_serving"], 800);
+
+        // …and a plain read of the lobby says the same thing, which is what everyone
+        // else in the room lands on when the announcement sends them back to it.
+        let res = app
+            .clone()
+            .oneshot(get_req(&format!("/api/session/{channel}"), &gcookie))
+            .await
+            .unwrap();
+        let view = body_json(res).await;
+        assert_eq!(view["min_kcal_per_serving"], 500);
+        assert_eq!(view["max_kcal_per_serving"], 800);
+
+        // An upside-down range is refused here too, not only at create.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &uri,
+                Some(&hcookie),
+                r#"{"min_kcal_per_serving":800,"max_kcal_per_serving":200}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // Lifting it back to "Any" is two nulls, and is a normal move.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &uri,
+                Some(&hcookie),
+                r#"{"min_kcal_per_serving":null,"max_kcal_per_serving":null}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_json(res).await["max_kcal_per_serving"].is_null());
+
+        // Start the plan; the range is now frozen, even for the host.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/start"),
+                Some(&hcookie),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .oneshot(json_post(
+                &uri,
+                Some(&hcookie),
+                r#"{"max_kcal_per_serving":500}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Setting the range **tells the room** (#213), the way every other lobby change
+    /// does: the write goes through `reload_and_announce`, so every open client is sent
+    /// a `lobby` frame and re-reads the plan it is about to swipe. Without it the host
+    /// would be swiping a different corpus from everyone looking at the same screen.
+    #[tokio::test]
+    async fn setting_the_calorie_range_is_announced_to_the_room() {
+        let (state, conn) = test_state(Some("test-ingest-key".into())).await;
+        let rooms = state.rooms.clone();
+        let app = app(state);
+        let host = auth::issue_test_session(&conn, "host").await;
+        let hcookie = format!("recipes_session={host}");
+
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/session", Some(&hcookie), "{}"))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Listen to the plan's room before the change, as a second open client would.
+        let mut rx = rooms
+            .lock()
+            .unwrap()
+            .entry(channel.clone())
+            .or_insert_with(|| tokio::sync::broadcast::channel(256).0)
+            .subscribe();
+
+        let res = app
+            .oneshot(json_post(
+                &format!("/api/session/{channel}/calories"),
+                Some(&hcookie),
+                r#"{"max_kcal_per_serving":500}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            frame["type"], "lobby",
+            "the room is told the lobby moved: {frame}"
+        );
+    }
+
+    /// End to end through the router (#213): a plan with a calorie range deals only the
+    /// recipes whose reading **explicitly** fits it, and the same corpus walked without
+    /// a channel is the whole corpus.
+    ///
+    /// The corpus is four rows, one per relationship a reading can have with a bound of
+    /// "up to 500 kcal a serving", with the per-serving figure worked out by hand off
+    /// `formatCalories`' rule (the floor of `kcal / servings`):
+    ///
+    /// ```text
+    /// id       kcal  complete  servings   a serving   dealt?
+    /// ──────── ────  ────────  ────────   ─────────   ──────────────────────────────
+    /// salad    1240      1         4          310     yes — counted in full, fits
+    /// feast    4800      1         4         1200     no  — counted in full, too big
+    /// floor    1200      0         4          300     no  — a floor proves nothing
+    /// unread   NULL      0       NULL           —     no  — nobody has counted it
+    /// ```
+    ///
+    /// `floor` is the strict rule (#193) at the outermost layer: it would fit on the
+    /// number we hold, and it is still not dealt, because that number is only the least
+    /// the dish can cost.
+    #[tokio::test]
+    async fn a_ranged_sessions_walk_deals_only_complete_readings_that_fit() {
+        let (app, conn) = test_app().await;
+        for (id, kcal, complete, servings) in [
+            ("salad", Some(1240i64), 1i64, Some(4i64)),
+            ("feast", Some(4800), 1, Some(4)),
+            ("floor", Some(1200), 0, Some(4)),
+            ("unread", None, 0, None),
+        ] {
+            conn.execute(
+                // Read for the plan's default meal: the bound under test is the calorie
+                // range, and a meal round deals only explicit matches (#192).
+                "INSERT INTO recipes (source, id, title, kcal, kcal_complete, servings, sittings)
+                 VALUES ('t', ?1, ?1, ?2, ?3, ?4, '[\"dinner\"]')",
+                libsql::params![id, kcal, complete, servings],
+            )
+            .await
+            .unwrap();
+        }
+        let token = auth::issue_test_session(&conn, "4242").await;
+        let cookie = format!("recipes_session={token}");
+        // No time cap, so the calorie range is the only bound moving here.
+        let res = app
+            .clone()
+            .oneshot(json_post(
+                "/api/session",
+                Some(&cookie),
+                r#"{"max_total_seconds":null,"max_kcal_per_serving":500}"#,
+            ))
+            .await
+            .unwrap();
+        let channel = body_json(res).await["channel_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let res = app
+            .clone()
+            .oneshot(get_req(
+                &format!("/api/walk?len=10&channel={channel}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stops = body_json(res).await["stops"].clone();
+        let ids: std::collections::HashSet<String> = stops
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["recipe"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            ids,
+            std::collections::HashSet::from(["salad".to_owned()]),
+            "only the reading that explicitly fits: {ids:?}"
+        );
+
+        // The same corpus walked without a channel is untouched — no range, no bound.
+        let res = app
+            .oneshot(get_req("/api/walk?len=10", &cookie))
+            .await
+            .unwrap();
+        let stops = body_json(res).await["stops"].clone();
+        assert_eq!(stops.as_array().unwrap().len(), 4);
     }
 
     /// A kitchen holding `items`, and a plan for it, end to end through the router —

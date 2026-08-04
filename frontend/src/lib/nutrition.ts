@@ -88,6 +88,35 @@ export function formatCalories(
 }
 
 /**
+ * A plan's calorie range as a person reads it (#213) — the label the lobby's pills and
+ * the sentence under them both use, so a chosen pill and the line explaining it can
+ * never word the same bound two ways.
+ *
+ * Either end may be open, and both open is `"Any"` — the same word the time cap uses
+ * for the bound that bounds nothing, because it is the same idea and a lobby that
+ * called it two things would read as two kinds of control.
+ *
+ * The unit is deliberately **not** in here. It is constant across every bound (kcal a
+ * serving, always), so the surface says it once — in the section's question and in the
+ * sentence under the row — rather than four times across a row of pills, which is the
+ * opposite call to the time cap, whose units genuinely differ pill to pill.
+ *
+ * The bounds are inclusive at both ends, the same call the time cap makes (a 30-minute
+ * recipe fits a 30-minute cap), so a 500 kcal serving fits both `Up to 500` and
+ * `500 to 800`. That is two bounds overlapping at a point, not a recipe in two boxes:
+ * these pills choose a bound, they do not sort the corpus.
+ */
+export function calorieRangeLabel(
+  min: number | null | undefined,
+  max: number | null | undefined,
+): string {
+  if (min == null && max == null) return "Any";
+  if (min == null) return `Up to ${max}`;
+  if (max == null) return `${min} or more`;
+  return `${min} to ${max}`;
+}
+
+/**
  * What the calorie badge's mark means, spelled out for a reader who can hover.
  *
  * It follows `complete` for the same reason the mark does: telling the reader of a
