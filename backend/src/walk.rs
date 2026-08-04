@@ -26,8 +26,16 @@
 //! separates an ingredient's name from its measure, so its names are node-quality
 //! today; #11 (structured ingredients) sharpens this for free-text sources and
 //! near-duplicate names, but the walk does not wait on it for the corpus we hold.
+//!
+//! **The dice belong to the plan (#225).** The journey grammar below — the strategy, the
+//! regions, the island rule, the teleports — is unchanged and stays pure over
+//! `(corpus, rng)`. What changed is where that rng comes from: behind a plan minted
+//! since #220 it is derived from the plan's seed, the person asking and the round
+//! ([`deal_rng`]), so the deal is replayable, agrees between a phone and a laptop, and
+//! can be reproduced after the fact. Behind no plan, or a plan older than the seed
+//! column, it is still `StdRng::from_entropy()`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use axum::{
     extract::{Query, State},
@@ -40,6 +48,7 @@ use recipe_core::meal::{course, fit, Course, MealFit};
 use recipe_core::{Ingredient, Sitting};
 use recipe_walk::{FixtureGraph, IngredientId, RecipeGraph, RecipeId, TabuWeighted, Walk};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::auth::CurrentUser;
 use crate::session::MealType;
@@ -50,6 +59,21 @@ use crate::{error::AppError, AppState};
 const DEFAULT_LEN: usize = 12;
 /// A ceiling on `len`, so a caller cannot ask for an unbounded walk.
 const MAX_LEN: usize = 30;
+/// How many recipes one **round** of a seeded deal holds (#225).
+///
+/// A round is the unit the plan's seed deals in: [`deal_rng`] keys the journey on
+/// `(plan seed, voter, round)`, and this is how far that journey runs before the next
+/// round takes over. It is a **constant, not the caller's `len`**, and that is the whole
+/// point — `len` is how much of the stream a device wants right now, so if it sized the
+/// round then a phone asking for 12 and a laptop asking for 30 would be walking two
+/// different streams and #225's "one voter, one deck in one order" would be false. It
+/// equals [`MAX_LEN`] so the largest deal a client may ask for is usually served by one
+/// round.
+const ROUND_LEN: usize = MAX_LEN;
+/// Domain separator for [`deal_rng`], so the deal's stream can never coincide with
+/// another consumer of the same plan seed. The seed is shared by design (#212's
+/// soundtrack is the other consumer today); the streams hung off it must not be.
+const DEAL_DOMAIN: &[u8] = b"recipes/walk/deal/v1";
 
 /// Query string for `GET /api/walk`.
 #[derive(Debug, Deserialize)]
@@ -154,6 +178,23 @@ struct Corpus {
     cards: Vec<RecipeCard>,
     /// `IngredientId(i)` → the name to show for the thread ("via …").
     ingredient_names: Vec<String>,
+    /// The recipes this caller has already voted on in this plan (#202), **marked
+    /// rather than missing** whenever the deal is replayable (#225).
+    ///
+    /// A marked recipe is in the graph — it can be hopped through, it counts toward
+    /// every frequency — and it is simply not handed out. That is the difference
+    /// between a deck you are working through and a deck that reshuffles under you:
+    /// removing a row renumbers every [`RecipeId`] and resizes the start pool, so the
+    /// very first `gen_range` lands somewhere else and the whole journey changes the
+    /// moment you answer one card. Marked, the journey is a fixed function of the seed
+    /// and the finished stops simply drop out of it, which is exactly what #225 asks
+    /// of the replay.
+    ///
+    /// Empty for a walk with nothing to continue — no plan, or a plan whose seed
+    /// predates #220 and whose deal is therefore not replayable at all. See
+    /// [`load_corpus`] for why that second case keeps the rows out of the graph
+    /// instead.
+    answered: HashSet<RecipeId>,
 }
 
 impl Corpus {
@@ -198,12 +239,28 @@ impl Corpus {
             graph: FixtureGraph::new(by_recipe),
             cards,
             ingredient_names,
+            answered: HashSet::new(),
         }
     }
 
     /// Number of recipes in the corpus.
     fn len(&self) -> usize {
         self.cards.len()
+    }
+
+    /// How many recipes are still unanswered — the most a deal could ever hand out.
+    /// The round loop reads it to stop the moment there is nothing left to find,
+    /// rather than walking journey after journey over a deck that is spent.
+    fn unanswered(&self) -> usize {
+        self.cards.len() - self.answered.len()
+    }
+
+    /// Turn one of the walk's opaque landings back into a card the client can render.
+    fn stop(&self, (recipe, via): Hop) -> Stop {
+        Stop {
+            via: via.and_then(|i| self.ingredient_names.get(i.0 as usize).cloned()),
+            recipe: self.cards[recipe.0 as usize].clone(),
+        }
     }
 
     /// Recipes that can actually begin a journey: those with at least one
@@ -241,6 +298,32 @@ impl Corpus {
 /// genuinely must. Pure over `(corpus, rng)` so a seeded rng makes it deterministic
 /// to test. Empty corpus → no stops.
 fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
+    journey(corpus, len, rng, &HashSet::new())
+        .into_iter()
+        .map(|hop| corpus.stop(hop))
+        .collect()
+}
+
+/// One landing of a journey, before it is turned into a renderable [`Stop`]: the recipe
+/// reached, and the ingredient crossed to reach it (`None` for a start or a teleport).
+type Hop = (RecipeId, Option<IngredientId>);
+
+/// [`wander`]'s body, in the walk's own opaque ids, plus the one thing a multi-round
+/// deal needs of it: `already` is what earlier rounds have handed out, and this journey
+/// never lands there.
+///
+/// It is the same journey grammar either way — same strategy, same self-avoiding walk,
+/// same island rule, same teleports — because "already dealt" is fed to the *same hard
+/// visited set* the walk uses for "already visited on this leg"
+/// ([`recipe_walk::WalkState::self_avoiding_beyond`]). Nothing about how a journey is
+/// composed changes; what changes is where it is allowed to begin and land, and that is
+/// what makes rounds partition the deck instead of overlapping it (see [`deal`]).
+fn journey<R: RngCore>(
+    corpus: &Corpus,
+    len: usize,
+    rng: &mut R,
+    already: &HashSet<RecipeId>,
+) -> Vec<Hop> {
     if corpus.len() == 0 {
         return Vec::new();
     }
@@ -248,36 +331,47 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
 
     // Teleport candidates: connected recipes (a leg can actually wander from them).
     // Fall back to every recipe only if nothing is connected, so an edgeless corpus
-    // still yields stops rather than nothing.
-    let connected = corpus.connected_starts();
-    let all: Vec<RecipeId> = (0..corpus.len() as u32).map(RecipeId).collect();
+    // still yields stops rather than nothing. Both pools drop what earlier rounds
+    // already dealt — a journey that started or teleported there would spend its stop
+    // on a card this caller has already been handed.
+    let fresh_of = |pool: Vec<RecipeId>| -> Vec<RecipeId> {
+        pool.into_iter().filter(|r| !already.contains(r)).collect()
+    };
+    let connected = fresh_of(corpus.connected_starts());
+    let all: Vec<RecipeId> = fresh_of((0..corpus.len() as u32).map(RecipeId).collect());
     let start_pool: &[RecipeId] = if connected.is_empty() {
         &all
     } else {
         &connected
     };
+    // Nothing left to start on: every recipe is already dealt, which is the honest end
+    // of the stream rather than a reason to deal one twice.
+    if start_pool.is_empty() {
+        return Vec::new();
+    }
 
     // The first start, then a self-avoiding walk that owns the visited set. `&mut
     // *rng` reborrows the caller's stream so the start, every hop, and every
     // teleport all draw from the one sequence — a whole journey deterministic in one
     // seed.
     let start = start_pool[rng.gen_range(0..start_pool.len())];
-    let mut stops = vec![Stop {
-        via: None,
-        recipe: corpus.cards[start.0 as usize].clone(),
-    }];
-    let mut walk = Walk::self_avoiding(&corpus.graph, &strategy, &mut *rng, start, len);
+    let mut hops: Vec<Hop> = vec![(start, None)];
+    let mut walk = Walk::self_avoiding_beyond(
+        &corpus.graph,
+        &strategy,
+        &mut *rng,
+        start,
+        len,
+        already.clone(),
+    );
 
-    while stops.len() < len {
+    while hops.len() < len {
         // Wander until this region's frontier is spent (the walk yields `None`).
-        while stops.len() < len {
+        while hops.len() < len {
             let Some(step) = walk.next() else { break };
-            stops.push(Stop {
-                via: corpus.ingredient_names.get(step.via.0 as usize).cloned(),
-                recipe: corpus.cards[step.recipe.0 as usize].clone(),
-            });
+            hops.push((step.recipe, Some(step.via)));
         }
-        if stops.len() >= len {
+        if hops.len() >= len {
             break;
         }
         // Frontier spent → teleport to a fresh recipe (connected if any remain),
@@ -288,10 +382,128 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
             None => walk.teleport_to_fresh(&all),
         };
         let Some(fresh) = fresh else { break };
-        stops.push(Stop {
-            via: None,
-            recipe: corpus.cards[fresh.0 as usize].clone(),
-        });
+        hops.push((fresh, None));
+    }
+    hops
+}
+
+/// The rng a round of the deal runs on: a stable function of the **plan's seed, the
+/// voter, and the round** (#225), and of nothing else.
+///
+/// This is an API of the plan's universe now, not an implementation detail — a hand can
+/// be reproduced from these three numbers alone, which is what makes "why was I dealt
+/// this" answerable — so the function is spelled out rather than left to whatever
+/// `StdRng` happens to do with a tuple:
+///
+/// ```text
+/// key    = SHA-256( DEAL_DOMAIN ‖ seed_be64 ‖ voter_utf8 ‖ round_be32 )
+/// stream = StdRng::from_seed(key)                      // ChaCha12, 32-byte seed
+/// ```
+///
+/// - **The whole seed, big-endian, all eight bytes.** The column is an `INTEGER` below
+///   2^53 (migration 0031) and every bit of it goes in. Folding or truncating it would
+///   shrink the space of decks silently — two plans differing only in the discarded bits
+///   would deal one deck while looking perfectly random.
+/// - **Injective by construction.** One variable-length field, fixed-width fields either
+///   side of it: two different triples cannot produce the same bytes, because equal
+///   encodings force equal lengths, which forces the same voter id and so the same seed
+///   and round. No two plans, people or rounds can collide onto one stream by accident.
+/// - **Domain-separated.** [`DEAL_DOMAIN`] fences this stream off from every other
+///   consumer of the same plan seed. The seed is *meant* to be shared — that is the
+///   ruling it exists for, and the soundtrack derives its own running order from the
+///   same number — so keeping the streams apart is this function's job, not the seed's.
+/// - **Round is last and hashed**, so round 1 is a different journey rather than round 0
+///   advanced by a few draws — a refill is a new deal, not the tail of the old one.
+/// - **SHA-256 with no KDF**, the same call this repo already makes for session secrets
+///   (`auth.rs`): nothing here is a password, and a shared seed is deliberately not a
+///   credential (#225 keeps invite codes and login secrets on `OsRng`).
+///
+/// Changing any of it re-deals every plan in flight, so it is versioned in the domain
+/// string rather than edited in place.
+fn deal_rng(seed: i64, voter: &str, round: u32) -> StdRng {
+    StdRng::from_seed(deal_key(seed, voter, round))
+}
+
+/// The 32 bytes [`deal_rng`] seeds its stream from — the written derivation on its own,
+/// so it can be checked against a hash computed outside this program rather than only
+/// against what this program did last time.
+fn deal_key(seed: i64, voter: &str, round: u32) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(DEAL_DOMAIN);
+    hash.update(seed.to_be_bytes());
+    hash.update(voter.as_bytes());
+    hash.update(round.to_be_bytes());
+    hash.finalize().into()
+}
+
+/// Deal up to `len` cards off the plan's seed (#225) — the replayable deal.
+///
+/// # The stream, and where the round lives
+///
+/// A voter's deck in a plan is the rounds `0, 1, 2, …` laid end to end. Round `r` is
+/// [`journey`] over the plan's corpus on [`deal_rng`]`(seed, voter, r)`, beyond
+/// everything rounds `< r` landed on — so the rounds **partition** the deck rather than
+/// overlapping it, and every recipe is reached by exactly one of them. A deal walks that
+/// stream from the front and hands back the first `len` cards this voter has not
+/// answered.
+///
+/// **The round is derived, and it is derived by replay** — it is nowhere in the
+/// database, in the query string, or on the wire. `votes` already records what this
+/// person answered; how far down the stream they are *is* that record read forward, so
+/// deriving it makes the two impossible to disagree. A stored counter would be a second
+/// writer for the same fact (and a write on a `GET`), free to drift from the votes that
+/// actually decide what is left — the same reason a timer's deadline (0027) and a
+/// per-serving calorie figure (#162) are derived rather than stored. A client-supplied
+/// round would be worse still: a device that guessed wrong would deal itself a hand it
+/// had already answered and call it fresh.
+///
+/// **A refill is round + 1, never a re-roll of round 0.** Answer everything round 0
+/// dealt and its whole contribution drops out, so the first card of the next deal comes
+/// from round 1's journey — a genuinely different order, not the old order with the
+/// answered cards missing and the new arrivals inserted.
+///
+/// # What replay means, exactly
+///
+/// Same `(seed, voter, round)` over the same corpus snapshot ⇒ byte-for-byte the same
+/// journey. Two devices agree because both compute it, and a device that comes back on
+/// day four re-derives the deck it left rather than starting over: **answering a card
+/// removes that card and moves nothing else**, because the answered set is a mark on the
+/// corpus, never a hole in it (see [`Corpus::answered`]).
+///
+/// It is **exact over a corpus snapshot and best-effort after that**, and the docs say
+/// so rather than promising more. Ingest and enrichment move the corpus under every
+/// plan — a recipe arriving, a meal-time reading landing (#193), the kitchen's equipment
+/// being recorded (#82) — and any of those changes the graph the journey runs over. That
+/// is the honest boundary: the seed pins the dice, not the deck.
+///
+/// # Termination
+///
+/// Each round lands on at least its own start, which is drawn from what no earlier round
+/// has dealt, so `dealt` grows every iteration and the loop is bounded by the corpus.
+/// It stops as soon as it has `len` cards or has surfaced every unanswered one — so the
+/// common deal is a single journey, and a plan whose deck is spent answers empty at once
+/// rather than walking the corpus looking for a card that is not there.
+fn deal(corpus: &Corpus, seed: i64, voter: &str, len: usize) -> Vec<Stop> {
+    let mut stops: Vec<Stop> = Vec::new();
+    let mut dealt: HashSet<RecipeId> = HashSet::new();
+    let unanswered = corpus.unanswered();
+    let mut round: u32 = 0;
+
+    while stops.len() < len && stops.len() < unanswered && dealt.len() < corpus.len() {
+        let mut rng = deal_rng(seed, voter, round);
+        let hops = journey(corpus, ROUND_LEN, &mut rng, &dealt);
+        if hops.is_empty() {
+            break;
+        }
+        for hop in hops {
+            dealt.insert(hop.0);
+            // The finished stops drop out here, and only here: the journey above ran
+            // over the whole corpus and does not know or care what has been answered.
+            if !corpus.answered.contains(&hop.0) && stops.len() < len {
+                stops.push(corpus.stop(hop));
+            }
+        }
+        round += 1;
     }
     stops
 }
@@ -330,6 +542,19 @@ struct Bounds {
     /// plan and the session names the caller — and `None` for the plan-less walk, which
     /// is nobody's round and is untouched.
     answered_by: Option<Answered>,
+    /// The plan's seed (migration 0031) — the one number all of a plan's shared
+    /// randomness dangles off, and here the one that makes the deal replayable (#225).
+    ///
+    /// `Some` is a plan minted since the column landed, and its deal is
+    /// `(seed, voter, round)` (see [`deal`]). `None` is one of two honest states, and
+    /// they behave identically:
+    ///
+    /// - a walk with **no plan** behind it — there is no shared universe to hang a roll
+    ///   off, and freshness is all this walk ever promised (#47);
+    /// - a plan **older than the seed column**. It is not backfilled: minting a seed
+    ///   today would claim its past deals were reproducible, and they were not. The
+    ///   honest fallback is the entropy deal it has always had.
+    seed: Option<i64>,
 }
 
 /// The caller of a meal round, as the deal has to know them (#202): a plan and a person,
@@ -563,7 +788,7 @@ fn deals_as_the_meal(meal: Sitting, category: Option<&str>, sittings: &[Sitting]
 /// *corrupted*; what was impossible was **continuing** a long plan, because every return
 /// started it over.
 ///
-/// So a meal round excludes the `(source, id)`s this caller has already voted on **in
+/// So a meal round never deals the `(source, id)`s this caller has already voted on **in
 /// this channel**. It changes what is *dealt*, never what is *writable* — the vote upsert
 /// is untouched, and a change-your-mind surface would be its own work.
 ///
@@ -590,11 +815,31 @@ fn deals_as_the_meal(meal: Sitting, category: Option<&str>, sittings: &[Sitting]
 /// a recipe is deciding about it, and re-dealing it would be the same "starting over" the
 /// issue is about.
 ///
-/// The predicate is `?2 IS NULL OR NOT EXISTS (…)`, so a plan-less walk — which carries
-/// no channel and therefore no voter — is untouched, exactly like the meal bound above.
-/// Note the cap's clause is parenthesised: `AND` binds tighter than `OR`, so without the
-/// brackets this would have attached to `total_seconds <= ?1` alone and left every
-/// un-estimated recipe dealt forever.
+/// The predicate is `?2 IS NULL OR …`, so a plan-less walk — which carries no channel and
+/// therefore no voter — is untouched, exactly like the meal bound above. Note the cap's
+/// clause is parenthesised: `AND` binds tighter than `OR`, so without the brackets this
+/// would have attached to `total_seconds <= ?1` alone and left every un-estimated recipe
+/// dealt forever.
+///
+/// ## Answered is a *mark* once the deal is replayable (#225)
+///
+/// The question stays in SQL for every reason above — it is the same covered lookup on
+/// `votes`' primary key, asked once per row, and there is still no second query and no
+/// index rebuilt in memory. What changed is where the answer is *applied*:
+///
+/// - **A seeded plan marks the row** ([`Corpus::answered`]) and [`deal`] drops the stop.
+///   A deal replayable from `(seed, voter, round)` is only replayable if the corpus it
+///   runs over holds still: dropping a row renumbers every [`RecipeId`] and resizes the
+///   start pool, so the first draw lands elsewhere and the entire journey changes the
+///   moment somebody answers one card — which would make "a returning device re-derives
+///   the identical journey" false in exactly the case #225 exists for. Marked, the
+///   journey is fixed and the finished stops drop out of it.
+/// - **A plan with no seed drops the row**, exactly as #202 built it. There is nothing
+///   to replay there, so there is nothing to hold still, and the narrower graph is
+///   strictly better: it is what the entropy deal has always walked.
+///
+/// One query serves both; the difference is one `continue` below, beside the meal and
+/// kitchen filters it now reads like.
 ///
 /// If a plan is ever **decided**, the decided state wins and this defers to it — the deal
 /// is not what such a plan is showing (#202).
@@ -607,15 +852,15 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
     };
     let mut rows = conn
         .query(
-            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings, kcal, kcal_complete, servings
+            "SELECT source, id, title, image, category, area, total_seconds, fully_timed, ingredients, equipment, sittings, kcal, kcal_complete, servings,
+                    (?2 IS NOT NULL AND EXISTS (
+                       SELECT 1 FROM votes
+                        WHERE votes.channel_id = ?2
+                          AND votes.voter_id = ?3
+                          AND votes.source = recipes.source
+                          AND votes.id = recipes.id)) AS answered
              FROM recipes
              WHERE (?1 IS NULL OR total_seconds IS NULL OR total_seconds <= ?1)
-               AND (?2 IS NULL OR NOT EXISTS (
-                     SELECT 1 FROM votes
-                      WHERE votes.channel_id = ?2
-                        AND votes.voter_id = ?3
-                        AND votes.source = recipes.source
-                        AND votes.id = recipes.id))
                AND (
                      -- No range set: both ends open, so this bounds nothing and the
                      -- deck is exactly today's (#213).
@@ -645,6 +890,7 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
         .await?;
 
     let mut out: Vec<(RecipeCard, Vec<String>)> = Vec::new();
+    let mut answered_ids: HashSet<RecipeId> = HashSet::new();
     while let Some(row) = rows.next().await? {
         let card = RecipeCard {
             source: row.get::<String>(0)?,
@@ -671,6 +917,14 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
             kcal_complete: row.get::<i64>(12)? != 0,
             servings: row.get::<Option<i64>>(13)?,
         };
+        // What this caller has already answered in this plan (#202). `0` whenever no
+        // voter was supplied, so a plan-less walk reads it and is told nothing.
+        let answered = row.get::<i64>(14)? != 0;
+        // Without a seed there is no journey to hold still, so the answered row never
+        // enters the graph at all — #202's deal, unchanged (see this function's doc).
+        if answered && bounds.seed.is_none() {
+            continue;
+        }
         // The meal bound (#184, #191). Before the ingredients are parsed, because a dish
         // that is not in this round has no reason to be read at all.
         if let Some(meal) = bounds.meal_type {
@@ -731,10 +985,18 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
             }
         }
         let names = ingredients.into_iter().map(|i| i.name).collect();
+        // The mark is recorded against the id this row is about to get, which is its
+        // position — the same mapping `Corpus::build` uses, and the reason it is taken
+        // here rather than recomputed from the cards afterwards.
+        if answered {
+            answered_ids.insert(RecipeId(out.len() as u32));
+        }
         out.push((card, names));
     }
 
-    Ok(Corpus::build(out))
+    let mut corpus = Corpus::build(out);
+    corpus.answered = answered_ids;
+    Ok(corpus)
 }
 
 /// Resolve what a walk is bounded to. No channel is unbounded; a channel that names no
@@ -813,6 +1075,11 @@ async fn resolve_bounds(
             channel: channel.to_owned(),
             voter: voter.to_owned(),
         }),
+        // The plan's own seed (#220), which is what the deal hangs its dice off (#225).
+        // Read per walk beside the rest of the bounds — it is a column on the same row,
+        // so it costs nothing extra — and `None` for a plan minted before the column
+        // existed, which keeps its entropy deal.
+        seed: plan.seed,
     })
 }
 
@@ -821,14 +1088,23 @@ async fn resolve_bounds(
 /// to what its kitchen can make (#82), and to the meal it is for (#184) whenever a
 /// channel is named.
 ///
-/// Session-gated like every person-facing route (#25). Each call re-seeds from OS
-/// entropy, so the same corpus yields a different journey every time — freshness is
-/// the whole point (#47).
+/// Session-gated like every person-facing route (#25).
 ///
-/// The session is now *read* as well as required: a meal round skips what this caller
-/// has already answered in this plan (#202), so a plan that runs for days is continued
-/// rather than restarted. Freshness and continuity are the same wish — the point of a
-/// re-seed was never to deal the same card twice.
+/// The session is *read* as well as required: a meal round never re-deals what this
+/// caller has already answered in this plan (#202), so a plan that runs for days is
+/// continued rather than restarted.
+///
+/// **The dice come from the plan, not the machine (#225).** A plan minted since #220
+/// carries a seed — the one number every shared roll in a meal hangs off — and the deal
+/// is a function of `(seed, voter, round)` (see [`deal`]). A reload re-derives the deck
+/// it left; a phone and a laptop walk one deck in one order; and a hand can be
+/// reproduced after the fact from three numbers, which is the whole of "why was I dealt
+/// this".
+///
+/// A plan **without** a seed — one older than the column, or no plan at all — keeps the
+/// entropy deal it has always had. That is the honest state, not a gap to paper over: a
+/// seed minted today would claim those plans' past deals were reproducible, and they
+/// were not.
 pub async fn walk(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -839,16 +1115,36 @@ pub async fn walk(
     // enforces what the plan currently says — the client passes only the channel,
     // never a bound itself, which keeps them server-authoritative (#80). Who is asking
     // comes from the session for the same reason: a voter id in the query string would
-    // let a client deal itself the cards somebody else has left (#202).
+    // let a client deal itself the cards somebody else has left (#202), and it is half
+    // of the deal's key (#225), which no query string may name either.
     let bounds = resolve_bounds(&state, params.channel.as_deref(), &user.telegram_user_id).await?;
     let bounds = &bounds;
     let corpus = state
         .with_db(move |conn| async move { load_corpus(&conn, bounds).await })
         .await
         .map_err(|e| AppError::Internal(format!("could not load the corpus: {e:#}")))?;
-    let mut rng = StdRng::from_entropy();
-    let stops = wander(&corpus, len, &mut rng);
-    Ok(Json(WalkResponse { stops }))
+    Ok(Json(WalkResponse {
+        stops: stops_for(&corpus, bounds, len),
+    }))
+}
+
+/// Which deal these bounds get: the plan's own, or the machine's.
+///
+/// Both halves of the key have to be in hand — the plan's seed and the person asking —
+/// and they arrive together, because a channelled walk is always somebody's round
+/// (#202) and a seed is always a plan's. Anything else is the entropy deal: no plan at
+/// all (#47's wander, which promises nothing but freshness), or a plan minted before the
+/// seed column, whose deals never were reproducible and are not going to be told they
+/// were (#225).
+///
+/// A function rather than a `match` inside the handler so the choice itself is testable
+/// without an `AppState` — it is a ruling about which plans are replayable, not
+/// plumbing.
+fn stops_for(corpus: &Corpus, bounds: &Bounds, len: usize) -> Vec<Stop> {
+    match (&bounds.seed, &bounds.answered_by) {
+        (Some(seed), Some(who)) => deal(corpus, *seed, &who.voter, len),
+        _ => wander(corpus, len, &mut StdRng::from_entropy()),
+    }
 }
 
 #[cfg(test)]
@@ -1152,6 +1448,327 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- the deal comes off the plan's seed (#225) --------------------------
+
+    /// Two plan seeds of the shape migration 0031 mints: non-negative, below 2^53, and
+    /// with a non-zero high half — the half a derivation that truncated the column to a
+    /// 32-bit PRNG state would throw away.
+    const SEED_A: i64 = 0x0000_1122_3344_5566;
+    const SEED_B: i64 = 0x0000_199A_ABBC_CDDE;
+
+    /// The recipe ids a deal hands over, **in the order it dealt them**. Order is the
+    /// point of nearly every test below, so nothing here sorts.
+    fn hand(corpus: &Corpus, seed: i64, voter: &str, len: usize) -> Vec<String> {
+        deal(corpus, seed, voter, len)
+            .into_iter()
+            .map(|s| s.recipe.id)
+            .collect()
+    }
+
+    /// Mark `ids` as answered by this caller — what [`load_corpus`] does from `votes`.
+    fn mark_answered(corpus: &mut Corpus, ids: &[&str]) {
+        for id in ids {
+            let at = corpus
+                .cards
+                .iter()
+                .position(|c| c.id == *id)
+                .expect("marking a recipe that is in the corpus");
+            corpus.answered.insert(RecipeId(at as u32));
+        }
+    }
+
+    /// **The derivation, pinned to its written form.** `deal_rng` is an API of the
+    /// plan's universe — a hand is meant to be reproducible from three numbers — so the
+    /// exact bytes that go into the hash are part of the contract, not an implementation
+    /// detail free to drift.
+    ///
+    /// The expected value is **not** a note of what this code did last time: it is
+    /// `sha256(b"recipes/walk/deal/v1" + seed.to_be_bytes(8) + b"voter-1" + 0u32.be)`
+    /// computed outside this program, so the assertion is against the derivation as
+    /// written down rather than against the implementation of it. The domain string, the
+    /// field order, the endianness of both numbers and the hash itself are all in that
+    /// one line; any change to any of them re-deals every plan in flight, which is why
+    /// this is meant to be awkward to change — it moves only alongside a new version in
+    /// [`DEAL_DOMAIN`].
+    #[test]
+    fn the_deal_derivation_is_pinned_to_its_written_form() {
+        assert_eq!(
+            hex::encode(deal_key(SEED_A, "voter-1", 0)),
+            "68edded71d9c07d735a9de2d9ef5c79a2bb38a691a3e3972cb4a7f336dabed59"
+        );
+        // …and the stream really is seeded from those bytes.
+        assert_eq!(
+            deal_rng(SEED_A, "voter-1", 0).gen::<u64>(),
+            StdRng::from_seed(deal_key(SEED_A, "voter-1", 0)).gen::<u64>()
+        );
+    }
+
+    /// Every part of the key is *load-bearing*: change one and the stream changes.
+    /// Dropping any of the three from the hash — which is the whole failure mode this
+    /// guards — leaves one of these pairs equal.
+    #[test]
+    fn every_part_of_the_deal_key_changes_the_stream() {
+        let draw = |seed: i64, voter: &str, round: u32| deal_rng(seed, voter, round).gen::<u64>();
+        let base = draw(SEED_A, "mel", 0);
+        assert_ne!(base, draw(SEED_B, "mel", 0), "the plan's seed is in it");
+        assert_ne!(base, draw(SEED_A, "kit", 0), "the voter is in it");
+        assert_ne!(base, draw(SEED_A, "mel", 1), "the round is in it");
+    }
+
+    /// **The whole seed is in the key, not the low half of it.** Two plans whose seeds
+    /// differ only above 2^32 are different plans, and truncating the column to fit a
+    /// 32-bit state — the cheap way to seed a PRNG from a number — would deal them one
+    /// deck while looking perfectly random. Eight such pairs, so it cannot pass by luck.
+    #[test]
+    fn the_whole_width_of_the_seed_is_in_the_key() {
+        for low in 0..8i64 {
+            let below = deal_rng(low, "mel", 0).gen::<u64>();
+            let above = deal_rng(low + (1 << 32), "mel", 0).gen::<u64>();
+            assert_ne!(below, above, "seeds differing only above 2^32: {low}");
+        }
+    }
+
+    /// **Replayable.** The same `(seed, voter, round)` over the same corpus deals the
+    /// same journey, stop for stop — `via` threads and all, not merely the same set of
+    /// recipes. This is what a returning device re-derives.
+    #[test]
+    fn the_same_seed_and_voter_deal_the_identical_journey_twice() {
+        let corpus = ring_corpus(40);
+        let first = deal(&corpus, SEED_A, "mel", 12);
+        let second = deal(&corpus, SEED_A, "mel", 12);
+        assert_eq!(first.len(), 12);
+        assert_eq!(first, second, "byte-for-byte the same journey");
+    }
+
+    /// One deck per person: two members of the same plan are dealt different journeys,
+    /// so a plan is not one shared shuffle everybody swipes in lockstep.
+    #[test]
+    fn a_different_voter_is_dealt_a_different_journey() {
+        let corpus = ring_corpus(40);
+        assert_ne!(
+            hand(&corpus, SEED_A, "mel", 12),
+            hand(&corpus, SEED_A, "kit", 12)
+        );
+    }
+
+    /// One deck per plan: the same person in two plans is dealt two decks. Without the
+    /// seed in the key, every plan a person joined would deal them the same order.
+    #[test]
+    fn a_different_plan_seed_is_a_different_journey() {
+        let corpus = ring_corpus(40);
+        assert_ne!(
+            hand(&corpus, SEED_A, "mel", 12),
+            hand(&corpus, SEED_B, "mel", 12)
+        );
+    }
+
+    /// **Answering moves nothing but the card answered** — the replay composing with
+    /// #202's exclusion, which is the whole reason the answered set is a mark on the
+    /// corpus rather than a hole in it. Take a hand, answer one card in the middle of
+    /// it, deal again: that card is gone and every other card is in the same place.
+    ///
+    /// Removing the row instead (the shape #202 shipped, before there was anything to
+    /// replay) renumbers every `RecipeId` and resizes the start pool, so the first draw
+    /// lands elsewhere and the journey is unrecognisable. That is what this fails on.
+    #[test]
+    fn answering_a_card_removes_it_and_moves_nothing_else() {
+        let mut corpus = ring_corpus(40);
+        let before = hand(&corpus, SEED_A, "mel", 12);
+        let answered = before[5].clone();
+
+        mark_answered(&mut corpus, &[answered.as_str()]);
+        let after = hand(&corpus, SEED_A, "mel", 12);
+
+        assert!(!after.contains(&answered), "the answered card is gone");
+        let expected: Vec<String> = before
+            .iter()
+            .filter(|id| **id != answered)
+            .cloned()
+            .collect();
+        assert_eq!(
+            after[..expected.len()],
+            expected[..],
+            "the rest of the deck kept its order"
+        );
+    }
+
+    /// **A refill is round + 1.** Answer everything round 0 dealt and the next deal
+    /// comes from round 1's journey — which is a different journey over the same corpus,
+    /// not round 0 re-rolled with the answered cards missing and the arrivals since
+    /// slotted in. The two rounds are *disjoint*, which is the strongest statement of it:
+    /// the rounds partition the deck, so a refill is genuinely further along the stream.
+    #[test]
+    fn a_refill_after_a_round_is_answered_comes_from_the_next_round() {
+        let mut corpus = ring_corpus(40);
+        // A round holds ROUND_LEN cards, and this corpus is bigger than one round, so
+        // there is a round 1 to reach.
+        let round_0 = hand(&corpus, SEED_A, "mel", ROUND_LEN);
+        assert_eq!(round_0.len(), ROUND_LEN);
+
+        let answered: Vec<&str> = round_0.iter().map(String::as_str).collect();
+        mark_answered(&mut corpus, &answered);
+        let round_1 = hand(&corpus, SEED_A, "mel", ROUND_LEN);
+
+        assert_eq!(round_1.len(), 40 - ROUND_LEN, "what the ring has left");
+        for id in &round_1 {
+            assert!(
+                !round_0.contains(id),
+                "{id} was already dealt in round 0, so it is not a refill"
+            );
+        }
+    }
+
+    /// …and the refill really is the **next round's stream**, not the first round's rng
+    /// run again over what is left.
+    ///
+    /// Disjointness above cannot tell those two apart — the rounds partition the deck
+    /// either way — and the difference is the whole of "round advances the stream": a
+    /// deal whose round never moved would keep re-rolling one order forever, which is
+    /// what the issue rules out for a refill after new recipes arrive.
+    #[test]
+    fn a_refill_runs_the_next_rounds_stream_not_the_first_ones_again() {
+        let mut corpus = ring_corpus(70);
+        let round_0 = hand(&corpus, SEED_A, "mel", ROUND_LEN);
+        let answered: Vec<&str> = round_0.iter().map(String::as_str).collect();
+        mark_answered(&mut corpus, &answered);
+        let refill = hand(&corpus, SEED_A, "mel", ROUND_LEN);
+
+        // Everything round 0's journey landed on — what round 1 is dealt *beyond*.
+        let landed: HashSet<RecipeId> = journey(
+            &corpus,
+            ROUND_LEN,
+            &mut deal_rng(SEED_A, "mel", 0),
+            &HashSet::new(),
+        )
+        .into_iter()
+        .map(|hop| hop.0)
+        .collect();
+        let stream_of = |round: u32| -> Vec<String> {
+            journey(
+                &corpus,
+                ROUND_LEN,
+                &mut deal_rng(SEED_A, "mel", round),
+                &landed,
+            )
+            .into_iter()
+            .map(|hop| corpus.cards[hop.0 .0 as usize].id.clone())
+            .collect()
+        };
+        assert_eq!(refill, stream_of(1), "the refill is round 1's journey");
+        assert_ne!(refill, stream_of(0), "…not round 0's, dealt a second time");
+    }
+
+    /// The rounds partition the deck **whatever anyone answered**: round 1's journey is
+    /// beyond round 0's landings, not beyond the cards round 0 happened to hand over.
+    /// Otherwise a vote would move where round 1 begins, and the stream would shift
+    /// under the voter exactly as it did before #225.
+    #[test]
+    fn a_vote_does_not_move_where_the_next_round_begins() {
+        let plain = ring_corpus(40);
+        let mut voted = ring_corpus(40);
+        let round_0 = hand(&plain, SEED_A, "mel", ROUND_LEN);
+        // One card in round 0 is answered, and everything else is left alone.
+        mark_answered(&mut voted, &[round_0[3].as_str()]);
+
+        let all_plain = hand(&plain, SEED_A, "mel", 40);
+        let all_voted = hand(&voted, SEED_A, "mel", 40);
+        let expected: Vec<String> = all_plain
+            .iter()
+            .filter(|id| **id != round_0[3])
+            .cloned()
+            .collect();
+        assert_eq!(all_voted, expected, "one card gone, the stream unmoved");
+    }
+
+    /// Answering the whole deck deals nothing, and does so **at once** rather than
+    /// walking journey after journey over a corpus with nothing left in it.
+    #[test]
+    fn a_deck_that_is_wholly_answered_deals_nothing() {
+        let mut corpus = ring_corpus(12);
+        let all: Vec<String> = (0..12).map(|r| r.to_string()).collect();
+        mark_answered(
+            &mut corpus,
+            &all.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert!(deal(&corpus, SEED_A, "mel", 12).is_empty());
+    }
+
+    /// The deal reaches every card eventually — asked for more than the corpus holds it
+    /// hands over the whole thing, once each. A round that failed to partition would
+    /// re-walk the same neighbourhood and come up short.
+    #[test]
+    fn the_rounds_between_them_reach_the_whole_deck() {
+        let corpus = ring_corpus(70);
+        let dealt = hand(&corpus, SEED_A, "mel", 70);
+        assert_eq!(dealt.len(), 70, "every recipe, over three rounds");
+        let distinct: HashSet<&String> = dealt.iter().collect();
+        assert_eq!(distinct.len(), 70, "and none of them twice");
+    }
+
+    /// The bounds of a plan whose deal is replayable: a seed, and the person it is
+    /// being dealt to.
+    fn seeded(seed: i64, voter: &str) -> Bounds {
+        Bounds {
+            seed: Some(seed),
+            answered_by: Some(Answered {
+                channel: "plan".to_owned(),
+                voter: voter.to_owned(),
+            }),
+            ..Bounds::default()
+        }
+    }
+
+    /// **A seeded plan deals from its seed**, and says so where it counts: the same
+    /// bounds over the same corpus hand back the same journey every time.
+    #[test]
+    fn a_seeded_plan_deals_the_same_journey_every_call() {
+        let corpus = ring_corpus(60);
+        let bounds = seeded(SEED_A, "mel");
+        let first = stops_for(&corpus, &bounds, 12);
+        for _ in 0..8 {
+            assert_eq!(first, stops_for(&corpus, &bounds, 12));
+        }
+    }
+
+    /// **A plan with no seed keeps the entropy deal** (#47), unchanged — the honest
+    /// fallback for the plans that predate #220, which never had a reproducible deal to
+    /// promise. Freshness is observable and replay is not, so this asserts the thing
+    /// that is actually true of `from_entropy`: the journeys differ.
+    ///
+    /// Over a 60-recipe ring the first stop alone is a 1-in-60 draw, so eight deals
+    /// coming out identical is not a run of bad luck — it is the seeded path having
+    /// taken a plan that has no seed.
+    #[test]
+    fn a_plan_with_no_seed_deals_from_entropy() {
+        let corpus = ring_corpus(60);
+        let unseeded = Bounds {
+            answered_by: Some(Answered {
+                channel: "plan".to_owned(),
+                voter: "mel".to_owned(),
+            }),
+            ..Bounds::default()
+        };
+        let first = stops_for(&corpus, &unseeded, 12);
+        assert!(
+            (0..8).any(|_| stops_for(&corpus, &unseeded, 12) != first),
+            "an unseeded plan is dealt a fresh journey every time"
+        );
+    }
+
+    /// A walk with **no plan** is nobody's round, so it is dealt from entropy too — a
+    /// seed with no voter behind it is not half a key, it is not a key.
+    #[test]
+    fn a_walk_with_no_plan_deals_from_entropy() {
+        let corpus = ring_corpus(60);
+        let stray = Bounds {
+            seed: Some(SEED_A),
+            answered_by: None,
+            ..Bounds::default()
+        };
+        let first = stops_for(&corpus, &stray, 12);
+        assert!((0..8).any(|_| stops_for(&corpus, &stray, 12) != first));
     }
 
     /// A migrated in-memory corpus with one recipe per estimate shape (#80):
@@ -2209,6 +2826,10 @@ mod tests {
 
     /// A meal round dealt to a person (#202) — the shape [`resolve_bounds`] builds for
     /// every channelled walk: the plan's meal, plus who is asking and where.
+    ///
+    /// **No seed**, so every test built on it is now the pin on the pre-#220 plan: the
+    /// answered row never enters the graph, exactly as #202 shipped it, and the deal
+    /// runs on entropy. The seeded plan is the section below.
     fn continuing(meal: MealType, channel: &str, voter: &str) -> Bounds {
         Bounds {
             meal_type: Some(meal),
@@ -2217,6 +2838,14 @@ mod tests {
                 voter: voter.to_owned(),
             }),
             ..Bounds::default()
+        }
+    }
+
+    /// The same round on a plan minted since #220, so its deal is replayable (#225).
+    fn continuing_seeded(meal: MealType, channel: &str, voter: &str, seed: i64) -> Bounds {
+        Bounds {
+            seed: Some(seed),
+            ..continuing(meal, channel, voter)
         }
     }
 
@@ -2423,6 +3052,93 @@ mod tests {
             ids(&deck),
             vec!["blank", "pancakes", "uncategorised"],
             "the cap keeps un-estimated recipes (#80) and this still takes the answered one out"
+        );
+    }
+
+    // ---- the two levels the answer is applied at (#202 + #225) --------------
+
+    /// On a **seeded** plan the answered recipe stays in the graph and out of the hand.
+    /// Both halves matter and they are asserted separately: in the corpus because that
+    /// is what holds the journey still, and out of the deal because #202's guarantee is
+    /// unconditional — a card you answered is never handed back.
+    #[tokio::test]
+    async fn a_seeded_plan_keeps_an_answered_card_in_the_graph_and_out_of_the_hand() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", true).await;
+        let bounds = continuing_seeded(MealType::Dinner, "plan", "mel", SEED_A);
+        let corpus = load_corpus(&conn, &bounds).await.unwrap();
+
+        assert_eq!(
+            ids(&corpus),
+            vec!["blank", "pancakes", "stew", "uncategorised"],
+            "the answered recipe is still a node — removing it would move the journey"
+        );
+        let dealt: Vec<String> = stops_for(&corpus, &bounds, MAX_LEN)
+            .into_iter()
+            .map(|s| s.recipe.id)
+            .collect();
+        assert!(
+            !dealt.contains(&"stew".to_owned()),
+            "and it is not dealt: {dealt:?}"
+        );
+        let mut rest = dealt.clone();
+        rest.sort();
+        assert_eq!(
+            rest,
+            vec!["blank", "pancakes", "uncategorised"],
+            "the rest of the round is dealt as ever"
+        );
+    }
+
+    /// The same guarantee end to end from the database: answering one card takes that
+    /// card out of the hand and leaves every other card exactly where it was. This is
+    /// #202's exclusion and #225's replay meeting over real rows rather than a fixture.
+    #[tokio::test]
+    async fn a_seeded_hand_keeps_its_order_when_a_card_is_answered() {
+        let conn = dinner_conn().await;
+        let bounds = continuing_seeded(MealType::Dinner, "plan", "mel", SEED_A);
+        let before: Vec<String> = stops_for(
+            &load_corpus(&conn, &bounds).await.unwrap(),
+            &bounds,
+            MAX_LEN,
+        )
+        .into_iter()
+        .map(|s| s.recipe.id)
+        .collect();
+        assert_eq!(before.len(), 4, "the whole dinner round");
+
+        answered(&conn, "plan", &before[1], "mel", false).await;
+        let after: Vec<String> = stops_for(
+            &load_corpus(&conn, &bounds).await.unwrap(),
+            &bounds,
+            MAX_LEN,
+        )
+        .into_iter()
+        .map(|s| s.recipe.id)
+        .collect();
+
+        let expected: Vec<String> = before
+            .iter()
+            .filter(|id| **id != before[1])
+            .cloned()
+            .collect();
+        assert_eq!(after, expected, "one card gone, the rest in place");
+    }
+
+    /// A plan **older than the seed column** loads exactly what #202 loaded: the
+    /// answered row is not in the corpus at all. The mark is for plans that have a
+    /// journey to hold still; this one never did.
+    #[tokio::test]
+    async fn a_plan_with_no_seed_never_loads_the_answered_card() {
+        let conn = dinner_conn().await;
+        answered(&conn, "plan", "stew", "mel", true).await;
+        let corpus = load_corpus(&conn, &continuing(MealType::Dinner, "plan", "mel"))
+            .await
+            .unwrap();
+        assert_eq!(ids(&corpus), vec!["blank", "pancakes", "uncategorised"]);
+        assert!(
+            corpus.answered.is_empty(),
+            "nothing to mark: the row is gone"
         );
     }
 

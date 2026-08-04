@@ -2,7 +2,7 @@ import { ApiError, apiFetch } from "./client";
 import type { WalkStop } from "./types";
 
 /**
- * Fetch a fresh walk over the corpus (#47) — the `pick` engine.
+ * Fetch this caller's deal off the corpus (#47) — the `pick` engine.
  *
  * The walk itself runs server-side: the decision logic is the `recipe-walk` Rust
  * crate, and the corpus never leaves the backend. There is deliberately no
@@ -10,8 +10,13 @@ import type { WalkStop } from "./types";
  * browser, which is the WASM/parse-in-the-client path the app ruled out. So the
  * browser asks and renders; it does not compute.
  *
- * Each call returns a *different* journey — freshness is the whole point — so this
- * is not cached by identity: the caller refetches to wander again.
+ * **In a plan, calling twice gets the same deck** (#225). The deal is a function of
+ * the plan's seed, who is asking, and how far along the stream they are — so a
+ * reload re-derives the deck this device left, and a phone and a laptop hold one
+ * deck in one order. What moves it on is *answering* cards, not asking again: the
+ * cards a member has voted on drop out and the rest keep their places. A walk with
+ * no plan behind it, and a plan created before plans had seeds, still gets a fresh
+ * journey every call.
  *
  * A 401 means the session lapsed since the page loaded; it throws an `ApiError`
  * carrying the status so the caller can re-gate to login rather than looping on a

@@ -107,7 +107,25 @@ impl WalkState {
     /// when it must, not one hop early. Used to build fixed-length distinct
     /// journeys; the plain [`new`](WalkState::new) is left untouched for scoring.
     pub fn self_avoiding(start: RecipeId, window: usize) -> Self {
-        let mut visited = HashSet::new();
+        Self::self_avoiding_beyond(start, window, HashSet::new())
+    }
+
+    /// A self-avoiding state that begins with `already` off-limits too — the recipes
+    /// some *earlier* journey has already handed out.
+    ///
+    /// The hard set is the right mechanism for this, because "never land here" is one
+    /// rule whether the reason is "this journey has been here" or "an earlier one dealt
+    /// it". A caller that composes several journeys into one stream passes what the
+    /// earlier ones landed on, and the next journey walks what is genuinely left rather
+    /// than rediscovering the same neighbourhood. The soft window still starts empty: a
+    /// new journey is a new thread, so inheriting an ingredient memory would penalise
+    /// hops it never made.
+    pub fn self_avoiding_beyond(
+        start: RecipeId,
+        window: usize,
+        already: HashSet<RecipeId>,
+    ) -> Self {
+        let mut visited = already;
         visited.insert(start);
         Self {
             current: start,
@@ -230,6 +248,25 @@ impl<'a, R: RngCore> Walk<'a, R> {
         }
     }
 
+    /// A self-avoiding walk that also never lands where `already` has been — see
+    /// [`WalkState::self_avoiding_beyond`]. This is how a caller turns several
+    /// journeys into one stream that never repeats a recipe across them.
+    pub fn self_avoiding_beyond(
+        graph: &'a dyn RecipeGraph,
+        strategy: &'a dyn NextStep,
+        rng: R,
+        start: RecipeId,
+        window: usize,
+        already: HashSet<RecipeId>,
+    ) -> Self {
+        Self {
+            graph,
+            strategy,
+            rng,
+            state: WalkState::self_avoiding_beyond(start, window, already),
+        }
+    }
+
     /// The live walk state (current stop, tabu memory).
     pub fn state(&self) -> &WalkState {
         &self.state
@@ -324,6 +361,68 @@ mod tests {
         assert_eq!(
             walk.teleport_to_fresh(&[RecipeId(0), RecipeId(3), RecipeId(5)]),
             None
+        );
+    }
+
+    /// A journey that begins beyond what an earlier one dealt never lands there — so
+    /// two journeys composed into one stream cover a ring of 6 between them exactly
+    /// once, instead of the second one re-walking the first one's neighbourhood.
+    #[test]
+    fn a_walk_beyond_an_earlier_journey_never_lands_on_it() {
+        let recipes: Vec<Vec<IngredientId>> = (0..6u32)
+            .map(|r| vec![IngredientId(r), IngredientId((r + 5) % 6)])
+            .collect();
+        let g = FixtureGraph::new(recipes);
+        let strat = TabuWeighted::default();
+
+        // The earlier journey: three stops from recipe 0.
+        let mut first = Walk::self_avoiding(&g, &strat, StdRng::seed_from_u64(9), RecipeId(0), 6);
+        let mut dealt: HashSet<RecipeId> = HashSet::new();
+        dealt.insert(RecipeId(0));
+        for step in first.by_ref().take(2) {
+            dealt.insert(step.recipe);
+        }
+        assert_eq!(dealt.len(), 3, "the earlier journey dealt three recipes");
+
+        // The next one starts on a recipe it has not dealt, and carries the rest.
+        let start = (0..6u32)
+            .map(RecipeId)
+            .find(|r| !dealt.contains(r))
+            .expect("something is left");
+        let mut second = Walk::self_avoiding_beyond(
+            &g,
+            &strat,
+            StdRng::seed_from_u64(3),
+            start,
+            6,
+            dealt.clone(),
+        );
+        let mut seen = vec![start];
+        for step in second.by_ref() {
+            assert!(
+                !dealt.contains(&step.recipe),
+                "it landed on a recipe the earlier journey already dealt"
+            );
+            seen.push(step.recipe);
+        }
+        assert_eq!(seen.len(), 3, "it walks exactly what was left");
+    }
+
+    /// The soft window is **not** inherited: an earlier journey's ingredient memory
+    /// would penalise hops this one never made. Only the hard set carries over.
+    #[test]
+    fn a_walk_beyond_an_earlier_journey_inherits_no_tabu_memory() {
+        let mut already = HashSet::new();
+        already.insert(RecipeId(7));
+        let s = WalkState::self_avoiding_beyond(RecipeId(0), 4, already);
+        assert!(s.blocked(RecipeId(7)), "the hard set carries over");
+        assert!(
+            s.blocked(RecipeId(0)),
+            "and the start is still its own stop"
+        );
+        assert!(
+            !s.recently_visited(RecipeId(7)),
+            "the soft window starts empty"
         );
     }
 

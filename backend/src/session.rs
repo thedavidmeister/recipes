@@ -2010,6 +2010,16 @@ pub struct PlanBounds {
     /// state that could deal two different decks.
     pub min_kcal_per_serving: Option<i64>,
     pub max_kcal_per_serving: Option<i64>,
+    /// The plan's seed (migration 0031) — the one number all of its shared randomness
+    /// dangles off, and what makes the walk's deal replayable (#225).
+    ///
+    /// The same column [`LobbyView`] carries to the browser for the soundtrack, read
+    /// here for the deck: one seed, several consumers, which is what it was made
+    /// general-purpose for. `None` is a plan created before the column existed and is
+    /// **not** backfilled — minting one now would claim its past deals were reproducible
+    /// from it, and they were not — so the walk keeps the entropy deal for it, which is
+    /// the same degrade the soundtrack makes.
+    pub seed: Option<i64>,
 }
 
 /// The bounds of a plan that named nothing: no cap, no kitchen, and the meal every plan
@@ -2027,6 +2037,7 @@ impl Default for PlanBounds {
             meal_type: DEFAULT_MEAL_TYPE,
             min_kcal_per_serving: None,
             max_kcal_per_serving: None,
+            seed: None,
         }
     }
 }
@@ -2039,7 +2050,7 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
     let mut rows = conn
         .query(
             "SELECT max_total_seconds, kitchen_id, meal_type,
-                    min_kcal_per_serving, max_kcal_per_serving
+                    min_kcal_per_serving, max_kcal_per_serving, seed
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -2060,6 +2071,8 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
         meal_type,
         min_kcal_per_serving: row.get(3)?,
         max_kcal_per_serving: row.get(4)?,
+        // NULL is a plan older than the seed column, and it stays NULL — see the field.
+        seed: row.get(5)?,
     }))
 }
 
@@ -4825,6 +4838,63 @@ mod tests {
         );
     }
 
+    /// A plan's bounds with the seed set aside. Every plan is born with a different one
+    /// (migration 0031), so the bound tests — which compare against written-out literals
+    /// — cannot name it; that the seed comes through at all is
+    /// [`plan_bounds_carry_the_plans_seed`]'s job.
+    async fn bounds_but_the_seed(conn: &Connection, channel: &str) -> Option<PlanBounds> {
+        plan_bounds(conn, channel)
+            .await
+            .unwrap()
+            .map(|b| PlanBounds { seed: None, ..b })
+    }
+
+    /// The walk reads the plan's **seed** off the same row as its cap and its meal
+    /// (#225): the deal is a function of it, so a bound read that dropped it would put
+    /// every plan back on the entropy deal with nothing else looking wrong.
+    #[tokio::test]
+    async fn plan_bounds_carry_the_plans_seed() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "seeded",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let seed = plan_bounds(&conn, "seeded")
+            .await
+            .unwrap()
+            .expect("the plan is there")
+            .seed
+            .expect("a plan born since 0031 has a seed");
+        assert_eq!(
+            Some(seed),
+            load_lobby(&conn, "seeded").await.unwrap().unwrap().seed,
+            "the deck and the soundtrack read one seed, not two"
+        );
+
+        // A plan older than the column keeps its NULL — nothing backfills it, and the
+        // walk reads that as "no replayable deal here".
+        conn.execute(
+            "UPDATE pick_sessions SET seed = NULL WHERE channel_id = 'seeded'",
+            (),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan_bounds(&conn, "seeded").await.unwrap().unwrap().seed,
+            None
+        );
+    }
+
     /// The walk reads the range off the plan (#213), beside the cap and the meal — so
     /// the deck a room is dealt is bounded by the answer its host gave in the lobby,
     /// which is the whole point of asking.
@@ -4846,13 +4916,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            plan_bounds(&conn, "ranged").await.unwrap(),
+            bounds_but_the_seed(&conn, "ranged").await,
             Some(PlanBounds {
                 max_total_seconds: None,
                 kitchen_id: None,
                 meal_type: MealType::Dinner,
                 min_kcal_per_serving: Some(500),
                 max_kcal_per_serving: Some(800),
+                seed: None,
             })
         );
         // …and a plan that named none bounds nothing, which is what `Default` says.
@@ -4871,7 +4942,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            plan_bounds(&conn, "any").await.unwrap(),
+            bounds_but_the_seed(&conn, "any").await,
             Some(PlanBounds::default())
         );
     }
@@ -4950,7 +5021,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            plan_bounds(&conn, "open").await.unwrap(),
+            bounds_but_the_seed(&conn, "open").await,
             Some(PlanBounds::default())
         );
         create_session(
@@ -4968,13 +5039,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            plan_bounds(&conn, "capped").await.unwrap(),
+            bounds_but_the_seed(&conn, "capped").await,
             Some(PlanBounds {
                 max_total_seconds: Some(7200),
                 kitchen_id: None,
                 meal_type: MealType::Dinner,
                 min_kcal_per_serving: None,
                 max_kcal_per_serving: None,
+                seed: None,
             })
         );
     }
@@ -5008,13 +5080,14 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(
-                plan_bounds(&conn, &channel).await.unwrap(),
+                bounds_but_the_seed(&conn, &channel).await,
                 Some(PlanBounds {
                     max_total_seconds: None,
                     kitchen_id: None,
                     meal_type: meal,
                     min_kcal_per_serving: None,
                     max_kcal_per_serving: None,
+                    seed: None,
                 }),
                 "a {meal:?} plan bounds its walk to {meal:?}"
             );
@@ -5085,17 +5158,18 @@ mod tests {
         plan_for(&conn, "kitchenless", None).await;
 
         assert_eq!(
-            plan_bounds(&conn, "in-kitchen").await.unwrap(),
+            bounds_but_the_seed(&conn, "in-kitchen").await,
             Some(PlanBounds {
                 max_total_seconds: None,
                 kitchen_id: Some(kid),
                 meal_type: MealType::Dinner,
                 min_kcal_per_serving: None,
                 max_kcal_per_serving: None,
+                seed: None,
             })
         );
         assert_eq!(
-            plan_bounds(&conn, "kitchenless").await.unwrap(),
+            bounds_but_the_seed(&conn, "kitchenless").await,
             Some(PlanBounds::default())
         );
     }
