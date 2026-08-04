@@ -6278,6 +6278,14 @@ mod tests {
     /// **A watcher starts nothing** (#180/#200): not on the roster, so the framework
     /// refuses the event, nothing is written and nothing is announced — no peer's screen
     /// so much as flickers, let alone moves to the stove.
+    ///
+    /// The **third phase is what the choke point is for**, and it is why this kind's guard
+    /// is *not* redundant with its own write predicate the way the vote's is
+    /// (`events::apply` names that equivalence for the vote). This arm announces whatever
+    /// is **recorded**, not only what this call wrote — so with the guard gone, a watcher
+    /// tapping into a plan that is already cooking would change no row and still make the
+    /// server fan a frame out to the whole room. A refusal on this socket is silent
+    /// (#179/#180); one that speaks to everybody is not a refusal.
     #[tokio::test]
     async fn a_watcher_starts_no_cook_and_the_room_hears_nothing() {
         let conn = conn().await;
@@ -6291,6 +6299,15 @@ mod tests {
         // when a seat moves between the guard and the UPDATE (#175/#179).
         assert!(!start_cook(&conn, "c", "wanda", TAP).await.unwrap());
         assert_eq!(load_cook(&conn, "c").await.unwrap(), None);
+
+        // Now the plan really is cooking, on alice's tap — and a watcher still says
+        // nothing to anybody.
+        assert!(start_cook(&conn, "c", "alice", TAP).await.unwrap());
+        let frames = cook_event(&conn, "c", "wanda", TAP + 60_000).await;
+        assert!(
+            frames.is_empty(),
+            "a watcher does not get to make the room's screens speak"
+        );
     }
 
     /// **You cook the decision**: a plan still swiping has nothing to cook, so a member of
