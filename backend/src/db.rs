@@ -124,6 +124,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
         30,
         include_str!("../migrations/0030_pick_calorie_range.sql"),
     ),
+    // 31 by the same rule: 30 (#224) was still in flight when this was numbered, so this
+    // took the next number above *everything*. Both have since landed, so the three sit
+    // in order with no hole and nothing had to be renumbered — which is what taking the
+    // top number rather than the next free one buys.
+    (31, include_str!("../migrations/0031_plan_seed.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.
