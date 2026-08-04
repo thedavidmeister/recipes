@@ -1,0 +1,75 @@
+-- Starting the cook is a session event, and the plan remembers it (#211).
+--
+-- "Let's cook!" on `buy` was a plain `href="/cook"`: whoever tapped it went to the
+-- stove and the rest of the room stayed on the shopping list, none the wiser. The plan
+-- already knew how to move as one — the decision (#205) reaches every participant and
+-- every screen goes to `buy` together — and the cook transition is that same moment one
+-- step later, with nothing recorded and nothing announced.
+--
+-- It arrives through the app's shared event framework (`backend/src/events.rs`, #208/
+-- #209) rather than as a handler of its own: `cook_started` supplies a payload, a
+-- `Guard` and an `apply` arm, and the envelope, the normalisation, the guard machinery
+-- and the broadcast are the framework's. This migration is its storage half.
+--
+-- ## Numbering: why 29
+--
+-- `db.rs` applies by `MAX(version)`, so a number at or below one already applied on
+-- production never runs at all. 0028 (#209) is the highest in the tree and is on `main`,
+-- so 29 is the next number above everything, including anything unmerged elsewhere —
+-- the only choice that is safe whichever branch deploys first.
+--
+-- ## Two columns on the plan, not a table
+--
+-- A plan starts cooking **at most once**, so the fact is one-to-one with the row that
+-- already holds every other frozen fact about it (`started_at`, `decided_*`,
+-- `meal_type`) — the same argument 0026 made for the decision, and `pick_sessions` is
+-- where every question about a plan is answered. A side table would be a second place to
+-- ask "is this plan cooking".
+--
+-- **Both columns move together or not at all**, and one statement is what makes that
+-- true: `session::start_cook` is the only writer and it sets both in a single UPDATE.
+-- SQLite cannot add a CHECK with `ALTER TABLE ADD COLUMN` (0026 says why the table was
+-- not rebuilt to gain one), so the invariant is asserted on the way *out* instead —
+-- `session::cook_of` refuses half a cook loudly rather than serving a plan that is
+-- cooking with nobody's hand on it.
+--
+-- ## `cook_started_at_ms` is *whether* as well as *when*
+--
+-- Unlike 0028's four columns, this one is not a higher-resolution twin of a column that
+-- already says whether: there is no `cook_started_at` in seconds beside it and there is
+-- not going to be one. NULL is "this plan has not started cooking", the write's own
+-- `cook_started_at_ms IS NULL` predicate is what makes the first tap the one that counts,
+-- and there is exactly one column that can answer the question — so nothing here can
+-- become a second answer to it (which is the failure 0028 warned about in the other
+-- direction).
+--
+-- Unix **milliseconds**, on the **shared timeline**: the initiator's own clock at the
+-- moment of the tap, corrected for that participant's measured drift by
+-- `events::normalize` before any handler sees it. Not the server's receipt — a phone
+-- that stalls in a tunnel between the tap and the frame arriving still records the tap —
+-- and not comparable to the `unixepoch()` columns beside it, by a factor of a thousand,
+-- which is why it is its own column with its own name (0027/0028's rule).
+--
+-- ## Nothing is backfilled, and there is nothing to backfill
+--
+-- Every existing plan comes out of this migration not cooking, including any whose
+-- browsers reached `/cook` months ago. That navigation left no record anywhere — it was
+-- a local link — so there is no honest way to reconstruct one, and a plan invented into
+-- a cook it may or may not have started would be a guess written into the column that
+-- exists to be a fact. A plan that has decided and is not recorded as cooking reads as
+-- exactly that, and the room's first "Let's cook!" records it for real.
+
+-- **When the cook started**: the initiator's own tap, on the shared timeline. NULL until
+-- somebody in the plan starts one, and set exactly once thereafter — a second tap is a
+-- no-op the room is still told the truth about (`session::start_cook`), so the instant
+-- recorded is the tap that *started* the cook and never the latest tap on the button.
+ALTER TABLE pick_sessions ADD COLUMN cook_started_at_ms INTEGER;
+
+-- **Who started it**, by telegram id — the envelope's initiator, which is the
+-- authenticated session and never a wire field.
+--
+-- Recorded because the framework's whole claim is that an event has an initiator and an
+-- instant (#208), and a room that can say when the cook started but not whose hand
+-- started it is holding half of that. It is the attribution `plan_timers.user_id` and
+-- `buy_checks.user_id` already carry for the smaller acts inside the cook.
+ALTER TABLE pick_sessions ADD COLUMN cook_started_by TEXT;

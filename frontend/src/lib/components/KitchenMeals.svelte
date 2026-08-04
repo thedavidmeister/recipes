@@ -12,7 +12,7 @@
    * a lobby seats you (arrival is joining, #96), tapping a started one carries on where
    * your deal left off, and tapping a decided one goes to what the room settled on.
    *
-   * Three states, in the plan's own words rather than the wire's:
+   * Four states, in the plan's own words rather than the wire's:
    *
    * - **gathering** — the lobby is open and people are still arriving, so the row says
    *   how many are in *so far*. That number is going up, which is the whole difference
@@ -22,6 +22,11 @@
    * - **decided** — the outcome is a server fact (#205), so the row names the recipe
    *   itself. Nothing here recomputes a winner from a tally; the title is what the
    *   server joined onto the decision it recorded.
+   * - **cooking** — somebody in the plan has started the cook (#211). Also a server fact,
+   *   and it arrives as one more column of the row the read already fetched, which is why
+   *   there is a fourth word at all: it cost the list nothing. It is the decided state
+   *   with the hob on, so it says the same dish and adds the one thing that is different
+   *   about it — you cook the decision, so it never appears without a title beside it.
    *
    * A plan everybody walked out of is a deleted row (#169), so there is no "ended"
    * state to render and nothing is padded to stand in for one — such a meal simply is
@@ -59,6 +64,20 @@
 
   /** "3 people" / "1 person" — a count of people, said as people. */
   const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
+
+  /**
+   * What a settled meal's second line says: the dish, and whether it is already on the
+   * hob (#211).
+   *
+   * The dish is the answer either way, so the word goes *in front of* it rather than
+   * replacing it — a kitchen listing "Cooking" and nothing else would have taken the one
+   * fact the row exists to carry away to say something less useful about it. Called only
+   * where `meal.decided` is non-null, which is the only place the fourth state can occur.
+   */
+  const decidedLine = (meal: KitchenMeal) =>
+    meal.cooking
+      ? `Cooking — ${meal.decided?.title ?? ""}`
+      : (meal.decided?.title ?? "");
 </script>
 
 <section class="mt-8 border-t border-stone-200 pt-6">
@@ -86,8 +105,11 @@
               <span>{mealWords(meal)}</span>
               {#if meal.decided}
                 <!-- What the room is having. Read at full strength, because it is the
-                     answer rather than a note about one. -->
-                <span class="text-sm text-stone-900">{meal.decided.title}</span>
+                     answer rather than a note about one — and with the one word that
+                     says it is already on the hob, in the "Deciding — …" shape the rows
+                     below use, so a fourth state reads as one of the four rather than
+                     as a new kind of line. -->
+                <span class="text-sm text-stone-900">{decidedLine(meal)}</span>
               {:else if meal.started}
                 <span class="text-sm text-stone-500">
                   Deciding — {people(meal.deciders)}

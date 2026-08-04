@@ -115,6 +115,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 28 by the same rule: 0027 (#208) is the highest number in the tree and has landed
     // on `main`, so this is the next number above everything.
     (28, include_str!("../migrations/0028_event_instants.sql")),
+    // 29 by the same rule: 0028 (#209) is the highest number in the tree and has landed
+    // on `main`, so this is the next number above everything.
+    (29, include_str!("../migrations/0029_cook_started.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

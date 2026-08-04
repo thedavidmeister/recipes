@@ -74,7 +74,22 @@ export type SessionEvent =
    * `index` is a position in the recipe's shopping-list projection (`$lib/shopping`),
    * which is the same projection the server counts against. One kind for both
    * directions, because that is what the control is: one row, two states. */
-  | ({ kind: "buy_tick"; index: number; checked: boolean } & RecipeRef);
+  | ({ kind: "buy_tick"; index: number; checked: boolean } & RecipeRef)
+  /**
+   * **The room starts cooking** (#211) — "Let's cook!" on the shopping list, raised
+   * rather than followed.
+   *
+   * The only kind with **no `RecipeRef`**, and deliberately: a plan cooks the meal it
+   * decided, which the server already holds (#205), so there is nowhere here for one
+   * phone to point the room at a different dish. The server refuses a frame that adds
+   * one rather than quietly ignoring it — the same `deny_unknown_fields` treatment that
+   * keeps a duration off `timer_start`.
+   *
+   * What comes back is a `cooking` frame to the whole room, and *that* is what moves
+   * every screen — including the screen that raised this. One path, so the person who
+   * tapped can never arrive somewhere the room did not.
+   */
+  | { kind: "cook_started" };
 
 /** An event on its way to the server: the payload, plus when the initiator did it. */
 export interface EventFrame {
