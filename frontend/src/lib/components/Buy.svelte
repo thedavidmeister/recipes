@@ -69,6 +69,16 @@
     /** Whether this checklist is shared with the rest of the meal, or private to
      * this device (no session to attribute a tick to). */
     shared?: boolean;
+    /**
+     * Start the room's cook (#211) — raised as a session event, so the whole plan comes
+     * along.
+     *
+     * Called only on a `shared` list; a solo one has nobody to bring and its button is
+     * the plain link it always was. The page navigates on the room's announcement rather
+     * than on this call, so a tap that the server refuses moves nothing — which is what a
+     * watcher's tap is.
+     */
+    onCook?: () => void;
   }
 
   let {
@@ -79,6 +89,7 @@
     onToggle,
     tickError,
     shared = false,
+    onCook,
   }: Props = $props();
 
   const isTicked = (i: number) => Object.hasOwn(ticks, i);
@@ -290,7 +301,20 @@
             </p>
           {/if}
           <div class="mt-6">
-            <Button href="/cook" dot="paprika">Let's cook!</Button>
+            {#if shared}
+              <!-- Starting the cook is a thing that happens to the *meal*, not a place
+                   this browser goes: it is raised on the plan's room, and every screen
+                   in it — the tapper's included — moves when the room's announcement
+                   comes back. So the control is a button and not a link, which is also
+                   what it now honestly is: following an href would take one person to
+                   the stove and leave the rest holding the list, which is the whole
+                   bug. -->
+              <Button onclick={onCook} dot="paprika">Let's cook!</Button>
+            {:else}
+              <!-- Nobody to bring, so nothing to raise: a list with no meal session
+                   behind it keeps the plain link it has always had. -->
+              <Button href="/cook" dot="paprika">Let's cook!</Button>
+            {/if}
           </div>
         </Notice>
       </div>

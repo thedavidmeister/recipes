@@ -9,6 +9,7 @@
     type MealAddition,
     type MealType,
   } from "$lib/types";
+  import { calorieRangeLabel } from "$lib/nutrition";
   import QrCode from "./QrCode.svelte";
   import UserName from "./UserName.svelte";
   import { userColour, userEdge, userTint } from "$lib/colour";
@@ -66,6 +67,12 @@
      * 1800 (#163), so a null here is a host who widened it, never a plan nobody has
      * got to yet. */
     cap?: number | null;
+    /** The plan's calorie range in kcal a serving (#213) — the number the card shows.
+     * Null at either end is an open end; both null is "Any", which is what every plan
+     * is born as, so a null pair here is the untouched default rather than a host who
+     * widened it (the opposite of `cap`). */
+    minKcal?: number | null;
+    maxKcal?: number | null;
     /** Whether this plan is for a kitchen (#72). The deck is always limited to what
      * that kitchen can make (#82), so this decides whether there is anything to say. */
     /** Whether we know what that kitchen owns (#82). Not a setting anyone chose:
@@ -89,6 +96,11 @@
     onAdditions?: (additions: MealAddition[]) => void;
     /** Set (or lift, with null) the time cap. Host only, while the lobby is open. */
     onCap?: (cap: number | null) => void;
+    /** Set (or lift, with two nulls) the calorie range in kcal a serving (#213). Both
+     * ends every time, mirroring the wire — a range is one setting with two edges, so
+     * there is no call that moves one and leaves the other. Host only, while the lobby
+     * is open. */
+    onCalories?: (min: number | null, max: number | null) => void;
     /** Step out of the plan (#96). Everyone has it, the host included — a host who
      * cannot leave is trapped in their own plan.
      *
@@ -106,6 +118,8 @@
     mealType,
     additions = [],
     cap = null,
+    minKcal = null,
+    maxKcal = null,
     inviteLink,
     host = false,
     hostId,
@@ -115,6 +129,7 @@
     onMealType,
     onAdditions,
     onCap,
+    onCalories,
     onLeave,
   }: Props = $props();
 
@@ -151,6 +166,43 @@
     { label: "2 hours", seconds: 7200 },
     { label: "Any", seconds: null },
   ];
+
+  /**
+   * The presented calorie buckets (#213), in kcal a serving. A UI vocabulary like the
+   * time buckets above and for the same reason: the backend stores two plain numbers
+   * and validates only that they are sane and the right way round, so moving these is
+   * an edit here rather than a migration there.
+   *
+   * Lightest first and "Any" last, the order the time row settled on (#163) — the row
+   * then reads as the scale it is, ending at "however big".
+   *
+   * They carry numbers only; every label comes from `calorieRangeLabel`, so a pill and
+   * the sentence under the row cannot word the same bound two ways. 500 and 800 are
+   * where a main course's serving actually turns — under 500 is the light dinner #213
+   * opens with, over 800 is the one you plan when everyone is starving.
+   */
+  const CALORIE_BUCKETS: { min: number | null; max: number | null }[] = [
+    { min: null, max: 500 },
+    { min: 500, max: 800 },
+    { min: 800, max: null },
+    { min: null, max: null },
+  ];
+
+  /** Whether the plan is bounded by calories at all: one open end still bounds. */
+  const calorieRangeSet = $derived(minKcal !== null || maxKcal !== null);
+
+  /**
+   * A pill's label dropped into the middle of a sentence.
+   *
+   * `calorieRangeLabel` capitalises for the pill it is mostly read on, and the note
+   * under the row quotes that same label so the two can never say different things —
+   * which left "counted at Up to 500 kcal a serving" mid-sentence. Lowering the first
+   * letter here keeps one source for the words and reads as English in both places.
+   * Safe over this whole vocabulary: the labels are numbers and ordinary words, with
+   * no proper noun a lowercase would damage.
+   */
+  const midSentence = (label: string) =>
+    label.charAt(0).toLowerCase() + label.slice(1);
 
   /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */
   const capLabel = (s: number) =>
@@ -352,26 +404,91 @@
             still show.
           </p>
         {/if}
-      {:else if cap !== null}
-        <!-- Guests see the bound they will be swiping within — shown, not
-             settable: the cap is the host's call (#80). -->
-        <p class="mt-6 text-sm text-stone-600">
-          <span
-            class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(
-              hostId,
-            )}"
-          >
-            {#if hostId}
-              <span
-                class="size-2 shrink-0 rounded-full {userColour(hostId)}"
-                aria-hidden="true"
-              ></span>
-            {/if}
-            {capLabel(cap)}</span
-          >
-          Anything longer is left out. A time is the least a recipe can take, so
-          some run longer — and ones with no time on them still show.
+
+        <!-- The calorie range: the same single-select row as the time cap, beside
+             it, over the number the card shows — kcal a serving. The unit is in
+             the question and in the note rather than on every pill, because unlike
+             the times it never changes. See `CALORIE_BUCKETS` above. -->
+        <p class="mt-6 mb-3 text-xs text-stone-500">
+          How many calories a serving?
         </p>
+        <div class="flex flex-wrap gap-2">
+          {#each CALORIE_BUCKETS as b (calorieRangeLabel(b.min, b.max))}
+            <button
+              type="button"
+              aria-pressed={minKcal === b.min && maxKcal === b.max}
+              onclick={() => onCalories?.(b.min, b.max)}
+              class="rounded-pill flex items-center gap-2 px-3 py-1 text-sm {minKcal ===
+                b.min && maxKcal === b.max
+                ? chosenPill(hostId)
+                : RESTING_PILL}"
+            >
+              {#if minKcal === b.min && maxKcal === b.max && hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
+              {calorieRangeLabel(b.min, b.max)}
+            </button>
+          {/each}
+        </div>
+        {#if calorieRangeSet}
+          <!-- The honest note the strict filter owes the room: a range deals only
+               what we have counted in full, so the deck thins rather than guessing.
+               Said here, where the choice is made, not discovered as an empty deck
+               later. -->
+          <p class="mt-2 text-xs text-stone-500">
+            Only recipes we've counted at {midSentence(
+              calorieRangeLabel(minKcal, maxKcal),
+            )} kcal a serving. Ones nobody has counted yet — or could only count
+            part of — stay out while this is set.
+          </p>
+        {/if}
+      {:else}
+        <!-- Guests see the bounds they will be swiping within — shown, not
+             settable: the time cap and the calorie range are both the host's calls
+             (#80). Each is its own `if` rather than one chained on the other,
+             because either can be set without the other and a guest must read
+             every bound on the plan. -->
+        {#if cap !== null}
+          <p class="mt-6 text-sm text-stone-600">
+            <span
+              class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(
+                hostId,
+              )}"
+            >
+              {#if hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
+              {capLabel(cap)}</span
+            >
+            Anything longer is left out. A time is the least a recipe can take, so
+            some run longer — and ones with no time on them still show.
+          </p>
+        {/if}
+        {#if calorieRangeSet}
+          <p class="mt-6 text-sm text-stone-600">
+            <span
+              class="rounded-pill mr-1 inline-flex items-center gap-2 px-3 py-1 text-sm font-medium {chosenPill(
+                hostId,
+              )}"
+            >
+              {#if hostId}
+                <span
+                  class="size-2 shrink-0 rounded-full {userColour(hostId)}"
+                  aria-hidden="true"
+                ></span>
+              {/if}
+              {calorieRangeLabel(minKcal, maxKcal)} kcal a serving</span
+            >
+            Anything else is left out — including recipes nobody has counted yet,
+            and ones we could only count part of.
+          </p>
+        {/if}
       {/if}
 
       <p class="mt-6 mb-3 text-xs text-stone-500">Who's deciding</p>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createQuery } from "@tanstack/svelte-query";
+  import { goto } from "$app/navigation";
   import { resource } from "$lib/resource";
   import { me } from "$lib/auth";
   import {
@@ -56,6 +57,14 @@
    * implementation of the matching rule in TypeScript would be a second chance to
    * disagree with `recipe_core::pantry`. The same absence is why the device-local
    * path has none: no session, no plan, no kitchen, no pantry.
+   *
+   * **Starting the cook is the room's, not this browser's** (#211). "Let's cook!" used to
+   * be a plain `href="/cook"`: whoever tapped it went to the stove and everybody else
+   * stayed here, none the wiser. It is a `cook_started` event now, on the same socket
+   * every other write on this page takes, and what moves a screen is the `cooking` frame
+   * the server sends the whole room — this one included. One path for the initiator and
+   * the room, which is the `decided` arrangement that carried everybody *here* from the
+   * pick, one step later in the arc.
    */
   const list = resource(() => ({
     queryKey: ["buy"],
@@ -124,6 +133,16 @@
    * it is not the same nobody as an unattributed tick, and it carries the entry that
    * answered for the line so the row can say *why* it is ticked.
    */
+  /**
+   * Whether this screen is already on its way to the stove (#211).
+   *
+   * A plain `let`, like the pick page's `leaving` and for the same reason: the `cooking`
+   * frame arrives live *and* on every connect, so a reconnect mid-navigation would fire a
+   * second `goto`, and a `$state` here would put the effect that reads it into its own
+   * dependencies.
+   */
+  let cooking = false;
+
   const ticks = $derived<Record<number, Tick>>(
     shared
       ? sharedTicks(checks, inFlight, you)
@@ -183,6 +202,18 @@
         // wrongly shows got, in somebody's colour, is how they come home without the
         // flour, and that asymmetry is already this page's rule.
         if (s !== "open") inFlight = {};
+      },
+      // **The room is cooking** (#211) — so this screen goes to the stove, whoever
+      // tapped. Live when somebody starts it, and on connect when the cook was already
+      // on: a member who dropped, or who came back into the plan through their kitchen
+      // (#207), lands at `/cook` rather than on a list nobody is shopping from. A watcher
+      // hears it too and comes along read-only, exactly as they were carried here by the
+      // decision — `cook` offers them no controls (#200), and the server refuses the
+      // writes regardless.
+      onCooking: () => {
+        if (cooking) return;
+        cooking = true;
+        void goto("/cook");
       },
     });
     c.start();
@@ -244,6 +275,24 @@
     if (!client?.tick(r.source, r.id, index, want)) return;
     inFlight = { ...inFlight, [index]: want };
   }
+
+  /**
+   * Start the room's cook (#211).
+   *
+   * **Raises, and navigates nothing.** The `goto` lives in `onCooking` above, so the
+   * person who tapped travels on the room's own announcement — the same frame, the same
+   * instant, the same path as everybody else. Navigating here as well would be a second
+   * way to arrive, and the one that skips the server: a watcher's tap, or a tap into a
+   * plan that has not decided, would take *them* to the stove while the room stayed put,
+   * which is this bug with the roles swapped.
+   *
+   * Dropped silently with no open socket, like a tick and a swipe: the durable record is
+   * the server's, and a tap that never left is a tap to make again.
+   */
+  function startCook() {
+    if (!list.data?.channel) return;
+    client?.startCook();
+  }
 </script>
 
 <Buy
@@ -254,4 +303,5 @@
   {shared}
   {tickError}
   onToggle={toggle}
+  onCook={startCook}
 />

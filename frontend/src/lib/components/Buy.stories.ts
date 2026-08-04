@@ -252,8 +252,16 @@ export const SixShoppers: Story = {
  * and offers the next leg of the arc.
  *
  * A shared meal, so it is the *group's* finish — the six of them between them have
- * everything, and whoever is ready walks on to `cook`. The invitation sits after the
- * list, where the shop ends, and wears `cook`'s paprika dot.
+ * everything, and whoever taps "Let's cook!" takes the whole room to the stove with them
+ * (#211). The invitation sits after the list, where the shop ends, and wears `cook`'s
+ * paprika dot.
+ *
+ * On a shared list the control is a **button**, not a link, and the difference is the
+ * point rather than a detail: following an `href` is one person going to `/cook`, which
+ * is exactly the bug — starting the cook is a thing that happens to the meal, so it is
+ * raised on the plan's room and every screen moves when the announcement comes back.
+ * `CompleteOnThisDevice` below is the same finish with nobody to bring, and keeps the
+ * plain link it always had.
  */
 export const Complete: Story = {
   args: {
@@ -288,6 +296,9 @@ export const Complete: Story = {
  * completion is this device's too and says exactly that. Nothing here claims a group
  * — the solo path cannot know about one, and pretending otherwise is how somebody
  * walks off to cook while a flatmate is still in the shop.
+ *
+ * "Let's cook!" is therefore the plain link it has always been (#211): there is no room
+ * to raise an event on and nobody to bring along, so nothing about this path changed.
  */
 export const CompleteOnThisDevice: Story = {
   args: {

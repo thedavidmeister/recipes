@@ -17,6 +17,7 @@
     setAdditions,
     setMealType,
     setPlanCap,
+    setPlanCalories,
     type ConnStatus,
     type Decided,
     type Lobby,
@@ -360,6 +361,19 @@
     }
   }
 
+  /** The host bounds the plan to how big a serving it is planning (#213); frozen at
+   * start, like the cap. Both ends go together — a range is one setting. */
+  async function caloriesPlan(min: number | null, max: number | null) {
+    try {
+      lobby = await setPlanCalories(channel, min, max);
+      deciders = lobby.voters.length;
+      started = lobby.started;
+    } catch (e) {
+      lobbyError =
+        e instanceof Error ? e.message : "Couldn't set the calorie range.";
+    }
+  }
+
   // Who is looking, so the lobby knows whether to offer the start. The layout has
   // already fetched this, so it is a cache read rather than a request.
   const session = createQuery(() => ({
@@ -626,6 +640,8 @@
     mealType={lobby?.meal_type}
     additions={lobby?.additions}
     cap={lobby?.max_total_seconds ?? null}
+    minKcal={lobby?.min_kcal_per_serving ?? null}
+    maxKcal={lobby?.max_kcal_per_serving ?? null}
     host={!!lobby && lobby.host === session.data?.telegram_user_id}
     hostId={lobby?.host}
     inviteLink={page.url.href}
@@ -635,6 +651,7 @@
     onMealType={chooseMeal}
     onAdditions={chooseAdditions}
     onCap={capPlan}
+    onCalories={caloriesPlan}
     onLeave={leave}
   />
 {/if}
