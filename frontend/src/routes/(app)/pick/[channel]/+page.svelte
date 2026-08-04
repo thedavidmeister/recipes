@@ -148,10 +148,11 @@
     }
   }
 
-  // How many cards to keep ahead of the swiper: 2x their rate, bounded. A walk
-  // yields at most MAX_LEN (30) per call, so a deeper buffer just costs one more.
+  // How many cards to keep ahead of the swiper: 2x their rate, bounded by what one
+  // deal can hold, since a deal is now a *stable* deck rather than a fresh journey
+  // per call (#225) — asking twice over cannot buffer deeper than asking once.
   const bufferTarget = $derived(
-    Math.min(40, Math.max(10, Math.round(2 * spm))),
+    Math.min(30, Math.max(10, Math.round(2 * spm))),
   );
 
   function backoff() {
@@ -163,37 +164,31 @@
     if (refilling) return;
     refilling = true;
     try {
-      let added = false;
-      // Top up toward the buffer target. A walk is a different journey each call,
-      // so a couple of fetches surface fresh cards even as `queued` grows.
-      for (
-        let fetches = 0;
-        deck.length < bufferTarget && fetches < 3;
-        fetches++
-      ) {
-        // The channel travels with the walk so the server bounds it to the plan's
-        // time cap (#80) — the cap itself never comes from the client. It is also how
-        // the server knows whose round this is, and so what this member has already
-        // answered in it (#202); the id comes from the session, never from here.
-        const stops = await getWalk(30, channel);
-        // What the *deal* held, not what was new to this deck — a walk of cards this
-        // client already queued is a client still holding cards, and says nothing about
-        // whether the member has answered them.
-        finished = answeredEverything(stops.length);
-        const fresh: RecipeCard[] = [];
-        for (const s of stops) {
-          const k = cardKey(s.recipe.source, s.recipe.id);
-          if (queued.has(k)) continue;
-          queued.add(k);
-          rememberCard(s.recipe);
-          fresh.push(s.recipe);
-        }
-        if (!fresh.length) break; // this walk surfaced nothing new
-        deck = [...deck, ...fresh];
-        added = true;
+      // One ask, not a loop of them. In a plan with a seed the deal is the same deck
+      // until something is *answered* (#225), so a second fetch in the same breath
+      // can only hand back what the first one did. Swiping is what moves the deal
+      // along; asking again is not.
+      //
+      // The channel travels with the walk so the server bounds it to the plan's
+      // time cap (#80) — the cap itself never comes from the client. It is also how
+      // the server knows whose round this is, and so what this member has already
+      // answered in it (#202); the id comes from the session, never from here.
+      const stops = await getWalk(30, channel);
+      // What the *deal* held, not what was new to this deck — a walk of cards this
+      // client already queued is a client still holding cards, and says nothing about
+      // whether the member has answered them.
+      finished = answeredEverything(stops.length);
+      const fresh: RecipeCard[] = [];
+      for (const s of stops) {
+        const k = cardKey(s.recipe.source, s.recipe.id);
+        if (queued.has(k)) continue;
+        queued.add(k);
+        rememberCard(s.recipe);
+        fresh.push(s.recipe);
       }
+      if (fresh.length) deck = [...deck, ...fresh];
       loadedOnce = true;
-      if (!added) backoff();
+      if (!fresh.length) backoff();
     } catch (e) {
       // `finished` is deliberately left alone: a deal that failed said nothing about
       // whether anything is left, so the last one that answered stands until another
