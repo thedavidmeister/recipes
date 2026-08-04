@@ -52,6 +52,22 @@ export const Decided: Story = {
 };
 
 /**
+ * Cooking (#211): the fourth word. Somebody in the plan tapped "Let's cook!" — a session
+ * event recorded against the plan, not a link one person followed — so the kitchen can
+ * say which of its meals is already on the hob.
+ *
+ * It is `Decided` with the hob on rather than a state of its own, and the row says so in
+ * that order: the dish is still the answer, and "Cooking" is the one thing that is
+ * different about it. Read against `Decided` above, the difference is exactly one word.
+ */
+export const Cooking: Story = {
+  args: {
+    status: "ready",
+    meals: kitchenMeals([{}, {}, { cooking: true }]).slice(2),
+  },
+};
+
+/**
  * One person in each — the singular copy, which is the ordinary case for a kitchen of
  * one and the state a plan is in for its first minute (a plan seats its host as it is
  * made, so a lobby is never empty).

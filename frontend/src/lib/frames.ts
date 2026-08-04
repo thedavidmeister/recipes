@@ -49,5 +49,15 @@ export function applyFrame(msg: ServerMsg, handlers: PickHandlers): void {
     handlers.onTimeSync?.(msg.offset_ms, msg.rtt_ms);
   } else if (msg.type === "timers") {
     handlers.onTimers?.(msg.source, msg.id, msg.timers);
+  } else if (msg.type === "cooking") {
+    // The frame that moves the room to the stove (#211). Losing it is the `decided`
+    // failure one step later in the arc: the tapper would go to `/cook` alone if the
+    // page navigated on its own click, and since it does not, losing this strands the
+    // *whole* room on the shopping list — which is the bug #211 exists to fix, silently
+    // reintroduced.
+    handlers.onCooking?.({
+      started_at: msg.started_at,
+      started_by: msg.started_by,
+    });
   }
 }

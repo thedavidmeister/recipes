@@ -376,10 +376,11 @@ export interface DecidedMeal {
 /**
  * One meal planned in a kitchen (#207). Mirrors `session::KitchenMeal`.
  *
- * The three states are read off two fields and are exactly what a plan can be in:
- * gathering (`started` false), deciding (`started` true, `decided` null), and decided.
- * A plan everybody left is a deleted row (#96/#169), so there is no fourth state and
- * nothing to render for one — such a meal is simply not in the list.
+ * The four states are read off three fields and are exactly what a plan can be in:
+ * gathering (`started` false), deciding (`started` true, `decided` null), decided, and
+ * **cooking** (#211 — decided, and somebody has started the cook). A plan everybody left
+ * is a deleted row (#96/#169), so there is no "over" state and nothing to render for one
+ * — such a meal is simply not in the list.
  *
  * `deciders` is the roster count: who joined the plan, not who is connected and not who
  * has voted.
@@ -392,6 +393,9 @@ export interface KitchenMeal {
   started: boolean;
   deciders: number;
   decided: DecidedMeal | null;
+  /** Whether somebody has started the cook (#211). Only ever true beside a `decided` —
+   * you cook the decision, and the server refuses a row that says otherwise. */
+  cooking: boolean;
 }
 
 /**
