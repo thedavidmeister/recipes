@@ -56,9 +56,10 @@
     error?: string;
     /**
      * Which ingredient indices are ticked off, and where each tick came from — a
-     * person, the kitchen's pantry, or nothing at all (a tap in flight, or the
-     * device-local list a decision with no meal session falls back to). See
-     * `Tick` in `$lib/shopping`.
+     * person, the kitchen's pantry, or nobody at all (a tick this browser restored
+     * from the device-local list a decision with no meal session falls back to). A
+     * tap made on this screen arrives here already the tapper's (#210), so nothing in
+     * here is ever "ticked, owner pending". See `Tick` in `$lib/shopping`.
      */
     ticks?: Record<number, Tick>;
     onToggle?: (index: number) => void;
@@ -135,8 +136,10 @@
 
   /**
    * The row's fill. An untouched line is the paper the rest of the page is; a line
-   * somebody has is washed in their tint; a line ticked with nobody behind it — the
-   * pantry's, or the device-local list's — goes plain stone: got, but nobody's.
+   * somebody has is washed in their tint — including one this screen has only just
+   * tapped, which is somebody's the moment it is tapped (#210); a line ticked with
+   * nobody behind it — the pantry's, or a tick restored from this device's own list —
+   * goes plain stone: got, but nobody's.
    *
    * A pantry pre-tick shares the achromatic treatment on purpose rather than getting a
    * seventh hue. Six of the palette's colours already mean "a person", and a colour

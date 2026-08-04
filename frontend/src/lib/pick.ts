@@ -284,8 +284,8 @@ export class PickClient {
    *
    * Dropped silently if not connected, exactly as it was when it had its own frame: the
    * durable record is the server's, and the user can re-swipe on reconnect. */
-  vote(source: string, id: string, vote: boolean): void {
-    this.event({ kind: "vote", source, id, vote });
+  vote(source: string, id: string, vote: boolean): boolean {
+    return this.event({ kind: "vote", source, id, vote });
   }
 
   /** Tick one line of the meal's shopping list off, or put it back (#131/#209).
@@ -293,8 +293,8 @@ export class PickClient {
    * Was a `POST` that answered with the whole list; it is an event now, and the answer
    * is the `buy` frame the server sends **the room** — which is the same list, reaching
    * the tapper and everybody shopping beside them in one message instead of two. */
-  tick(source: string, id: string, index: number, checked: boolean): void {
-    this.event({ kind: "buy_tick", source, id, index, checked });
+  tick(source: string, id: string, index: number, checked: boolean): boolean {
+    return this.event({ kind: "buy_tick", source, id, index, checked });
   }
 
   /**
@@ -306,16 +306,23 @@ export class PickClient {
    * queued for the reconnect — a queued timer start would fire minutes late carrying an
    * instant that the server's sanity bound would then clamp, which is a worse lie than
    * a button that plainly did nothing.
+   *
+   * **Returns whether the frame left**, which is the one thing "silently" cost a caller
+   * that paints ahead of the answer (#210). `buy` shows a tap as the tapper's before the
+   * room has confirmed it; a tap that never reached a socket has no confirmation coming
+   * and no refusal either, so a screen that painted it would hold a claim nobody will
+   * ever settle. Asking the socket itself is the only race-free way to know — a status
+   * this side cached could be a millisecond out of date.
    */
-  event(event: SessionEvent): void {
-    this.send(raise(event));
+  event(event: SessionEvent): boolean {
+    return this.send(raise(event));
   }
 
-  /** One frame out, if there is a socket to put it on. */
-  private send(frame: unknown): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(frame));
-    }
+  /** One frame out, if there is a socket to put it on; `false` if there was not. */
+  private send(frame: unknown): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(JSON.stringify(frame));
+    return true;
   }
 
   /** Close for good — no reconnect. */
