@@ -56,6 +56,53 @@ export const Ready: Story = {
 };
 
 /**
+ * **A tap of your own, before the room has answered for it** (#210).
+ *
+ * `dave` is the person at this screen. `vegetable oil` is the tap he has just made and
+ * the server has not announced yet; `chicken` is `mel`'s, `tomatoes` is the pantry's,
+ * and `garlic` is a tick of `dave`'s the room confirmed a minute ago. The point of the
+ * story is that you cannot tell his two rows apart — an in-flight tick is the tapper's,
+ * colour and name, from the first paint, so when the room's `buy` frame lands it
+ * **confirms** the row rather than repainting it.
+ *
+ * Read against `Ready`: this is deliberately indistinguishable from a list where every
+ * tick is announced, and that indistinguishability *is* the fix. What it replaced was a
+ * row that painted plain stone and then flipped to the tapper's colour a round trip
+ * later — a colour flash on every single tick, exactly at the moment of interaction.
+ */
+export const YourTapBeforeTheRoomAnswers: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: got(mel), 2: inPantry("tomato"), 3: got(dave), 5: got(dave) },
+  },
+};
+
+/**
+ * **The same list, that tap refused** — where the screen settles afterwards (#210).
+ *
+ * Exactly `YourTapBeforeTheRoomAnswers` with one row changed, so the pair reads as the
+ * before and after of one refusal. A tick the server would not take still gets a
+ * whole-list frame back, and that frame is the truth: `vegetable oil` was never got, so
+ * it returns to ordinary paper. What this pins is what is *not* on it — no tint, no
+ * accent, no name left behind on a line that carries no tick. The colour was never a
+ * second piece of state that could survive the tick; it was part of the tick, and it
+ * went back with it.
+ *
+ * `dave`'s `garlic` is a tick that *was* taken, so the rollback is visibly local to the
+ * refused line rather than a wipe of everything he has.
+ */
+export const YourTapRolledBack: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    ticks: { 0: got(mel), 2: inPantry("tomato"), 3: got(dave) },
+  },
+};
+
+/**
  * The list as it is **born** when the plan's kitchen is stocked (#156): the staples
  * are already accounted for and nobody had to do anything.
  *
@@ -292,15 +339,36 @@ export const TickRefused: Story = {
   },
 };
 
-/** No meal session behind the decision, so there is nobody to attribute a tick to:
- * the list is this device's, unattributed, and says so rather than implying a group
- * that is not there (#131). */
+/** No meal session behind the decision, and this browser's stored list is all there
+ * is: these ticks were made in some earlier sitting, by whoever was at this browser
+ * then, so nobody can be named for them and none of them wears a colour (#131). */
 export const OnThisDeviceOnly: Story = {
   args: {
     status: "ready",
     recipe: buyRecipe(),
     shared: false,
     ticks: { 0: NOBODY, 3: NOBODY },
+  },
+};
+
+/**
+ * The same private list a moment later: `dave` has ticked line 5 **here and now**, so
+ * that one is his (#210) while the two restored from storage stay nobody's.
+ *
+ * Both halves are the same rule read in both directions. There is no meal session, but
+ * "no session" was never "no person" — the tap happened at this screen and this screen
+ * knows who is at it, so the row is his from the first paint exactly as a shared one
+ * would be. Lines 0 and 3 came out of `localStorage`, which outlives a sitting and is
+ * shared with anyone else who uses this browser, so they have no author to claim and
+ * are not given one. The list still says *just on this device*: a colour on it names
+ * who got a thing, never who else can see it.
+ */
+export const OnThisDeviceWithYourOwnTick: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: false,
+    ticks: { 0: NOBODY, 3: NOBODY, 5: got(dave) },
   },
 };
 
