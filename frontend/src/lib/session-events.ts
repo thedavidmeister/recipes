@@ -35,12 +35,13 @@ import type { Voter } from "./pick";
  * both reach it. `$lib/pick` owns the socket and calls into this; the `Voter` type comes
  * back the other way as an `import type`, which is erased.
  *
- * ## The events that have not migrated yet
+ * ## Everything this app raises comes through here (#209)
  *
- * Votes and shopping ticks predate this and still travel as their own frames. Nothing
- * here is timer-shaped — {@link SessionEvent} is a union to add a member to, and the
- * envelope, the measurement and the translation know only about instants — so migrating
- * them is adding a variant and a sender, not reworking this.
+ * Votes and shopping ticks predated the framework and travelled as their own things — a
+ * vote as its own socket frame, a tick as a `POST`. They are {@link SessionEvent}
+ * members now, which cost this module exactly what #208 predicted it would: two union
+ * members and two senders on {@link PickClient}. Nothing here is timer-shaped, so
+ * nothing here had to change to carry them.
  */
 
 /** A recipe key, on the events that name one. */
@@ -64,7 +65,16 @@ interface RecipeRef {
  */
 export type SessionEvent =
   | ({ kind: "timer_start"; step: number } & RecipeRef)
-  | ({ kind: "timer_dismiss"; step: number } & RecipeRef);
+  | ({ kind: "timer_dismiss"; step: number } & RecipeRef)
+  /** This client's yes or no on a recipe (#209). `at` is the swipe, so the instant is
+   * the moment the card went left or right rather than the moment its row was written. */
+  | ({ kind: "vote"; vote: boolean } & RecipeRef)
+  /** One line of the meal's shopping list, claimed (`checked`) or put back (#131/#209).
+   *
+   * `index` is a position in the recipe's shopping-list projection (`$lib/shopping`),
+   * which is the same projection the server counts against. One kind for both
+   * directions, because that is what the control is: one row, two states. */
+  | ({ kind: "buy_tick"; index: number; checked: boolean } & RecipeRef);
 
 /** An event on its way to the server: the payload, plus when the initiator did it. */
 export interface EventFrame {

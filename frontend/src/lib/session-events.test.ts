@@ -62,6 +62,42 @@ describe("raise", () => {
     expect(JSON.stringify(frame)).not.toContain("initiator");
     expect(JSON.stringify(frame)).not.toContain("user");
   });
+
+  it("stamps a swipe with the moment the card went, not the moment it is sent", () => {
+    // The vote used to be its own frame with no instant on it at all (#209), so what
+    // the plan recorded was whenever the row happened to be written. A swipe made in a
+    // tunnel and delivered on reconnect is still a swipe made in the tunnel.
+    const swiped = 1_700_000_000_000;
+    const event: SessionEvent = {
+      kind: "vote",
+      source: "themealdb",
+      id: "52795",
+      vote: true,
+    };
+    expect(raise(event, swiped)).toEqual({ type: "event", at: swiped, event });
+  });
+
+  it("stamps a shopping tick the same way, through the same envelope", () => {
+    // One envelope for every kind is the whole claim the framework makes, so this is
+    // the same assertion as the one above with a different payload — and that it *is*
+    // the same assertion is the point.
+    const tapped = 1_700_000_012_345;
+    const event: SessionEvent = {
+      kind: "buy_tick",
+      source: "themealdb",
+      id: "52795",
+      index: 3,
+      checked: true,
+    };
+    expect(raise(event, tapped)).toEqual({ type: "event", at: tapped, event });
+    expect(Object.keys(event).sort()).toEqual([
+      "checked",
+      "id",
+      "index",
+      "kind",
+      "source",
+    ]);
+  });
 });
 
 describe("pongFor", () => {

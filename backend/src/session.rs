@@ -64,24 +64,15 @@ fn mint_channel_id() -> String {
 // ---- WS protocol -----------------------------------------------------------
 
 /// A frame from a client.
+///
+/// **Two kinds, and only one of them writes anything** (#209). A vote used to be its
+/// own `{"type":"vote"}` frame here; it is now a [`crate::events::SessionEvent::Vote`]
+/// payload inside [`ClientMsg::Event`], which is what "one choke point" means at the
+/// wire: there is exactly one frame a client can send that changes the plan, and it
+/// carries the instant the client did it.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ClientMsg {
-    /// This client's yes/no on a recipe. The voter is the authenticated session,
-    /// never a field the client supplies — a client cannot vote as someone else, and
-    /// cannot vote at all unless that session holds a seat at a plan whose swiping
-    /// has begun (see [`record_vote`]).
-    ///
-    /// One of the frames that predates the event framework ([`crate::events`]) and is
-    /// meant to migrate onto it: a vote is exactly a payload under
-    /// `Guard::SeatedInStartedPlan`, and an envelope's `at` would give a swipe the
-    /// swiper's instant instead of the row's `unixepoch()` default. Left where it is on
-    /// purpose — #208 is timers, and that migration is its own piece of work.
-    Vote {
-        source: String,
-        id: String,
-        vote: bool,
-    },
     /// The client's half of a clock measurement — its answer to [`ServerMsg::TimePing`].
     ///
     /// `server_ms` is the reading the ping carried, echoed back so the round trip is
@@ -647,8 +638,9 @@ pub struct Departure {
 /// a roster that still contains them.
 ///
 /// Guards in the house style: an unknown channel is a client bug (400), and someone
-/// who was never in the plan is refused (403) rather than quietly answered, exactly
-/// as [`set_buy_check`] refuses a stranger holding the channel id.
+/// who was never in the plan is refused (403) rather than quietly answered — the same
+/// answer every roster-gated HTTP write in this module gives a stranger holding the
+/// channel id.
 pub async fn leave_lobby(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -989,8 +981,10 @@ pub struct BuyQuery {
 /// so 400 and not 403 — the person is allowed here, the recipe is not.
 ///
 /// Read *and* said here so the refusal has a sentence; repeated inside the writes'
-/// own predicates ([`not_against_the_decision`]) so it is also true, which is the same
-/// division of labour [`set_buy_check`] already has for the roster.
+/// own predicates ([`not_against_the_decision`]) so it is also true. Since #209 the
+/// only caller left is [`buy_list`], the read — a shopping *write* is an event now, and
+/// events are refused in silence at the framework's choke point (#179/#180), so the
+/// predicate inside the write is the whole of what keeps that row out.
 async fn decided_recipe_or_refuse(
     state: &AppState,
     channel: &str,
@@ -1008,16 +1002,6 @@ async fn decided_recipe_or_refuse(
         ))),
         _ => Ok(()),
     }
-}
-
-/// A tick or an untick on one line of the shopping list.
-#[derive(Debug, Deserialize)]
-pub struct BuyCheckBody {
-    pub source: String,
-    pub id: String,
-    pub index: i64,
-    /// `true` ticks the line (claiming it for the caller), `false` clears it.
-    pub checked: bool,
 }
 
 /// `GET /api/session/{channel}/buy?source=…&id=…` — the meal's shopping checklist.
@@ -1066,132 +1050,6 @@ pub async fn buy_list(
     }))
 }
 
-/// `POST /api/session/{channel}/buy` — tick a line off the shopping list, or clear it.
-///
-/// **Deciders only, and only once the meal is decided.** The roster is who is having
-/// this meal; a stranger holding the channel id must not be able to write into their
-/// basket, so a non-member is refused (403) rather than quietly ignored, and a plan
-/// still in its lobby has no list to shop (400). Anyone on the roster may clear
-/// anyone's tick — a shopping list is a shared object, and "I put that back" is a
-/// normal thing to say out loud; the write records who has it *now*, which is the
-/// only claim it ever made.
-///
-/// Both refusals are read here so they can be *said*, and repeated inside the write's
-/// own predicate ([`seated_in_a_started_plan`]) so they are also *true*: a read and a
-/// write are two round trips, and a departure landing between them must win — the
-/// same reason [`remove_voter`]'s seat delete carries `started_at IS NULL` rather
-/// than trusting its caller's read (#175).
-///
-/// The result is the whole list, and the same list is announced to the room, so the
-/// caller and every other open client land on one answer.
-pub async fn set_buy_check(
-    State(state): State<AppState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(channel): Path<String>,
-    Json(body): Json<BuyCheckBody>,
-) -> Result<Json<BuyList>, AppError> {
-    let channel = channel.as_str();
-    let body = &body;
-    if body.index < 0 {
-        return Err(AppError::BadRequest(format!(
-            "ingredient index must not be negative, got {}",
-            body.index
-        )));
-    }
-    let view = state
-        .with_db(move |db| async move { load_lobby(&db, channel).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
-    if !view
-        .voters
-        .iter()
-        .any(|v| v.telegram_user_id == user.telegram_user_id)
-    {
-        return Err(AppError::Forbidden(
-            "only the people having this meal can tick things off its list".into(),
-        ));
-    }
-    // A shopping list belongs to a decided meal, and nothing is decided until the
-    // swiping has begun — `buy` is only reachable through a consensus. Said here so
-    // the refusal has a sentence; the write carries the same fact in its own predicate
-    // (see [`tick_item`]), which is what actually keeps the row out.
-    if !view.started {
-        return Err(AppError::BadRequest(
-            "this meal plan has not started yet".into(),
-        ));
-    }
-    // And it belongs to the meal this plan *decided* (#201), which the plan itself now
-    // says. Same shape again: said here, true in the write's predicate.
-    decided_recipe_or_refuse(&state, channel, &body.source, &body.id).await?;
-
-    // A tick can be the first thing that ever touches this list (a peer opened `buy`
-    // and tapped before this client read it), so the seed runs here too — before the
-    // write, so a first tap lands *on top of* the pantry's answer rather than being
-    // overwritten by a seed that arrives after it.
-    ensure_buy_seed(&state, channel, &body.source, &body.id).await?;
-
-    let user = &user;
-    state
-        .with_db(move |db| async move {
-            if body.checked {
-                tick_item(
-                    &db,
-                    channel,
-                    &body.source,
-                    &body.id,
-                    body.index,
-                    &user.telegram_user_id,
-                )
-                .await
-            } else {
-                untick_item(
-                    &db,
-                    channel,
-                    &body.source,
-                    &body.id,
-                    body.index,
-                    &user.telegram_user_id,
-                )
-                .await
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let list = reload_and_announce_buy(&state, channel, &body.source, &body.id).await?;
-    Ok(Json(list))
-}
-
-/// Re-read one recipe's checklist and tell the room, so a tick lands on every open
-/// client at once — the same shape [`reload_and_announce`] gives the lobby.
-async fn reload_and_announce_buy(
-    state: &AppState,
-    channel: &str,
-    source: &str,
-    id: &str,
-) -> Result<BuyList, AppError> {
-    let checks = state
-        .with_db(move |db| async move { load_buy_checks(&db, channel, source, id).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let tx = room(&state.rooms, channel);
-    if let Ok(txt) = serde_json::to_string(&ServerMsg::Buy {
-        source: source.to_owned(),
-        id: id.to_owned(),
-        checks: checks.clone(),
-    }) {
-        // No receivers is an error and also a non-event: nobody is listening yet.
-        let _ = tx.send(txt);
-    }
-    Ok(BuyList {
-        channel_id: channel.to_owned(),
-        source: source.to_owned(),
-        id: id.to_owned(),
-        checks,
-    })
-}
-
 /// Re-read the lobby and tell the room, so every open client moves together — a guest
 /// arriving, or the host pressing start, lands on everyone's screen at once.
 async fn reload_and_announce(state: &AppState, channel: &str) -> Result<LobbyView, AppError> {
@@ -1227,13 +1085,18 @@ fn announce_departure(state: &AppState, channel: &str, voter: Voter, ended: bool
 /// Session-gated like every person-facing route (#25); the upgrade carries the
 /// session cookie, so the socket knows who is voting.
 ///
-/// **Anyone signed in with the channel id may listen, and only a decider may vote.**
+/// **Anyone signed in with the channel id may listen, and only a decider may write.**
 /// The upgrade deliberately asks nothing about the roster — someone who followed the
 /// link after the swiping began cannot join (`join_lobby` refuses them) but can still
-/// watch it happen, and this socket is how watching works; they can already read the
-/// same lobby and tally over HTTP. What must not follow from holding the link is a
-/// *write*, so the refusal lives on the vote itself, in [`record_vote`]'s own
-/// predicate, rather than on the door (#175).
+/// watch it happen, and this socket is how watching works (#180/#200); they can already
+/// read the same lobby, tally and shopping list over HTTP. What must not follow from
+/// holding the link is a *write*, so the refusal lives on the event, at the framework's
+/// guard ([`crate::events::ingest`]) and again inside each handler's own predicate,
+/// rather than on the door (#175).
+///
+/// Since #209 that is the whole of the write surface for a plan mid-flight: votes and
+/// shopping ticks came here from their own paths, so a watcher is refused by one rule in
+/// one place instead of by three rules in three.
 pub async fn ws(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -1382,59 +1245,15 @@ async fn socket_loop(
             // A frame from this client.
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    // Every frame this client sends is read once, here, and routed: the
-                    // vote by its own handler (it predates the event framework and is
-                    // meant to migrate onto it), the clock measurement into this
-                    // connection's recorded offset, and everything since through
-                    // `events::ingest`. An unreadable frame is dropped in silence —
-                    // there is nowhere on this socket to answer one.
+                    // Every frame this client sends is read once, here, and routed —
+                    // and since #209 there are only two places for it to go: the clock
+                    // measurement into this connection's recorded offset, and *every*
+                    // write through `events::ingest`. The vote had its own arm here
+                    // until it migrated; nothing does now, which is what makes the
+                    // choke point a choke point rather than a convention. An unreadable
+                    // frame is dropped in silence — there is nowhere on this socket to
+                    // answer one.
                     match serde_json::from_str::<ClientMsg>(&t) {
-                    Ok(ClientMsg::Vote { source, id, vote }) => {
-                        // Durable write first, then the live push — Turso is the truth,
-                        // so a vote it declined is a vote the room never hears about.
-                        // Peers apply this frame to their tally incrementally, so
-                        // announcing an unwritten vote would put a phantom yes on every
-                        // open client until each one next rehydrates. `false` is the
-                        // write's own predicate refusing (not a decider in this plan, or
-                        // the swiping has not begun); an `Err` is a database fault. The
-                        // socket has nowhere to report either, and the answer is the
-                        // same: nothing was recorded, so nothing is announced.
-                        if record_vote(&db, &channel, &source, &id, &voter, vote)
-                            .await
-                            .unwrap_or(false)
-                        {
-                            if let Ok(txt) = serde_json::to_string(&ServerMsg::Vote {
-                                voter: voter.clone(),
-                                source: source.clone(),
-                                id: id.clone(),
-                                vote,
-                            }) {
-                                // Err only means no receivers right now — harmless.
-                                let _ = tx.send(txt);
-                            }
-                            // The win condition is evaluated here, on the vote that
-                            // might have met it, and nowhere else (#201) — no poll, no
-                            // sweep, and no browser. `decide_if_agreed` answers only
-                            // for the call that *recorded* the decision, so two votes
-                            // completing at once produce exactly one frame: the loser
-                            // of that race changed no row and says nothing. An `Err`
-                            // is a database fault with nowhere to report it, and it
-                            // leaves the plan undecided rather than announcing a
-                            // decision that was never written — the same rule the vote
-                            // above follows, for the same reason.
-                            if let Ok(Some(d)) =
-                                decide_if_agreed(&db, &channel, &source, &id).await
-                            {
-                                if let Ok(txt) = serde_json::to_string(&ServerMsg::Decided {
-                                    source: d.source,
-                                    id: d.id,
-                                    decided_at: d.decided_at,
-                                }) {
-                                    let _ = tx.send(txt);
-                                }
-                            }
-                        }
-                    }
                     // The other half of one clock measurement (`events::ClockOffset`).
                     // The estimate goes straight back to the client that produced it, so
                     // both sides normalise through the *same* number rather than each
@@ -1452,14 +1271,17 @@ async fn socket_loop(
                             }
                         }
                     }
-                    // The event framework's one path in (#208). Normalising `at`,
-                    // applying the kind's guard, writing and deciding what the room is
-                    // told all live in `events::ingest`; this arm only carries what came
-                    // back to the room. The rules it inherits are the vote's, above:
-                    // nothing announced that was not written (an empty answer is a
-                    // refusal, and refusals on this socket are silent), and a database
-                    // fault leaves the plan as it was rather than announcing a write
-                    // that never happened.
+                    // **The event framework's one path in** (#208/#209) — a vote, a
+                    // shopping tick, a timer, and whatever is added next. Normalising
+                    // `at`, applying the kind's guard, writing and deciding what the
+                    // room is told all live in `events::ingest`; this arm only carries
+                    // what came back to the room.
+                    //
+                    // The rules are the ones the vote's own arm used to hold here:
+                    // nothing is announced that was not written (an empty answer is a
+                    // refusal, and refusals on this socket are silent — #179/#180), and
+                    // a database fault leaves the plan as it was rather than announcing
+                    // a write that never happened.
                     Ok(ClientMsg::Event { at, event }) => {
                         let frames = crate::events::ingest(
                             &db,
@@ -1944,11 +1766,13 @@ async fn update_additions(
 /// write, alongside [`remove_voter`]'s `started_at IS NULL`. The two halves are here
 /// for different reasons, and neither is quite the other's:
 ///
-/// - **The roster.** On the vote path nothing asked at all — the socket upgrade gates
-///   on the channel existing — so a signed-in stranger holding the invite link wrote
-///   into the very tally the room is measured by. On the buy path [`set_buy_check`]
-///   does ask, but in a preceding read: two round trips, so that read is what gives
-///   the 403 a sentence, and *this* is what keeps the row out.
+/// - **The roster.** Nothing asked at all before #175 — the socket upgrade gates on the
+///   channel existing — so a signed-in stranger holding the invite link wrote into the
+///   very tally the room is measured by. Since #209 the framework asks first
+///   ([`is_seated_in_a_started_plan`], at [`crate::events::ingest`]'s choke point), and
+///   that is a *different* question with a different job: it decides whether a handler
+///   runs at all, and this decides whether the row lands. Two round trips separate them,
+///   and a seat given up in between must win.
 /// - **The start.** Not a race. `started_at` only ever goes NULL → set, so a caller
 ///   that saw "started" still sees it when the write lands. What this buys is the
 ///   sentence #169 wrote in [`remove_voter`] — "votes and shopping claims only exist
@@ -2037,26 +1861,37 @@ fn in_an_undecided_plan() -> &'static str {
 /// broadcast [`ServerMsg::Decided`] to the whole room and re-sends it on every connect,
 /// so a client swiping into a decided plan is a client that has been told, or is about
 /// to be, by the frame that ends its deck.
-async fn record_vote(
+///
+/// **`at` is the swipe's own instant** (#209), on the shared timeline: the moment the
+/// card went left or right, taken from the initiator's clock and corrected for that
+/// participant's measured drift by [`crate::events::normalize`] before it reaches here.
+/// This function reads no clock, exactly as [`crate::timers::start`] reads none — the
+/// tap is the event, and the moment the row happened to be written is a fact about the
+/// network. `created_at` still records that second-resolution write time and is
+/// untouched; `created_at_ms` is the new column beside it (migration 0028), and it moves
+/// with a re-vote because a swipe is a person's *current* call.
+pub(crate) async fn record_vote(
     conn: &Connection,
     channel: &str,
     source: &str,
     id: &str,
     voter: &str,
     vote: bool,
+    at: i64,
 ) -> anyhow::Result<bool> {
     let written = conn
         .execute(
             &format!(
-                "INSERT INTO votes (channel_id, source, id, voter_id, vote)
-                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE {} AND {}
+                "INSERT INTO votes (channel_id, source, id, voter_id, vote, created_at_ms)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE {} AND {}
                  ON CONFLICT(channel_id, source, id, voter_id) DO UPDATE SET
                     vote = excluded.vote,
-                    created_at = unixepoch()",
+                    created_at = unixepoch(),
+                    created_at_ms = excluded.created_at_ms",
                 seated_in_a_started_plan("?4"),
                 in_an_undecided_plan()
             ),
-            libsql::params![channel, source, id, voter, vote as i64],
+            libsql::params![channel, source, id, voter, vote as i64, at],
         )
         .await?;
     Ok(written > 0)
@@ -2107,16 +1942,31 @@ async fn record_vote(
 /// that once in each direction is what stops a row predating #179 either completing a
 /// consensus nobody reached or vetoing one everybody did. A voter has at most one row
 /// per recipe (the `votes` primary key), so counting rows *is* counting people.
-async fn decide_if_agreed(
+///
+/// **`at` is the deciding swipe's own instant** (#209), and the whole win condition is
+/// still inside this one predicate — nothing about the migration onto the event
+/// framework moved a clause out, relaxed one, or split the evaluation from the write.
+/// `decided_at_ms` is set from it (migration 0028); `decided_at` is still
+/// `unixepoch()` and is still the column `decided_at IS NULL` is asked about, so what
+/// makes a decision first-past-the-post is untouched and the new column can never become
+/// a second answer to *whether* a plan decided.
+///
+/// A decision is the one event nobody raises: it is a consequence of the last yes,
+/// evaluated inside that vote's write, so its instant *is* that vote's instant. Stamping
+/// it with a clock read here would say the plan decided when the UPDATE ran, which is a
+/// fact about the network between the deciding phone and this process.
+pub(crate) async fn decide_if_agreed(
     conn: &Connection,
     channel: &str,
     source: &str,
     id: &str,
+    at: i64,
 ) -> anyhow::Result<Option<DecidedRecipe>> {
     let mut rows = conn
         .query(
             "UPDATE pick_sessions
-                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch()
+                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch(),
+                    decided_at_ms = ?4
               WHERE channel_id = ?1
                 AND started_at IS NOT NULL
                 AND decided_at IS NULL
@@ -2134,7 +1984,7 @@ async fn decide_if_agreed(
                         AND v.vote = 1)
                   = (SELECT COUNT(*) FROM pick_voters r WHERE r.channel_id = ?1)
               RETURNING decided_source, decided_id, decided_at",
-            libsql::params![channel, source, id],
+            libsql::params![channel, source, id, at],
         )
         .await?;
     let Some(row) = rows.next().await? else {
@@ -2337,9 +2187,9 @@ pub async fn kitchen_meals(
 /// It is in the write and not only in the handler's read because `decided_at` goes
 /// NULL → set: a caller that read "undecided" can have the decision land underneath it,
 /// and the loser of that race must write nothing rather than build a list for a recipe
-/// the plan turned down. The handler still asks, because that is what gives the refusal
-/// a sentence — the same division of labour [`set_buy_check`] already has between its
-/// roster read and [`seated_in_a_started_plan`].
+/// the plan turned down. The read handler still asks ([`decided_recipe_or_refuse`]),
+/// because that is what gives *its* refusal a sentence — the same division of labour
+/// [`seated_in_a_started_plan`] has between the framework's guard and each write.
 ///
 /// `source` and `id` are the **placeholders** the caller bound them to; they are `?2`
 /// and `?3` on every statement below, but naming them keeps the fragment honest about
@@ -2365,33 +2215,47 @@ pub(crate) fn not_against_the_decision(source: &str, id: &str) -> String {
 /// would refuse it anyway.
 ///
 /// The roster and the start are in the insert's own predicate
-/// ([`seated_in_a_started_plan`]), not only in [`set_buy_check`]'s preceding read:
-/// the roster this is judged against is the one that exists when the write lands,
-/// exactly as [`remove_voter`]'s seat delete is judged against the start that exists
-/// when *it* lands. Since #201 the **recipe** is judged there too
+/// ([`seated_in_a_started_plan`]), not only in the framework's preceding guard
+/// ([`crate::events::ingest`]): the roster this is judged against is the one that exists
+/// when the write lands, exactly as [`remove_voter`]'s seat delete is judged against the
+/// start that exists when *it* lands. Since #201 the **recipe** is judged there too
 /// ([`not_against_the_decision`]): a shopping list belongs to the meal the plan
 /// decided, and the query string is no longer the only thing that says which that is.
-async fn tick_item(
+///
+/// **A negative index writes nothing**, and that lives in the predicate for the same
+/// reason everything else here does (#209). It used to be a sentence the HTTP handler
+/// said before writing; the handler is gone, and a check that lived only in a caller is
+/// a check the next caller can miss. An index is a position in the recipe's shopping-list
+/// projection, so a negative one names no line of any recipe — a row for it would be
+/// unreachable by every read and untickable by every screen.
+///
+/// **`at` is the tap's own instant** (#209), on the shared timeline, and it moves with
+/// the line the way `user_id` does: a take-over records when the new hand closed on it,
+/// not when the first did. `created_at` still records the row's `unixepoch()` write time.
+pub(crate) async fn tick_item(
     conn: &Connection,
     channel: &str,
     source: &str,
     id: &str,
     index: i64,
     user: &str,
+    at: i64,
 ) -> anyhow::Result<()> {
     conn.execute(
         &format!(
             "INSERT INTO buy_checks
-                (channel_id, source, id, ingredient_index, user_id, pantry_item)
-             SELECT ?1, ?2, ?3, ?4, ?5, NULL WHERE {} AND {}
+                (channel_id, source, id, ingredient_index, user_id, pantry_item,
+                 created_at_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, NULL, ?6 WHERE ?4 >= 0 AND {} AND {}
              ON CONFLICT(channel_id, source, id, ingredient_index) DO UPDATE SET
                 user_id = excluded.user_id,
                 pantry_item = NULL,
-                created_at = unixepoch()",
+                created_at = unixepoch(),
+                created_at_ms = excluded.created_at_ms",
             seated_in_a_started_plan("?5"),
             not_against_the_decision("?2", "?3")
         ),
-        libsql::params![channel, source, id, index, user],
+        libsql::params![channel, source, id, index, user, at],
     )
     .await?;
     Ok(())
@@ -2411,7 +2275,11 @@ async fn tick_item(
 /// else. Anyone deciding this meal may put anything back; nobody else may. A guarded
 /// claim with an unguarded release is not guarded, and that holds for the recipe as
 /// much as for the person.
-async fn untick_item(
+///
+/// **No instant.** The row is the tick, so putting a line back removes it, and there is
+/// nothing left to stamp — an untick with a recorded instant would be a tombstone, which
+/// is the thing `buy_checks` and `plan_timers` both refuse to hold.
+pub(crate) async fn untick_item(
     conn: &Connection,
     channel: &str,
     source: &str,
@@ -2526,33 +2394,43 @@ async fn plan_pantry(
 /// If the decision lands between the marker and the pre-ticks, the marker stands and
 /// the pre-ticks are refused: **under**-seeded, the safe direction this whole feature
 /// leans in, and for a list nothing will ever read anyway.
+///
+/// **`at` is the server's own clock** (#209), not an initiator's, and that is the honest
+/// answer rather than a shortcut: nobody taps a pre-tick. The seed is something this
+/// process does when a list is first asked for, so the moment it happened *is* the
+/// moment the process did it — and the server's clock is the shared timeline itself
+/// ([`crate::events::server_now_ms`]), so there is no drift to compensate for and no
+/// participant whose drift it would be. Borrowing the asking tick's instant would date
+/// the kitchen's cupboard by somebody's phone.
 async fn write_seed(
     conn: &Connection,
     channel: &str,
     source: &str,
     id: &str,
     preticks: &[(usize, String)],
+    at: i64,
 ) -> anyhow::Result<()> {
     conn.execute(
         &format!(
-            "INSERT INTO buy_seeds (channel_id, source, id)
-             SELECT ?1, ?2, ?3 WHERE {}
+            "INSERT INTO buy_seeds (channel_id, source, id, seeded_at_ms)
+             SELECT ?1, ?2, ?3, ?4 WHERE {}
              ON CONFLICT(channel_id, source, id) DO NOTHING",
             not_against_the_decision("?2", "?3")
         ),
-        libsql::params![channel, source, id],
+        libsql::params![channel, source, id, at],
     )
     .await?;
     for (index, item) in preticks {
         conn.execute(
             &format!(
                 "INSERT INTO buy_checks
-                    (channel_id, source, id, ingredient_index, user_id, pantry_item)
-                 SELECT ?1, ?2, ?3, ?4, NULL, ?5 WHERE {}
+                    (channel_id, source, id, ingredient_index, user_id, pantry_item,
+                     created_at_ms)
+                 SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6 WHERE {}
                  ON CONFLICT(channel_id, source, id, ingredient_index) DO NOTHING",
                 not_against_the_decision("?2", "?3")
             ),
-            libsql::params![channel, source, id, *index as i64, item.clone()],
+            libsql::params![channel, source, id, *index as i64, item.clone(), at],
         )
         .await?;
     }
@@ -2574,48 +2452,61 @@ async fn write_seed(
 /// the kitchen mid-shop does not re-tick, and — the case that actually bites —
 /// unticking the last pre-tick and reloading does not put it all back. See the
 /// migration for why that is a table and not a heuristic.
+/// **One connection, both ways in.** The seed is reached from the ungated read
+/// ([`buy_list`]) and from a shopping tick's own handler
+/// ([`crate::events::SessionEvent::BuyTick`]), and since #209 the second of those runs
+/// inside the event framework, which holds a plain [`Connection`] rather than the
+/// [`AppState`] an HTTP handler has. So the whole sequence lives here on a connection,
+/// and [`ensure_buy_seed`] is the one-line `with_db` wrapper for the read that still
+/// has one.
+///
+/// Retrying the whole sequence is safe, which is why it can be one `with_db` closure
+/// instead of four: the marker is `DO NOTHING` on conflict and the pre-ticks are too, so
+/// a second run of a partially-completed seed finishes it rather than doubling it (#130).
+pub(crate) async fn seed_buy_list(
+    conn: &Connection,
+    channel: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<()> {
+    if buy_list_seeded(conn, channel, source, id).await? {
+        return Ok(());
+    }
+    let pantry = plan_pantry(conn, channel).await?;
+    // No such recipe: there is no list yet, so nothing was created and nothing is
+    // recorded. The next ask — after a derive, say — gets its seed.
+    let Some(names) = shopping_names_of(conn, source, id).await? else {
+        return Ok(());
+    };
+    let preticks = recipe_core::pantry::preticks(&names, &pantry);
+    write_seed(
+        conn,
+        channel,
+        source,
+        id,
+        &preticks,
+        crate::events::server_now_ms(),
+    )
+    .await
+}
+
 async fn ensure_buy_seed(
     state: &AppState,
     channel: &str,
     source: &str,
     id: &str,
 ) -> Result<(), AppError> {
-    let seeded = state
-        .with_db(move |db| async move { buy_list_seeded(&db, channel, source, id).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    if seeded {
-        return Ok(());
-    }
-
-    let pantry = state
-        .with_db(move |db| async move { plan_pantry(&db, channel).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let names = state
-        .with_db(move |db| async move { shopping_names_of(&db, source, id).await })
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    // No such recipe: there is no list yet, so nothing was created and nothing is
-    // recorded. The next ask — after a derive, say — gets its seed.
-    let Some(names) = names else {
-        return Ok(());
-    };
-
-    let preticks = recipe_core::pantry::preticks(&names, &pantry);
-    let preticks = &preticks;
     state
-        .with_db(move |db| async move { write_seed(&db, channel, source, id, preticks).await })
+        .with_db(move |db| async move { seed_buy_list(&db, channel, source, id).await })
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    Ok(())
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// One recipe's checklist in a meal: the ticked lines, in ingredient order, each with
 /// where its tick came from. The `users` join is a LEFT one for the same reason the
 /// lobby's is — a handle is a display convenience and may be absent, and now also
 /// because a pantry pre-tick has no user row to join to at all.
-async fn load_buy_checks(
+pub(crate) async fn load_buy_checks(
     conn: &Connection,
     channel: &str,
     source: &str,
@@ -2754,13 +2645,16 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Record what the plan decided (#201), the way the deciding vote's write does.
+    /// Record what the plan decided (#201), the way the deciding vote's write does —
+    /// all four columns together, including the instant the deciding swipe happened at
+    /// (#209), so a fixture cannot produce a row `decide_if_agreed` never could.
     pub(crate) async fn decide(conn: &Connection, channel: &str, source: &str, id: &str) {
         conn.execute(
             "UPDATE pick_sessions
-                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch()
+                SET decided_source = ?2, decided_id = ?3, decided_at = unixepoch(),
+                    decided_at_ms = ?4
               WHERE channel_id = ?1",
-            libsql::params![channel, source, id],
+            libsql::params![channel, source, id, 1_700_000_000_000i64],
         )
         .await
         .unwrap();
@@ -2781,6 +2675,17 @@ mod tests {
         crate::db::migrate(&conn).await.unwrap();
         conn
     }
+
+    /// **The instant an event happened**, as the framework hands it to a handler
+    /// (#209): already normalised into the shared timeline by `events::normalize`, in
+    /// unix milliseconds.
+    ///
+    /// One named constant rather than a literal per call, because almost every test
+    /// below is about *what* a write does and not *when* — the ones that are about the
+    /// when say so by passing their own instant. Nothing in these handlers reads a
+    /// clock, so this is a plain input like the channel id beside it, and a stated one
+    /// beats `unixepoch()`-at-test-time for the same reason it beats it in production.
+    const TAP: i64 = 1_700_000_000_000;
 
     fn row<'a>(rows: &'a [TallyRow], id: &str) -> &'a TallyRow {
         rows.iter().find(|r| r.id == id).expect("a tally row")
@@ -2943,13 +2848,13 @@ mod tests {
         let conn = conn().await;
         started_plan(&conn, "chan1", &["alice", "bob"]).await;
 
-        record_vote(&conn, "chan1", "themealdb", "r1", "alice", true)
+        record_vote(&conn, "chan1", "themealdb", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "chan1", "themealdb", "r1", "bob", true)
+        record_vote(&conn, "chan1", "themealdb", "r1", "bob", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "chan1", "themealdb", "r2", "alice", false)
+        record_vote(&conn, "chan1", "themealdb", "r2", "alice", false, TAP)
             .await
             .unwrap();
 
@@ -2967,10 +2872,10 @@ mod tests {
     async fn re_voting_updates_not_appends() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice"]).await;
-        record_vote(&conn, "c", "s", "1", "alice", true)
+        record_vote(&conn, "c", "s", "1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "s", "1", "alice", false)
+        record_vote(&conn, "c", "s", "1", "alice", false, TAP)
             .await
             .unwrap();
 
@@ -3000,11 +2905,11 @@ mod tests {
         started_plan(&conn, "c", &["alice", "bob"]).await;
         let deciders = roster(&conn, "c").await.len();
 
-        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap());
         assert!(
-            !record_vote(&conn, "c", "t", "r1", "mallory", true)
+            !record_vote(&conn, "c", "t", "r1", "mallory", true, TAP)
                 .await
                 .unwrap(),
             "a signed-in stranger holding the channel id is not deciding this meal"
@@ -3036,7 +2941,7 @@ mod tests {
         seat_voter(&conn, "c", "alice").await.unwrap();
 
         assert!(
-            !record_vote(&conn, "c", "t", "r1", "alice", true)
+            !record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
                 .await
                 .unwrap(),
             "the lobby is where you gather, not where you swipe"
@@ -3048,7 +2953,7 @@ mod tests {
         );
 
         begin_session(&conn, "c").await.unwrap();
-        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap());
         assert_eq!(load_tally(&conn, "c").await.unwrap().0, 1);
@@ -3061,7 +2966,7 @@ mod tests {
     async fn a_vote_into_a_plan_that_is_gone_is_not_recorded() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice"]).await;
-        assert!(record_vote(&conn, "c", "t", "r1", "alice", true)
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap());
 
@@ -3069,7 +2974,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !record_vote(&conn, "c", "t", "r2", "alice", true)
+            !record_vote(&conn, "c", "t", "r2", "alice", true, TAP)
                 .await
                 .unwrap(),
             "no plan, no vote"
@@ -3098,9 +3003,11 @@ mod tests {
         started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
 
         for who in ["alice", "carol"] {
-            record_vote(&conn, "c", "t", "r1", who, true).await.unwrap();
+            record_vote(&conn, "c", "t", "r1", who, true, TAP)
+                .await
+                .unwrap();
             assert!(
-                decide_if_agreed(&conn, "c", "t", "r1")
+                decide_if_agreed(&conn, "c", "t", "r1", TAP)
                     .await
                     .unwrap()
                     .is_none(),
@@ -3109,18 +3016,18 @@ mod tests {
         }
         // The recipe only alice wants, so the tally holds something that must never be
         // mistaken for agreement.
-        record_vote(&conn, "c", "t", "r2", "alice", true)
+        record_vote(&conn, "c", "t", "r2", "alice", true, TAP)
             .await
             .unwrap();
-        assert!(decide_if_agreed(&conn, "c", "t", "r2")
+        assert!(decide_if_agreed(&conn, "c", "t", "r2", TAP)
             .await
             .unwrap()
             .is_none());
 
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
-        let decided = decide_if_agreed(&conn, "c", "t", "r1")
+        let decided = decide_if_agreed(&conn, "c", "t", "r1", TAP)
             .await
             .unwrap()
             .expect("the third yes of three decides");
@@ -3140,10 +3047,10 @@ mod tests {
     async fn a_roster_one_yes_short_decides_nothing() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
 
@@ -3154,7 +3061,7 @@ mod tests {
             "unanimous by turnout, which is the number that must not decide"
         );
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3170,18 +3077,18 @@ mod tests {
     async fn one_no_holds_back_a_recipe_everyone_else_wanted() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "carol", false)
+        record_vote(&conn, "c", "t", "r1", "carol", false, TAP)
             .await
             .unwrap();
 
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3190,10 +3097,10 @@ mod tests {
 
         // And a change of heart is a change of heart: the same swipe the other way
         // decides, because a vote is a current call rather than an append.
-        record_vote(&conn, "c", "t", "r1", "carol", true)
+        record_vote(&conn, "c", "t", "r1", "carol", true, TAP)
             .await
             .unwrap();
-        assert!(decide_if_agreed(&conn, "c", "t", "r1")
+        assert!(decide_if_agreed(&conn, "c", "t", "r1", TAP)
             .await
             .unwrap()
             .is_some());
@@ -3215,7 +3122,7 @@ mod tests {
     async fn a_persons_vote_is_one_row_so_a_yes_and_a_no_cannot_coexist() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice"]).await;
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
         // Written straight in, because the API cannot ask for this: `record_vote`'s
@@ -3255,18 +3162,18 @@ mod tests {
         started_plan(&conn, "c", &["alice", "bob"]).await;
         for recipe in ["r1", "r2"] {
             for who in ["alice", "bob"] {
-                record_vote(&conn, "c", "t", recipe, who, true)
+                record_vote(&conn, "c", "t", recipe, who, true, TAP)
                     .await
                     .unwrap();
             }
         }
 
-        let first = decide_if_agreed(&conn, "c", "t", "r1")
+        let first = decide_if_agreed(&conn, "c", "t", "r1", TAP)
             .await
             .unwrap()
             .expect("r1 met the condition");
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r2")
+            decide_if_agreed(&conn, "c", "t", "r2", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3290,23 +3197,23 @@ mod tests {
     async fn a_vote_after_the_decision_is_not_recorded() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob"]).await;
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
-        decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        decide_if_agreed(&conn, "c", "t", "r1", TAP).await.unwrap();
         let (before_participants, before) = load_tally(&conn, "c").await.unwrap();
 
         assert!(
-            !record_vote(&conn, "c", "t", "r2", "alice", true)
+            !record_vote(&conn, "c", "t", "r2", "alice", true, TAP)
                 .await
                 .unwrap(),
             "a new recipe cannot be swiped into a plan that has finished"
         );
         assert!(
-            !record_vote(&conn, "c", "t", "r1", "bob", false)
+            !record_vote(&conn, "c", "t", "r1", "bob", false, TAP)
                 .await
                 .unwrap(),
             "and neither can the decided one be taken back"
@@ -3338,9 +3245,11 @@ mod tests {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob"]).await;
         for who in ["alice", "bob"] {
-            record_vote(&conn, "c", "t", "r1", who, true).await.unwrap();
+            record_vote(&conn, "c", "t", "r1", who, true, TAP)
+                .await
+                .unwrap();
         }
-        let decided = decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        let decided = decide_if_agreed(&conn, "c", "t", "r1", TAP).await.unwrap();
         assert!(decided.is_some());
 
         conn.execute("DELETE FROM votes WHERE channel_id = 'c'", ())
@@ -3381,7 +3290,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3390,7 +3299,7 @@ mod tests {
 
         begin_session(&conn, "c").await.unwrap();
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_some(),
@@ -3410,7 +3319,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            decide_if_agreed(&conn, "c", "t", "never-swiped")
+            decide_if_agreed(&conn, "c", "t", "never-swiped", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3430,7 +3339,7 @@ mod tests {
     async fn a_vote_from_outside_the_roster_neither_completes_nor_vetoes() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob"]).await;
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
         conn.execute(
@@ -3442,7 +3351,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3452,11 +3361,11 @@ mod tests {
         conn.execute("UPDATE votes SET vote = 0 WHERE voter_id = 'mallory'", ())
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
         assert!(
-            decide_if_agreed(&conn, "c", "t", "r1")
+            decide_if_agreed(&conn, "c", "t", "r1", TAP)
                 .await
                 .unwrap()
                 .is_some(),
@@ -3477,10 +3386,10 @@ mod tests {
             "a running plan has decided nothing, and says so rather than omitting it"
         );
 
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        let decided = decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        let decided = decide_if_agreed(&conn, "c", "t", "r1", TAP).await.unwrap();
         assert_eq!(
             load_lobby(&conn, "c").await.unwrap().unwrap().decided,
             decided
@@ -3521,9 +3430,10 @@ mod tests {
     ///
     /// This is the enforcement gap #201 names: `BuyQuery` took the recipe on trust, so
     /// any seated member could name any `(source, id)` and fill a basket for a dinner
-    /// nobody agreed to. `set_buy_check` now asks first — that is what gives the 400 a
-    /// sentence — and the predicate here is what makes it true when the decision lands
-    /// between that read and this write.
+    /// nobody agreed to. The predicate here is what makes the refusal true whenever the
+    /// decision lands after whatever read the caller did — and since #209 a shopping
+    /// write has no preceding read of its own at all, so this is the only thing
+    /// standing between a client's `(source, id)` and the row.
     #[tokio::test]
     async fn a_shopping_write_is_judged_against_the_decided_recipe() {
         let conn = conn().await;
@@ -3531,18 +3441,22 @@ mod tests {
 
         // Undecided: the list still admits any recipe, which is what keeps a decision
         // stashed in a browser before #201 deployed working (0026 backfills nothing).
-        tick_item(&conn, "c", "t", "r9", 0, "alice").await.unwrap();
+        tick_item(&conn, "c", "t", "r9", 0, "alice", TAP)
+            .await
+            .unwrap();
         assert_eq!(
             load_buy_checks(&conn, "c", "t", "r9").await.unwrap().len(),
             1
         );
 
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        decide_if_agreed(&conn, "c", "t", "r1").await.unwrap();
+        decide_if_agreed(&conn, "c", "t", "r1", TAP).await.unwrap();
 
-        tick_item(&conn, "c", "t", "r9", 1, "alice").await.unwrap();
+        tick_item(&conn, "c", "t", "r9", 1, "alice", TAP)
+            .await
+            .unwrap();
         assert_eq!(
             load_buy_checks(&conn, "c", "t", "r9").await.unwrap().len(),
             1,
@@ -3557,7 +3471,9 @@ mod tests {
             "and a guarded claim with an unguarded release is not guarded"
         );
 
-        tick_item(&conn, "c", "t", "r1", 0, "alice").await.unwrap();
+        tick_item(&conn, "c", "t", "r1", 0, "alice", TAP)
+            .await
+            .unwrap();
         assert_eq!(
             load_buy_checks(&conn, "c", "t", "r1").await.unwrap().len(),
             1,
@@ -4118,13 +4034,13 @@ mod tests {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice"]).await;
 
-        tick_item(&conn, "c", "themealdb", "52772", 2, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 2, "alice", TAP)
             .await
             .unwrap();
-        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice", TAP)
             .await
             .unwrap();
-        tick_item(&conn, "c", "themealdb", "99999", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "99999", 0, "alice", TAP)
             .await
             .unwrap();
 
@@ -4163,10 +4079,10 @@ mod tests {
         for channel in ["c1", "c2"] {
             started_plan(&conn, channel, &["alice"]).await;
         }
-        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice")
+        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice", TAP)
             .await
             .unwrap();
-        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice")
+        tick_item(&conn, "c1", "themealdb", "52772", 1, "alice", TAP)
             .await
             .unwrap();
 
@@ -4190,10 +4106,10 @@ mod tests {
     async fn a_second_ticker_takes_the_item_over() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob"]).await;
-        tick_item(&conn, "c", "themealdb", "52772", 3, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 3, "alice", TAP)
             .await
             .unwrap();
-        tick_item(&conn, "c", "themealdb", "52772", 3, "bob")
+        tick_item(&conn, "c", "themealdb", "52772", 3, "bob", TAP)
             .await
             .unwrap();
 
@@ -4231,10 +4147,10 @@ mod tests {
         .await
         .unwrap();
         started_plan(&conn, "c", &["4242", "5150"]).await;
-        tick_item(&conn, "c", "themealdb", "52772", 0, "4242")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "4242", TAP)
             .await
             .unwrap();
-        tick_item(&conn, "c", "themealdb", "52772", 1, "5150")
+        tick_item(&conn, "c", "themealdb", "52772", 1, "5150", TAP)
             .await
             .unwrap();
 
@@ -4269,7 +4185,7 @@ mod tests {
             .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
 
-        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice", TAP)
             .await
             .unwrap();
         assert!(
@@ -4281,7 +4197,7 @@ mod tests {
         );
 
         begin_session(&conn, "c").await.unwrap();
-        tick_item(&conn, "c", "themealdb", "52772", 0, "mallory")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "mallory", TAP)
             .await
             .unwrap();
         assert!(
@@ -4292,7 +4208,7 @@ mod tests {
             "and a stranger with the channel id is not one of the shoppers"
         );
 
-        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice", TAP)
             .await
             .unwrap();
         let checks = load_buy_checks(&conn, "c", "themealdb", "52772")
@@ -4308,7 +4224,7 @@ mod tests {
     async fn only_a_decider_can_put_a_line_back() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob"]).await;
-        tick_item(&conn, "c", "themealdb", "52772", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "alice", TAP)
             .await
             .unwrap();
 
@@ -4338,10 +4254,10 @@ mod tests {
 
     /// The guard is in the write, not in the caller's read.
     ///
-    /// `set_buy_check` checks the roster and *then* writes — two round trips — so what
-    /// the write is judged against is the roster as it stands when it lands, not the
-    /// one its caller saw. Deleting the seat directly is that state arriving between
-    /// the two.
+    /// The event framework checks the roster at its choke point and *then* runs the
+    /// handler that writes — two round trips — so what the write is judged against is
+    /// the roster as it stands when it lands, not the one the guard saw. Deleting the
+    /// seat directly is that state arriving between the two.
     ///
     /// Today no API path can produce it: `remove_voter` refuses a departure after the
     /// start, and a claim cannot be written before it, so the two guards make each
@@ -4359,7 +4275,7 @@ mod tests {
         .await
         .unwrap();
 
-        tick_item(&conn, "c", "themealdb", "52772", 0, "bob")
+        tick_item(&conn, "c", "themealdb", "52772", 0, "bob", TAP)
             .await
             .unwrap();
         assert!(
@@ -4463,7 +4379,7 @@ mod tests {
             "onion covers Onions and salt covers Salt; chicken and spring onions are not in this pantry"
         );
 
-        write_seed(&conn, "c", "themealdb", "52795", &preticks)
+        write_seed(&conn, "c", "themealdb", "52795", &preticks, TAP)
             .await
             .unwrap();
         let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
@@ -4537,7 +4453,7 @@ mod tests {
         assert!(!buy_list_seeded(&conn, "c", "themealdb", "52795")
             .await
             .unwrap());
-        write_seed(&conn, "c", "themealdb", "52795", &preticks)
+        write_seed(&conn, "c", "themealdb", "52795", &preticks, TAP)
             .await
             .unwrap();
         assert!(buy_list_seeded(&conn, "c", "themealdb", "52795")
@@ -4568,11 +4484,12 @@ mod tests {
             "themealdb",
             "52795",
             &[(0usize, "salt".to_string())],
+            TAP,
         )
         .await
         .unwrap();
 
-        tick_item(&conn, "c", "themealdb", "52795", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52795", 0, "alice", TAP)
             .await
             .unwrap();
         let checks = load_buy_checks(&conn, "c", "themealdb", "52795")
@@ -4592,7 +4509,7 @@ mod tests {
     async fn the_seed_does_not_overwrite_a_persons_tick() {
         let conn = conn().await;
         stocked_plan(&conn, "c", &["salt"]).await;
-        tick_item(&conn, "c", "themealdb", "52795", 0, "alice")
+        tick_item(&conn, "c", "themealdb", "52795", 0, "alice", TAP)
             .await
             .unwrap();
         write_seed(
@@ -4601,6 +4518,7 @@ mod tests {
             "themealdb",
             "52795",
             &[(0usize, "salt".to_string())],
+            TAP,
         )
         .await
         .unwrap();
@@ -4619,7 +4537,7 @@ mod tests {
         let conn = conn().await;
         stocked_plan(&conn, "c1", &["salt"]).await;
         stocked_plan(&conn, "c2", &["salt"]).await;
-        write_seed(&conn, "c1", "themealdb", "52795", &[])
+        write_seed(&conn, "c1", "themealdb", "52795", &[], TAP)
             .await
             .unwrap();
 
@@ -4646,7 +4564,7 @@ mod tests {
     async fn a_seed_that_matches_nothing_is_still_a_seed() {
         let conn = conn().await;
         stocked_plan(&conn, "c", &["saffron"]).await;
-        write_seed(&conn, "c", "themealdb", "52795", &[])
+        write_seed(&conn, "c", "themealdb", "52795", &[], TAP)
             .await
             .unwrap();
         assert!(buy_list_seeded(&conn, "c", "themealdb", "52795")
@@ -4688,6 +4606,7 @@ mod tests {
             "themealdb",
             "52795",
             &[(0usize, "salt".to_string())],
+            TAP,
         )
         .await
         .unwrap();
@@ -4720,10 +4639,10 @@ mod tests {
     async fn the_pantry_seed_only_runs_for_the_recipe_the_plan_decided() {
         let conn = conn().await;
         stocked_plan(&conn, "c", &["salt"]).await;
-        record_vote(&conn, "c", "themealdb", "52772", "alice", true)
+        record_vote(&conn, "c", "themealdb", "52772", "alice", true, TAP)
             .await
             .unwrap();
-        decide_if_agreed(&conn, "c", "themealdb", "52772")
+        decide_if_agreed(&conn, "c", "themealdb", "52772", TAP)
             .await
             .unwrap()
             .expect("alice is the whole roster, so her yes decides");
@@ -4734,6 +4653,7 @@ mod tests {
             "themealdb",
             "52795",
             &[(0usize, "salt".to_string())],
+            TAP,
         )
         .await
         .unwrap();
@@ -4757,6 +4677,7 @@ mod tests {
             "themealdb",
             "52772",
             &[(0usize, "salt".to_string())],
+            TAP,
         )
         .await
         .unwrap();
@@ -4800,16 +4721,16 @@ mod tests {
     async fn the_tally_names_the_yes_voters() {
         let conn = conn().await;
         started_plan(&conn, "c", &["alice", "bob", "carol"]).await;
-        record_vote(&conn, "c", "t", "a", "alice", true)
+        record_vote(&conn, "c", "t", "a", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "a", "bob", true)
+        record_vote(&conn, "c", "t", "a", "bob", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "a", "carol", false)
+        record_vote(&conn, "c", "t", "a", "carol", false, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "b", "alice", false)
+        record_vote(&conn, "c", "t", "b", "alice", false, TAP)
             .await
             .unwrap();
 
@@ -4827,7 +4748,7 @@ mod tests {
 
         // Changing your mind moves you out of the list, because a vote is a current
         // call rather than an append (`record_vote`).
-        record_vote(&conn, "c", "t", "a", "bob", false)
+        record_vote(&conn, "c", "t", "a", "bob", false, TAP)
             .await
             .unwrap();
         let (_, rows) = load_tally(&conn, "c").await.unwrap();
@@ -4965,14 +4886,14 @@ mod tests {
             seat_voter(&conn, "c", who).await.unwrap();
         }
         begin_session(&conn, "c").await.unwrap();
-        record_vote(&conn, "c", "t", "r1", "alice", true)
+        record_vote(&conn, "c", "t", "r1", "alice", true, TAP)
             .await
             .unwrap();
-        record_vote(&conn, "c", "t", "r1", "bob", true)
+        record_vote(&conn, "c", "t", "r1", "bob", true, TAP)
             .await
             .unwrap();
         // Carol's veto — the one a departure used to be able to release.
-        record_vote(&conn, "c", "t", "r1", "carol", false)
+        record_vote(&conn, "c", "t", "r1", "carol", false, TAP)
             .await
             .unwrap();
 
@@ -5280,6 +5201,650 @@ mod tests {
         );
     }
 
+    // ---- the events migrate onto the framework (#209) ------------------------
+
+    /// A connection whose clock has been **measured**: `rtt` there and back, with this
+    /// participant's clock `offset` ahead of the shared timeline. The same fixture
+    /// `events`' own tests use, restated here because these tests are about what a
+    /// migrated event does with the number rather than about how it is arrived at.
+    fn measured(rtt: i64, offset: i64) -> crate::events::ClockOffset {
+        let mut c = crate::events::ClockOffset::new();
+        let t0 = 1_000_000;
+        c.ping_sent(t0);
+        assert!(c.pong(t0, t0 + rtt / 2 + offset, t0 + rtt));
+        c
+    }
+
+    /// Raise an event the way a client does: through the framework's one choke point,
+    /// with an unmeasured connection tapping at `at` and the frame arriving at `at`.
+    async fn raise(
+        conn: &Connection,
+        channel: &str,
+        who: &str,
+        at: i64,
+        payload: crate::events::SessionEvent,
+    ) -> Vec<ServerMsg> {
+        crate::events::ingest(
+            conn,
+            channel,
+            who,
+            &crate::events::ClockOffset::new(),
+            at,
+            at,
+            payload,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn a_vote(source: &str, id: &str, vote: bool) -> crate::events::SessionEvent {
+        crate::events::SessionEvent::Vote {
+            source: source.to_owned(),
+            id: id.to_owned(),
+            vote,
+        }
+    }
+
+    fn a_tick(source: &str, id: &str, index: i64, checked: bool) -> crate::events::SessionEvent {
+        crate::events::SessionEvent::BuyTick {
+            source: source.to_owned(),
+            id: id.to_owned(),
+            index,
+            checked,
+        }
+    }
+
+    /// One `INTEGER` column of one row, or `None` for no row and for a NULL.
+    async fn number(
+        conn: &Connection,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+    ) -> Option<i64> {
+        let mut rows = conn.query(sql, params).await.unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .and_then(|r| r.get::<Option<i64>>(0).unwrap())
+    }
+
+    async fn swipe_instant(conn: &Connection, channel: &str, id: &str, who: &str) -> Option<i64> {
+        number(
+            conn,
+            "SELECT created_at_ms FROM votes
+              WHERE channel_id = ?1 AND id = ?2 AND voter_id = ?3",
+            libsql::params![channel, id, who],
+        )
+        .await
+    }
+
+    async fn tick_instant(conn: &Connection, channel: &str, id: &str, index: i64) -> Option<i64> {
+        number(
+            conn,
+            "SELECT created_at_ms FROM buy_checks
+              WHERE channel_id = ?1 AND id = ?2 AND ingredient_index = ?3",
+            libsql::params![channel, id, index],
+        )
+        .await
+    }
+
+    // ---- when it happened ----------------------------------------------------
+
+    /// **A swipe is dated by the swipe.** The instant recorded is the one the initiator
+    /// raised the event at, not the moment its row happened to be written.
+    ///
+    /// The two are different columns and both are kept: `created_at` is still the row's
+    /// own `unixepoch()` write time (migration 0028 is additive), and a thousandfold
+    /// gap between them is exactly what says they are not the same fact.
+    #[tokio::test]
+    async fn a_swipe_is_dated_by_the_swipe_and_not_by_its_row() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let tapped = 1_699_999_123_456;
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true, tapped)
+            .await
+            .unwrap());
+        assert_eq!(swipe_instant(&conn, "c", "r1", "alice").await, Some(tapped));
+
+        let written = number(
+            &conn,
+            "SELECT created_at FROM votes WHERE channel_id = ?1 AND id = ?2",
+            libsql::params!["c", "r1"],
+        )
+        .await
+        .expect("the row's own write time is still recorded");
+        assert!(
+            written * 1000 != tapped,
+            "the two columns are two facts, at two resolutions"
+        );
+    }
+
+    /// A re-swipe is a person's **current** call, so the instant moves with it — the
+    /// same rule `vote` itself follows, and the reason this is not an append-only log.
+    #[tokio::test]
+    async fn a_re_swipe_moves_the_instant_with_the_call() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", true, 1_000)
+            .await
+            .unwrap());
+        assert!(record_vote(&conn, "c", "t", "r1", "alice", false, 9_000)
+            .await
+            .unwrap());
+        assert_eq!(swipe_instant(&conn, "c", "r1", "alice").await, Some(9_000));
+    }
+
+    /// **A tick is dated by the tap**, and a take-over re-dates it: the row records who
+    /// has the flour *now* and when their hand closed on it, which is the one claim it
+    /// has ever made.
+    #[tokio::test]
+    async fn a_tick_is_dated_by_the_tap_and_a_take_over_re_dates_it() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+
+        tick_item(&conn, "c", "t", "r1", 0, "alice", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(tick_instant(&conn, "c", "r1", 0).await, Some(1_000));
+
+        tick_item(&conn, "c", "t", "r1", 0, "bob", 7_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            tick_instant(&conn, "c", "r1", 0).await,
+            Some(7_000),
+            "last writer wins, and the instant is the winner's"
+        );
+    }
+
+    /// **The plan decided when the deciding swipe happened**, not when the UPDATE ran.
+    ///
+    /// A decision is the one event nobody raises: it is a consequence of the last yes,
+    /// so its instant is that yes's instant and there is nothing else it could honestly
+    /// be. `decided_at` — the column the win condition's `decided_at IS NULL` is asked
+    /// about — is untouched beside it.
+    #[tokio::test]
+    async fn the_decision_happened_when_the_deciding_swipe_did() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+
+        record_vote(&conn, "c", "t", "r1", "alice", true, 1_000)
+            .await
+            .unwrap();
+        assert!(decide_if_agreed(&conn, "c", "t", "r1", 1_000)
+            .await
+            .unwrap()
+            .is_none());
+
+        let deciding = 1_699_999_555_000;
+        record_vote(&conn, "c", "t", "r1", "bob", true, deciding)
+            .await
+            .unwrap();
+        let decided = decide_if_agreed(&conn, "c", "t", "r1", deciding)
+            .await
+            .unwrap()
+            .expect("the second yes completes it");
+        assert_eq!(
+            number(
+                &conn,
+                "SELECT decided_at_ms FROM pick_sessions WHERE channel_id = ?1",
+                libsql::params!["c"],
+            )
+            .await,
+            Some(deciding),
+        );
+        assert!(
+            decided.decided_at > 0,
+            "and the second-resolution column the guard is written against still stands"
+        );
+    }
+
+    /// **The seed is the server's own act**, so it is stamped by the server's clock —
+    /// which *is* the shared timeline, so there is nothing to normalise and nobody
+    /// whose drift it would be. Nobody taps a pre-tick, and dating the kitchen's
+    /// cupboard by the phone that happened to open the list would be a fiction.
+    #[tokio::test]
+    async fn the_seed_is_stamped_by_the_server_and_not_by_a_phone() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        corpus_recipe(
+            &conn,
+            "themealdb",
+            "52795",
+            &[("Salt", Some("salt")), ("Chicken", Some("chicken"))],
+        )
+        .await;
+
+        let before = crate::events::server_now_ms();
+        // A tap from a phone whose clock is a decade out. The seed runs as part of
+        // handling it, and takes nothing from it.
+        let frames = raise(
+            &conn,
+            "c",
+            "alice",
+            1_000_000,
+            a_tick("themealdb", "52795", 1, true),
+        )
+        .await;
+        assert_eq!(frames.len(), 1);
+        let after = crate::events::server_now_ms();
+
+        let seeded = number(
+            &conn,
+            "SELECT seeded_at_ms FROM buy_seeds WHERE channel_id = ?1 AND id = ?2",
+            libsql::params!["c", "52795"],
+        )
+        .await
+        .expect("the seed recorded when it ran");
+        assert!(
+            (before..=after).contains(&seeded),
+            "{seeded} is not the server's own clock ({before}..={after})"
+        );
+        let pretick = tick_instant(&conn, "c", "52795", 0)
+            .await
+            .expect("the pantry pre-ticked the salt");
+        assert!((before..=after).contains(&pretick));
+        assert_eq!(
+            tick_instant(&conn, "c", "52795", 1).await,
+            Some(1_000_000),
+            "while the person's own tick keeps the instant they tapped at"
+        );
+    }
+
+    // ---- normalisation, at the choke point -----------------------------------
+
+    /// **The point of the migration.** A swipe from a phone whose clock is wildly wrong
+    /// is recorded at the same shared instant as one from a phone that is right —
+    /// because the framework normalises `at` through that participant's measured drift
+    /// before any handler sees it.
+    #[tokio::test]
+    async fn a_wrong_clock_lands_a_swipe_at_the_right_instant() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+
+        let real = 1_700_000_000_000;
+        let right = measured(40, 0);
+        let wrong = measured(40, 42 * 60 * 1000); // 42 minutes fast
+
+        crate::events::ingest(
+            &conn,
+            "c",
+            "alice",
+            &right,
+            real,
+            real,
+            a_vote("t", "r1", true),
+        )
+        .await
+        .unwrap();
+        crate::events::ingest(
+            &conn,
+            "c",
+            "bob",
+            &wrong,
+            real + 42 * 60 * 1000,
+            real,
+            a_vote("t", "r1", true),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(swipe_instant(&conn, "c", "r1", "alice").await, Some(real));
+        assert_eq!(
+            swipe_instant(&conn, "c", "r1", "bob").await,
+            Some(real),
+            "two phones, one moment — the drift cancels"
+        );
+    }
+
+    /// **The receipt is not the answer.** The same swipe delivered promptly and
+    /// delivered a minute late is one instant: latency between the tap and the frame
+    /// arriving must not move what the plan records.
+    #[tokio::test]
+    async fn latency_between_the_swipe_and_the_receipt_does_not_move_it() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        let clock = measured(40, 0);
+
+        let tapped = 1_700_000_000_000;
+        crate::events::ingest(
+            &conn,
+            "c",
+            "alice",
+            &clock,
+            tapped,
+            tapped + 60_000,
+            a_vote("t", "r1", true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(swipe_instant(&conn, "c", "r1", "alice").await, Some(tapped));
+    }
+
+    /// And a tick carries the normalised instant the same way — the framework does this
+    /// once, for every kind, which is the whole reason it is a framework.
+    #[tokio::test]
+    async fn a_tick_carries_the_normalised_instant_too() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        let clock = measured(40, 5 * 60 * 1000); // five minutes fast
+
+        let real = 1_700_000_000_000;
+        crate::events::ingest(
+            &conn,
+            "c",
+            "alice",
+            &clock,
+            real + 5 * 60 * 1000,
+            real,
+            a_tick("t", "r1", 3, true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tick_instant(&conn, "c", "r1", 3).await, Some(real));
+    }
+
+    // ---- the guard refuses exactly what it refused before ---------------------
+
+    /// A signed-in stranger holding the invite link writes no vote and the room is told
+    /// nothing — the refusal #175 put in the write, now also asked once at the choke
+    /// point (#209).
+    #[tokio::test]
+    async fn a_non_member_swipes_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let frames = raise(&conn, "c", "mallory", 1_000, a_vote("t", "r1", true)).await;
+        assert!(frames.is_empty(), "nothing written, so nothing announced");
+        assert_eq!(swipe_instant(&conn, "c", "r1", "mallory").await, None);
+    }
+
+    /// **A watcher watches** (#180/#200). Somebody who followed the link after the
+    /// swiping began may read everything and may write nothing — and the room does not
+    /// hear from them at all, which is the half the choke point owns: a frame announced
+    /// for a write that never happened would put a phantom yes on every open client.
+    #[tokio::test]
+    async fn a_watcher_swipes_nothing_and_the_room_hears_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        // The plan is under way and the deciders are swiping.
+        assert_eq!(
+            raise(&conn, "c", "alice", 1_000, a_vote("t", "r1", true))
+                .await
+                .len(),
+            1
+        );
+
+        let frames = raise(&conn, "c", "watcher", 2_000, a_vote("t", "r1", true)).await;
+        assert!(frames.is_empty());
+        let (_, rows) = load_tally(&conn, "c").await.unwrap();
+        assert_eq!(row(&rows, "r1").yes, 1, "the watcher is not in the tally");
+    }
+
+    /// A lobby decides nothing, so it admits no swipe: the roster is still open, and a
+    /// vote cast into it would be counted against a membership that can still change.
+    #[tokio::test]
+    async fn a_lobby_admits_no_swipe() {
+        let conn = conn().await;
+        super::test_support::lobby(&conn, "c", &["alice"]).await;
+
+        let frames = raise(&conn, "c", "alice", 1_000, a_vote("t", "r1", true)).await;
+        assert!(frames.is_empty());
+        assert_eq!(swipe_instant(&conn, "c", "r1", "alice").await, None);
+    }
+
+    /// A decided plan's deck is over, so a swipe arriving after it is refused rather
+    /// than counted (#201) — the half of the vote's precondition the framework's guard
+    /// deliberately does **not** cover, because shopping happens after the decision and
+    /// one predicate for both would make the decision close the shop it opened.
+    #[tokio::test]
+    async fn a_decided_plan_admits_no_swipe() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        assert_eq!(
+            raise(&conn, "c", "alice", 1_000, a_vote("t", "r1", true))
+                .await
+                .len(),
+            2,
+            "one yes from a roster of one decides it: the vote, then the decision"
+        );
+
+        let frames = raise(&conn, "c", "alice", 2_000, a_vote("t", "r2", true)).await;
+        assert!(frames.is_empty());
+        assert_eq!(swipe_instant(&conn, "c", "r2", "alice").await, None);
+    }
+
+    /// **A watcher's shopping tick is refused, and the room is told nothing** — the
+    /// test that tells the choke point apart from the write's own predicate.
+    ///
+    /// A tick announces the whole list *whether or not the write changed a row*, so if
+    /// the guard stopped being asked here, `tick_item`'s predicate would still keep the
+    /// row out and the room would still be sent a frame for a write that never
+    /// happened. The two are not redundant, and this is where that shows.
+    #[tokio::test]
+    async fn a_watcher_ticks_nothing_and_the_room_hears_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let frames = raise(&conn, "c", "watcher", 1_000, a_tick("t", "r1", 0, true)).await;
+        assert!(
+            frames.is_empty(),
+            "refused at the choke point, so there is no frame at all"
+        );
+        assert!(load_buy_checks(&conn, "c", "t", "r1")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// And a watcher cannot clear somebody else's claim either: a guarded claim with an
+    /// unguarded release is not guarded.
+    #[tokio::test]
+    async fn a_watcher_unticks_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        raise(&conn, "c", "alice", 1_000, a_tick("t", "r1", 0, true)).await;
+
+        let frames = raise(&conn, "c", "watcher", 2_000, a_tick("t", "r1", 0, false)).await;
+        assert!(frames.is_empty());
+        assert_eq!(
+            load_buy_checks(&conn, "c", "t", "r1").await.unwrap().len(),
+            1,
+            "alice still has it"
+        );
+    }
+
+    /// A plan still in its lobby has no list to shop (#175).
+    #[tokio::test]
+    async fn a_lobby_admits_no_tick() {
+        let conn = conn().await;
+        super::test_support::lobby(&conn, "c", &["alice"]).await;
+
+        let frames = raise(&conn, "c", "alice", 1_000, a_tick("t", "r1", 0, true)).await;
+        assert!(frames.is_empty());
+        assert!(load_buy_checks(&conn, "c", "t", "r1")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A negative index names no line of any recipe. The guard passes — this is a
+    /// decider in a started plan — so the room *is* told the list, and the list is the
+    /// truth: empty.
+    #[tokio::test]
+    async fn a_negative_index_writes_no_row() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let frames = raise(&conn, "c", "alice", 1_000, a_tick("t", "r1", -1, true)).await;
+        match frames.as_slice() {
+            [ServerMsg::Buy { checks, .. }] => assert!(checks.is_empty()),
+            other => panic!("expected one buy frame, got {other:?}"),
+        }
+    }
+
+    // ---- what the room is told ------------------------------------------------
+
+    /// **The deciding swipe announces the vote and then the decision, in that order.**
+    ///
+    /// Both frames come out of one event, and the order is the one the socket loop held
+    /// before the migration: a client reading its frames in sequence has the vote in its
+    /// tally before it is told the deck is over, so the screen it lands on is never a
+    /// decision against a tally that has not caught up.
+    #[tokio::test]
+    async fn the_deciding_swipe_announces_the_vote_and_then_the_decision() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+
+        let frames = raise(&conn, "c", "alice", 1_000, a_vote("t", "r1", true)).await;
+        match frames.as_slice() {
+            [ServerMsg::Vote {
+                voter, id, vote, ..
+            }] => {
+                assert_eq!((voter.as_str(), id.as_str(), *vote), ("alice", "r1", true));
+            }
+            other => panic!("expected one vote frame, got {other:?}"),
+        }
+
+        let frames = raise(&conn, "c", "bob", 2_000, a_vote("t", "r1", true)).await;
+        match frames.as_slice() {
+            [ServerMsg::Vote { voter, .. }, ServerMsg::Decided { id, .. }] => {
+                assert_eq!(voter, "bob");
+                assert_eq!(id, "r1");
+            }
+            other => panic!("expected the vote then the decision, got {other:?}"),
+        }
+
+        // And only once: a later yes on the same recipe cannot re-announce it, because
+        // a decided plan admits no more votes.
+        assert!(raise(&conn, "c", "alice", 3_000, a_vote("t", "r1", true))
+            .await
+            .is_empty());
+    }
+
+    /// A tick announces the room's **whole** list, and announces it even when the write
+    /// changed nothing — the `Buy`/`Timers` rule (#131). A client that missed a frame is
+    /// corrected by the next one instead of drifting, and a tap the write refused gets
+    /// the basket that actually exists rather than being left showing a claim nobody
+    /// holds.
+    #[tokio::test]
+    async fn a_tick_announces_the_whole_list_even_when_nothing_moved() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        test_support::decide(&conn, "c", "themealdb", "52772").await;
+
+        // A tick for the recipe the plan decided against: the write's own predicate
+        // refuses it (#201), and the room is still told what is in the basket.
+        let frames = raise(
+            &conn,
+            "c",
+            "alice",
+            1_000,
+            a_tick("themealdb", "99999", 0, true),
+        )
+        .await;
+        match frames.as_slice() {
+            [ServerMsg::Buy { source, checks, .. }] => {
+                assert_eq!(source, "themealdb");
+                assert!(checks.is_empty(), "refused, and the truth said out loud");
+            }
+            other => panic!("expected one buy frame, got {other:?}"),
+        }
+    }
+
+    /// **The seed runs before the tick**, exactly as it did when a tick was an HTTP
+    /// handler: a tap can be the first thing that ever touches a list, and it has to
+    /// land *on top of* the pantry's answer rather than be overwritten by a seed that
+    /// arrives after it.
+    #[tokio::test]
+    async fn a_first_tick_lands_on_top_of_the_pantry() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        corpus_recipe(&conn, "themealdb", "52795", &[("Salt", Some("salt"))]).await;
+
+        let frames = raise(
+            &conn,
+            "c",
+            "alice",
+            1_000,
+            a_tick("themealdb", "52795", 0, true),
+        )
+        .await;
+        match frames.as_slice() {
+            [ServerMsg::Buy { checks, .. }] => {
+                assert_eq!(checks.len(), 1);
+                assert_eq!(
+                    checks[0].by.as_ref().map(|v| v.telegram_user_id.as_str()),
+                    Some("alice"),
+                    "the tap wins; the pre-tick it would have got is nobody's claim"
+                );
+                assert_eq!(checks[0].pantry, None);
+            }
+            other => panic!("expected one buy frame, got {other:?}"),
+        }
+        assert!(
+            buy_list_seeded(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap(),
+            "and the seed still ran and recorded that it did"
+        );
+    }
+
+    /// **The migrated kinds, as the browser writes them** — the shape `$lib/pick` and
+    /// `$lib/session-events` mirror.
+    ///
+    /// Pinned for the reason the timer wire is: a rename on either side of this is
+    /// invisible to every other gate in the project. Rust compiles, `svelte-check` is
+    /// happy, the stories render, and the only symptom is a swipe that never counts.
+    #[test]
+    fn the_migrated_event_kinds_read_as_the_browser_writes_them() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"event","at":1700000000000,
+                 "event":{"kind":"vote","source":"themealdb","id":"52795","vote":true}}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::Event { at, event } => {
+                assert_eq!(at, 1_700_000_000_000);
+                assert_eq!(event, a_vote("themealdb", "52795", true));
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"event","at":1700000000001,
+                 "event":{"kind":"buy_tick","source":"themealdb","id":"52795",
+                          "index":3,"checked":false}}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::Event { at, event } => {
+                assert_eq!(at, 1_700_000_000_001);
+                assert_eq!(event, a_tick("themealdb", "52795", 3, false));
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        // The old frames are **gone**, not aliased: a client that still sends one is
+        // refused rather than silently having its swipe dropped into a branch that no
+        // longer exists.
+        assert!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"vote","source":"themealdb","id":"52795","vote":true}"#
+            )
+            .is_err(),
+            "the pre-#209 vote frame is not a frame any more"
+        );
+
+        // And an initiator is still never on the wire: `deny_unknown_fields` refuses a
+        // payload claiming to be somebody else rather than quietly ignoring the claim.
+        assert!(serde_json::from_str::<crate::events::SessionEvent>(
+            r#"{"kind":"vote","source":"t","id":"1","vote":true,"voter":"mallory"}"#
+        )
+        .is_err());
+    }
+
     // ---- a kitchen's meals (#207) -------------------------------------------
 
     /// A plan for `kitchen`, called at `at`, with `who` gathered in it. `at` is stated
@@ -5400,11 +5965,11 @@ mod tests {
         kitchen_plan(&conn, "decided", "k1", 1_000, &["alice", "bob"]).await;
         begin_session(&conn, "decided").await.unwrap();
         for who in ["alice", "bob"] {
-            record_vote(&conn, "decided", "themealdb", "52795", who, true)
+            record_vote(&conn, "decided", "themealdb", "52795", who, true, TAP)
                 .await
                 .unwrap();
         }
-        decide_if_agreed(&conn, "decided", "themealdb", "52795")
+        decide_if_agreed(&conn, "decided", "themealdb", "52795", TAP)
             .await
             .unwrap()
             .expect("both of two agreeing decides it");
@@ -5455,10 +6020,10 @@ mod tests {
         }
         kitchen_plan(&conn, "c", "k1", 1_000, &["alice"]).await;
         begin_session(&conn, "c").await.unwrap();
-        record_vote(&conn, "c", "themealdb", "52820", "alice", true)
+        record_vote(&conn, "c", "themealdb", "52820", "alice", true, TAP)
             .await
             .unwrap();
-        decide_if_agreed(&conn, "c", "themealdb", "52820")
+        decide_if_agreed(&conn, "c", "themealdb", "52820", TAP)
             .await
             .unwrap()
             .expect("the only decider agreed");
@@ -5484,10 +6049,10 @@ mod tests {
         let conn = conn().await;
         kitchen_plan(&conn, "c", "k1", 1_000, &["alice"]).await;
         begin_session(&conn, "c").await.unwrap();
-        record_vote(&conn, "c", "themealdb", "52795", "alice", true)
+        record_vote(&conn, "c", "themealdb", "52795", "alice", true, TAP)
             .await
             .unwrap();
-        decide_if_agreed(&conn, "c", "themealdb", "52795")
+        decide_if_agreed(&conn, "c", "themealdb", "52795", TAP)
             .await
             .unwrap()
             .expect("the only decider agreed");

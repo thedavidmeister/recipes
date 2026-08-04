@@ -5,7 +5,6 @@
     getChecks,
     loadChecks,
     saveChecks,
-    setCheck,
     type BuyCheck,
   } from "$lib/buy";
   import { NOBODY, type Tick } from "$lib/shopping";
@@ -26,6 +25,13 @@
    * dinner see one list — and each ticked line says who got it. A tick is a write to
    * the session and an announcement to its room, so a peer's tick lands here without
    * a refresh.
+   *
+   * Since #209 a tick is **an event on that same room's socket**, not a `POST` beside
+   * it: one path in for every session write (`$lib/session-events`), carrying the
+   * instant this device tapped rather than the instant a row happened to be written.
+   * So the socket below is no longer only how a peer's tick arrives — it is how this
+   * screen's own tick leaves, and the `buy` frame that comes back is the one answer
+   * both of them land on.
    *
    * The exception is a decision with no session behind it: nothing to write to and
    * nobody to attribute to, so the list falls back to this device's own
@@ -53,11 +59,21 @@
   // else (last writer wins), so a delta would be a lie.
   let checks = $state<BuyCheck[]>([]);
   // Taps that have not been confirmed yet: index → the state this client asked for.
-  // Kept beside the server's answer rather than folded into it, so a failure has
-  // something true to fall back to and never has to guess who ticked what.
+  // Kept beside the server's answer rather than folded into it, so the screen never
+  // has to guess who ticked what — the row shows as got-and-unattributed until the
+  // room says whose it is.
   let inFlight = $state<Record<number, boolean>>({});
+  // The plan's room. Held here rather than only inside the effect that opens it,
+  // because a tap raises an event on it (#209) — the socket is this page's way out as
+  // well as its way in.
+  let client = $state<PickClient | null>(null);
   // The device-local list, for a decision with no session to attribute to.
   let localChecked = $state<Record<number, true>>({});
+  // Why the shared list could not be opened, when it could not be. Since #209 that is
+  // the only thing it ever carries: reading the list is still an answerable request, so
+  // its failure still has a sentence, while a *tick* is an event on a socket the server
+  // never answers a frame on — a refusal there is silent (#179/#180) and what the screen
+  // is told instead is the truth, in the room's next whole-list frame.
   let tickError = $state<string | undefined>();
 
   /**
@@ -116,34 +132,51 @@
     }
   });
 
-  // The meal's room, so a peer's tick lands here live — the same socket the pick
-  // uses, listening only for the frame this page is about.
+  // The meal's room: every tick's way out and every tick's way back, this screen's
+  // and everybody else's — the same socket the pick uses, listening only for the
+  // frame this page is about.
   $effect(() => {
     const r = list.data;
     if (!r?.channel) return;
-    const client = new PickClient(r.channel, {
+    const c = new PickClient(r.channel, {
       onBuy: (source, id, incoming) => {
         // Another recipe's list in the same meal is not this screen's business.
         if (source !== r.source || id !== r.id) return;
         checks = incoming;
+        // The room has stated the truth about this list, so nothing this client asked
+        // for is still in flight against it. The server sends the **whole** list on
+        // every tick it takes, including one its own predicate refused, so this is
+        // also how a refused tap goes back to what is actually in the basket.
+        inFlight = {};
       },
     });
-    client.start();
-    return () => client.stop();
+    c.start();
+    client = c;
+    return () => {
+      c.stop();
+      client = null;
+    };
   });
 
   /**
    * Tick or untick a line.
    *
-   * Optimistic, then confirmed: a tap has to feel like a tap in a supermarket
-   * aisle, so the row moves at once and the round trip catches up. If the write
-   * fails the row goes back to what the server last said and the reason is shown —
-   * a line that looks got but is not is how somebody comes home without the flour.
+   * Optimistic, then confirmed: a tap has to feel like a tap in a supermarket aisle,
+   * so the row moves at once and the round trip catches up. What confirms it is the
+   * room's own `buy` frame — the whole list, sent to everybody shopping this meal on
+   * every tick anyone takes — so this client's answer and its neighbour's are the same
+   * message, and a tap the server refused comes back as the basket that actually
+   * exists. A line that looks got but is not is how somebody comes home without the
+   * flour, so the truth always wins over the optimism.
+   *
+   * A tap with no open socket is dropped, exactly as a swipe is (`PickClient.event`):
+   * the durable record is the server's, and a tap that never left is a tap to make
+   * again. It is deliberately not queued for the reconnect — a tick replayed minutes
+   * later would claim a line somebody has since put in their own basket.
    */
-  async function toggle(index: number) {
+  function toggle(index: number) {
     const r = list.data;
     if (!r) return;
-    tickError = undefined;
 
     if (!r.channel) {
       const next = { ...localChecked };
@@ -156,16 +189,7 @@
 
     const want = !(index in ticks);
     inFlight = { ...inFlight, [index]: want };
-    try {
-      const l = await setCheck(r.channel, r.source, r.id, index, want);
-      checks = l.checks;
-    } catch (e) {
-      tickError =
-        e instanceof Error ? e.message : "Couldn't update the shopping list.";
-    } finally {
-      const { [index]: _done, ...rest } = inFlight;
-      inFlight = rest;
-    }
+    client?.tick(r.source, r.id, index, want);
   }
 </script>
 

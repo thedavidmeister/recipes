@@ -279,10 +279,22 @@ export class PickClient {
     return this.offsetMs;
   }
 
-  /** Send this client's yes/no on a recipe. Dropped silently if not connected —
-   * the durable record is the server's, and the user can re-swipe on reconnect. */
+  /** Send this client's yes/no on a recipe — **an event through the framework** since
+   * #209, so the swipe carries the instant it was swiped.
+   *
+   * Dropped silently if not connected, exactly as it was when it had its own frame: the
+   * durable record is the server's, and the user can re-swipe on reconnect. */
   vote(source: string, id: string, vote: boolean): void {
-    this.send({ type: "vote", source, id, vote });
+    this.event({ kind: "vote", source, id, vote });
+  }
+
+  /** Tick one line of the meal's shopping list off, or put it back (#131/#209).
+   *
+   * Was a `POST` that answered with the whole list; it is an event now, and the answer
+   * is the `buy` frame the server sends **the room** — which is the same list, reaching
+   * the tapper and everybody shopping beside them in one message instead of two. */
+  tick(source: string, id: string, index: number, checked: boolean): void {
+    this.event({ kind: "buy_tick", source, id, index, checked });
   }
 
   /**
