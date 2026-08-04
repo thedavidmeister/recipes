@@ -582,9 +582,9 @@
     const c = current;
     if (!c) return;
     // A watcher has no buttons to press, and this is the same sentence said where the
-    // frame would be sent: `record_vote` refuses the write and the socket has nowhere
-    // to answer, so a vote from here would be swallowed in silence rather than
-    // refused out loud — and it would still take the card off this client's deck,
+    // frame would be sent: the write is refused, and the socket answers with the plan's
+    // tally rather than with a reason (#222) — so a vote from here would be corrected
+    // and never explained, and it would still take the card off this client's deck,
     // which is a change nothing undoes.
     if (watching) return;
     recordSwipe();

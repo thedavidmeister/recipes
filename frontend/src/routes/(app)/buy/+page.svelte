@@ -11,7 +11,8 @@
     type BuyCheck,
   } from "$lib/buy";
   import { localTicks, sharedTicks, type Tick } from "$lib/shopping";
-  import { PickClient, type Voter } from "$lib/pick";
+  import { getLobby, PickClient, type Voter } from "$lib/pick";
+  import { isWatching } from "$lib/roster";
   import Buy from "$lib/components/Buy.svelte";
 
   /**
@@ -95,6 +96,45 @@
       : null,
   );
 
+  /**
+   * Who is shopping — the plan's roster, so this page can tell a shopper from a
+   * watcher (#222). `cook`'s query, keyed the same way and cached the same way: the
+   * lobby is immutable once the plan has started, so this is one read for the life of
+   * the screen.
+   */
+  const channel = $derived(list.data?.channel);
+  const lobby = resource(() => ({
+    queryKey: ["lobby", channel],
+    queryFn: () => (channel ? getLobby(channel) : Promise.resolve(null)),
+    enabled: !!channel,
+    staleTime: Infinity,
+  }));
+
+  /**
+   * **Watching, not shopping** (#200/#222) — and reachable here for the reason it is
+   * reachable on `cook`: the `decided` frame goes to the **room**, so somebody who
+   * opened a plan that had already started is carried out of the pick with the
+   * decision stashed like everybody else and lands on this list.
+   *
+   * The same three-way guard `pick` and `cook` use, out of the same pure module, so
+   * "watching" means one thing across the app rather than one thing per page. A
+   * watcher sees the list and every attribution on it and is offered no box to tap —
+   * and the server says so too (`events::Guard::SeatedInStartedPlan`), so this is the
+   * refusal said *before* the tap rather than the only place it is said. Since #222
+   * the server also answers a tap that gets made anyway, with the list as it actually
+   * is; this is what stops one being made.
+   *
+   * **Never true on the device-local path**: no plan means no roster, so `isWatching`
+   * answers `false` and a solo shopper's list is untouched, down to its button.
+   */
+  const watching = $derived(
+    isWatching({
+      started: lobby.data?.started,
+      roster: lobby.data?.voters,
+      viewer: session.data?.telegram_user_id,
+    }),
+  );
+
   // The shared list as the server last stated it — replaced whole on every answer
   // and every room announcement, never merged: a tick can take an item off somebody
   // else (last writer wins), so a delta would be a lie.
@@ -116,9 +156,10 @@
   let localMine = $state<Record<number, true>>({});
   // Why the shared list could not be opened, when it could not be. Since #209 that is
   // the only thing it ever carries: reading the list is still an answerable request, so
-  // its failure still has a sentence, while a *tick* is an event on a socket the server
-  // never answers a frame on — a refusal there is silent (#179/#180) and what the screen
-  // is told instead is the truth, in the room's next whole-list frame.
+  // its failure still has a sentence, while a *tick* is an event on a socket that
+  // carries no reasons — a refusal is answered with the list as it actually is (#222),
+  // never with a sentence about why, so what the screen is told is the truth rather than
+  // a complaint.
   let tickError = $state<string | undefined>();
 
   /**
@@ -187,10 +228,13 @@
         // Another recipe's list in the same meal is not this screen's business.
         if (source !== r.source || id !== r.id) return;
         checks = incoming;
-        // The room has stated the truth about this list, so nothing this client asked
-        // for is still in flight against it. The server sends the **whole** list on
-        // every tick it takes, including one its own predicate refused, so this is
-        // also how a refused tap goes back to what is actually in the basket.
+        // The truth about this list has been stated, so nothing this client asked for
+        // is still in flight against it. The server sends the **whole** list on every
+        // tick it takes, including one its own write predicate refused — and since
+        // #222 it sends this same frame down the raising socket alone when the
+        // *guard* refuses, which is the one case that used to come back as silence.
+        // Either way this is where a refused tap goes back to what is actually in the
+        // basket, colour and name with it.
         inFlight = {};
       },
       onStatus: (s) => {
@@ -246,6 +290,13 @@
   function toggle(index: number) {
     const r = list.data;
     if (!r) return;
+    // A watcher has no box to tap, and this is the same sentence said where the frame
+    // would be sent — `cook`'s `startTimer` and the pick's `vote` both say it here too.
+    // The server refuses the tick at its guard and answers with the list as it is
+    // (#222), so a tap raised from here would paint a claim and then take it away
+    // again; not raising it is the honest report of a tap that was never anyone's to
+    // make.
+    if (watching) return;
 
     if (!r.channel) {
       const next = { ...localChecked };
@@ -291,6 +342,9 @@
    */
   function startCook() {
     if (!list.data?.channel) return;
+    // And a watcher starts no cook either: `Guard::SeatedInDecidedPlan` refuses it, so
+    // the room would not move and neither would they (#200).
+    if (watching) return;
     client?.startCook();
   }
 </script>
@@ -301,6 +355,8 @@
   error={list.error}
   {ticks}
   {shared}
+  {watching}
+  roster={lobby.data?.voters ?? []}
   {tickError}
   onToggle={toggle}
   onCook={startCook}

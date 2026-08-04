@@ -185,9 +185,9 @@
     const step = r?.steps.find((s) => s.id === id);
     if (!r || !step || step.seconds == null) return;
     // A watcher has no buttons to press, and this is the same sentence said where the
-    // frame would be sent: the server refuses the write and the socket has nowhere to
-    // answer, so an event raised from here would be swallowed in silence rather than
-    // refused out loud.
+    // frame would be sent: the server refuses the write and answers with the plan's
+    // timers as they are (#222), never with a reason, so an event raised from here
+    // would be corrected rather than explained.
     if (watching) return;
     // Ask for Notification permission on the first start (gated behind the tap, never
     // on load) so a finished timer still notifies while the tab is backgrounded.

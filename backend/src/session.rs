@@ -1488,7 +1488,10 @@ async fn socket_loop(
     let mut keepalive = tokio::time::interval(Duration::from_secs(30));
     keepalive.tick().await; // the first tick fires immediately; consume it
 
-    loop {
+    // Labelled, because one arm writes to the sink from inside a `for` (#222's
+    // initiator-only frames) and a bare `break` there would leave the loop running on a
+    // socket that has already gone.
+    'socket: loop {
         tokio::select! {
             // A live vote from any peer (including this client's own echo) → forward.
             msg = rx.recv() => match msg {
@@ -1538,12 +1541,19 @@ async fn socket_loop(
                     // what came back to the room.
                     //
                     // The rules are the ones the vote's own arm used to hold here:
-                    // nothing is announced that was not written (an empty answer is a
-                    // refusal, and refusals on this socket are silent — #179/#180), and
-                    // a database fault leaves the plan as it was rather than announcing
-                    // a write that never happened.
+                    // nothing is announced that was not written, and a database fault
+                    // leaves the plan as it was rather than announcing a write that
+                    // never happened.
+                    //
+                    // **Two audiences, and the split is the framework's** (#222).
+                    // `room` is what happened and is broadcast; `initiator` is what is
+                    // *true*, and it goes down this socket alone, because a refusal is
+                    // not news to anybody else — nothing happened. This arm does not ask
+                    // which case it is in and has nothing to decide: it forwards one list
+                    // to the room and writes the other to its own sink, and an accepted
+                    // event simply has an empty second list.
                     Ok(ClientMsg::Event { at, event }) => {
-                        let frames = crate::events::ingest(
+                        let out = crate::events::ingest(
                             &db,
                             &channel,
                             &voter,
@@ -1554,10 +1564,17 @@ async fn socket_loop(
                         )
                         .await
                         .unwrap_or_default();
-                        for frame in frames {
+                        for frame in out.room {
                             if let Ok(txt) = serde_json::to_string(&frame) {
                                 // Err only means no receivers right now — harmless.
                                 let _ = tx.send(txt);
+                            }
+                        }
+                        for frame in out.initiator {
+                            if let Ok(txt) = serde_json::to_string(&frame) {
+                                if sink.send(Message::Text(txt.into())).await.is_err() {
+                                    break 'socket;
+                                }
                             }
                         }
                     }
@@ -3066,7 +3083,14 @@ pub(crate) async fn load_buy_checks(
 /// yeses. Plurality (rank by `yes`) is derived from this alone; consensus is
 /// `yes == deciders && no == 0`, and `deciders` is the **roster** on
 /// [`ServerMsg::Lobby`], not the voter count returned here (#181).
-async fn load_tally(conn: &Connection, channel: &str) -> anyhow::Result<(i64, Vec<TallyRow>)> {
+///
+/// `pub(crate)` because the event framework reads it too: it is the whole-state answer a
+/// refused vote is handed (`events::truth`, #222), and the frame is built from this one
+/// query wherever it is built so that two descriptions of a plan's votes cannot disagree.
+pub(crate) async fn load_tally(
+    conn: &Connection,
+    channel: &str,
+) -> anyhow::Result<(i64, Vec<TallyRow>)> {
     let mut prows = conn
         .query(
             "SELECT COUNT(DISTINCT voter_id) FROM votes WHERE channel_id = ?1",
@@ -6408,13 +6432,17 @@ mod tests {
 
     /// Raise an event the way a client does: through the framework's one choke point,
     /// with an unmeasured connection tapping at `at` and the frame arriving at `at`.
-    async fn raise(
+    ///
+    /// Answers with **both** audiences (#222) — what the room is told, and what the
+    /// device that raised it is told. Most tests below are about the room and use
+    /// [`raise`]; the ones about a refusal need the pair.
+    async fn raise_both(
         conn: &Connection,
         channel: &str,
         who: &str,
         at: i64,
         payload: crate::events::SessionEvent,
-    ) -> Vec<ServerMsg> {
+    ) -> crate::events::Ingested {
         crate::events::ingest(
             conn,
             channel,
@@ -6426,6 +6454,18 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// The same, narrowed to what the **room** hears — the answer these tests were
+    /// written against.
+    async fn raise(
+        conn: &Connection,
+        channel: &str,
+        who: &str,
+        at: i64,
+        payload: crate::events::SessionEvent,
+    ) -> Vec<ServerMsg> {
+        raise_both(conn, channel, who, at, payload).await.room
     }
 
     fn a_vote(source: &str, id: &str, vote: bool) -> crate::events::SessionEvent {
@@ -6821,7 +6861,7 @@ mod tests {
         let frames = raise(&conn, "c", "watcher", 1_000, a_tick("t", "r1", 0, true)).await;
         assert!(
             frames.is_empty(),
-            "refused at the choke point, so there is no frame at all"
+            "refused at the choke point, so the room is told nothing at all"
         );
         assert!(load_buy_checks(&conn, "c", "t", "r1")
             .await
@@ -6872,6 +6912,239 @@ mod tests {
         match frames.as_slice() {
             [ServerMsg::Buy { checks, .. }] => assert!(checks.is_empty()),
             other => panic!("expected one buy frame, got {other:?}"),
+        }
+    }
+
+    // ---- a refusal answers the refused device with the room's truth (#222) -----
+
+    /// **The bug this closed.** A refused tick used to be answered with nothing at all,
+    /// so a screen that had already painted the tap (#210/#219) was left holding a claim,
+    /// in somebody's colour, that no basket contained. Now the room still hears nothing —
+    /// nothing happened — and the device that raised it is handed the list as it is.
+    ///
+    /// **Both directions, because each is half the rule.** An answer broadcast to the
+    /// room would be an announcement of a non-event, and one sent nowhere is the bug.
+    #[tokio::test]
+    async fn a_refused_tick_answers_the_device_and_the_room_hears_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+        // Alice has the first line. That is the truth the refused device must be told.
+        raise(&conn, "c", "alice", 1_000, a_tick("t", "r1", 0, true)).await;
+
+        let out = raise_both(&conn, "c", "watcher", 2_000, a_tick("t", "r1", 1, true)).await;
+        assert!(
+            out.room.is_empty(),
+            "nothing happened, so the room is told nothing"
+        );
+        match out.initiator.as_slice() {
+            [ServerMsg::Buy { source, id, checks }] => {
+                assert_eq!((source.as_str(), id.as_str()), ("t", "r1"));
+                assert_eq!(checks.len(), 1, "the basket as it is, and no more");
+                assert_eq!(checks[0].index, 0, "alice's line, not the watcher's");
+                assert_eq!(
+                    checks[0].by.as_ref().unwrap().telegram_user_id,
+                    "alice",
+                    "attribution and all — this is the frame the screen re-converges on"
+                );
+            }
+            other => panic!("the refused device was told {other:?}"),
+        }
+    }
+
+    /// An **accepted** tick is untouched by any of this: the room is told, and there is
+    /// no second copy for the device that raised it — it hears the broadcast like every
+    /// other socket in the plan. The refusal answer is a refusal answer.
+    #[tokio::test]
+    async fn an_accepted_tick_tells_the_room_and_answers_nobody_privately() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let out = raise_both(&conn, "c", "alice", 1_000, a_tick("t", "r1", 0, true)).await;
+        match out.room.as_slice() {
+            [ServerMsg::Buy { checks, .. }] => {
+                assert_eq!(checks.len(), 1);
+                assert_eq!(checks[0].by.as_ref().unwrap().telegram_user_id, "alice");
+            }
+            other => panic!("the room was told {other:?}"),
+        }
+        assert!(
+            out.initiator.is_empty(),
+            "an accepted event says nothing privately"
+        );
+    }
+
+    /// **A refusal reads and never writes.** The accepted tick path seeds the plan's
+    /// pantry pre-ticks before it announces (#156); the refused path answers with the
+    /// same frame and must not run that write, or an event the plan rejected would
+    /// leave a row behind it.
+    ///
+    /// The accepted tap at the end is what makes the assertion above mean something: it
+    /// proves this fixture *can* seed, so the refusal not seeding is the refusal's doing
+    /// and not the fixture's.
+    #[tokio::test]
+    async fn a_refusal_writes_nothing_not_even_the_pantry_seed() {
+        let conn = conn().await;
+        stocked_plan(&conn, "c", &["salt"]).await;
+        corpus_recipe(&conn, "themealdb", "52795", &[("Salt", Some("salt"))]).await;
+
+        let out = raise_both(
+            &conn,
+            "c",
+            "watcher",
+            1_000,
+            a_tick("themealdb", "52795", 0, true),
+        )
+        .await;
+        assert!(out.room.is_empty());
+        match out.initiator.as_slice() {
+            [ServerMsg::Buy { checks, .. }] => assert!(
+                checks.is_empty(),
+                "and what is recorded is nothing, which is what it is told"
+            ),
+            other => panic!("the refused device was told {other:?}"),
+        }
+        assert!(
+            !buy_list_seeded(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap(),
+            "the refusal path is a read: the pantry seed did not run"
+        );
+
+        raise(
+            &conn,
+            "c",
+            "alice",
+            2_000,
+            a_tick("themealdb", "52795", 0, true),
+        )
+        .await;
+        assert!(
+            buy_list_seeded(&conn, "c", "themealdb", "52795")
+                .await
+                .unwrap(),
+            "while an accepted tick on the same list seeds it, as it always did"
+        );
+    }
+
+    /// **A refused swipe is answered with the tally** — the vote's whole-state frame,
+    /// and the very one a socket rehydrates a connection from.
+    ///
+    /// It is also what ended this kind's long-standing footnote. The choke point's guard
+    /// used to be *equivalent* to `record_vote`'s own predicate (both refuse, and the arm
+    /// announced nothing either way), so passing every vote at [`crate::events::ingest`]
+    /// was a mutation nothing could see. It is visible now: this frame stops arriving.
+    #[tokio::test]
+    async fn a_refused_swipe_is_answered_with_the_tally() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice", "bob"]).await;
+        raise(&conn, "c", "alice", 1_000, a_vote("t", "r1", true)).await;
+
+        let out = raise_both(&conn, "c", "watcher", 2_000, a_vote("t", "r1", true)).await;
+        assert!(out.room.is_empty(), "the room hears nothing");
+        match out.initiator.as_slice() {
+            [ServerMsg::Tally {
+                participants,
+                votes,
+            }] => {
+                assert_eq!(
+                    *participants, 1,
+                    "one person has swiped, and it is not the watcher"
+                );
+                assert_eq!(row(votes, "r1").yes, 1);
+            }
+            other => panic!("the refused device was told {other:?}"),
+        }
+    }
+
+    /// A refused cook is answered with the cook that **is** on — so a watcher who taps
+    /// "Let's cook!" on a room already at the stove is carried there by the truth rather
+    /// than left on a list nobody is shopping from.
+    #[tokio::test]
+    async fn a_refused_cook_is_answered_with_the_cook_that_is_on() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice"]).await;
+        cook_event(&conn, "c", "alice", TAP).await;
+
+        let out = cook_event_both(&conn, "c", "watcher", TAP + 60_000).await;
+        assert!(out.room.is_empty(), "the room hears nothing");
+        match out.initiator.as_slice() {
+            [ServerMsg::Cooking {
+                started_at,
+                started_by,
+            }] => {
+                assert_eq!(*started_at, TAP, "alice's tap, which no refusal moves");
+                assert_eq!(started_by.telegram_user_id, "alice");
+            }
+            other => panic!("the refused device was told {other:?}"),
+        }
+    }
+
+    /// **The one documented absence in the refusal table.** `Cooking` states *that* a
+    /// plan is cooking and since whose tap; a plan that is not cooking has no such fact,
+    /// and there is no "not cooking" frame to invent. So a refused cook on a plan at rest
+    /// is answered with nothing — which is honest here precisely because the refused
+    /// screen already shows what is true.
+    #[tokio::test]
+    async fn a_refused_cook_on_a_plan_at_rest_answers_nothing() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice"]).await;
+
+        let out = cook_event_both(&conn, "c", "watcher", TAP).await;
+        assert!(out.room.is_empty());
+        assert!(
+            out.initiator.is_empty(),
+            "no cook is recorded, so there is no frame that could state one"
+        );
+        assert_eq!(
+            load_cook(&conn, "c").await.unwrap(),
+            None,
+            "and the refusal recorded none either"
+        );
+    }
+
+    /// **The guard is byte for byte the guard it was** (#222 changed what a refusal
+    /// *says*, never who is refused).
+    ///
+    /// One table, over every kind and both answers, read off the same predicate the
+    /// choke point asks: a member of a started plan is admitted, a watcher is refused,
+    /// and the cook additionally wants a plan that has decided. Kept as one case rather
+    /// than five so that a kind added without a policy shows up as a missing row.
+    #[tokio::test]
+    async fn the_guard_admits_and_refuses_exactly_what_it_did_before() {
+        let conn = conn().await;
+        // A roster of two, so alice's yes below does not decide the plan out from under
+        // the cook's row: `SeatedInDecidedPlan` is the one policy in the table that
+        // would then read differently, and the point of the table is that it does not.
+        started_plan(&conn, "started", &["alice", "bob"]).await;
+        decided_plan(&conn, "decided", &["alice"]).await;
+
+        let timer = crate::events::SessionEvent::TimerStart {
+            source: "themealdb".into(),
+            id: "52795".into(),
+            step: 7,
+        };
+        let cook = crate::events::SessionEvent::CookStarted {};
+
+        // A seated member of a started plan: everything but the cook, which wants a
+        // decision as it always has.
+        for (plan, who, event, admitted) in [
+            ("started", "alice", a_vote("t", "r1", true), true),
+            ("started", "alice", a_tick("t", "r1", 0, true), true),
+            ("started", "alice", timer.clone(), true),
+            ("started", "alice", cook.clone(), false),
+            ("decided", "alice", cook.clone(), true),
+            // …and a watcher is refused every one of them, in both plans.
+            ("started", "watcher", a_vote("t", "r1", true), false),
+            ("started", "watcher", a_tick("t", "r1", 0, true), false),
+            ("started", "watcher", timer.clone(), false),
+            ("decided", "watcher", cook.clone(), false),
+        ] {
+            let out = raise_both(&conn, plan, who, 1_000, event.clone()).await;
+            assert_eq!(
+                !out.room.is_empty(),
+                admitted,
+                "{who} raising {event:?} in the {plan} plan"
+            );
         }
     }
 
@@ -7054,9 +7327,14 @@ mod tests {
             .expect("everybody said yes, so the plan decided");
     }
 
-    /// Raise a cook through the framework, as a browser does, and answer with the frames
-    /// the room is told.
-    async fn cook_event(conn: &Connection, channel: &str, who: &str, at: i64) -> Vec<ServerMsg> {
+    /// Raise a cook through the framework, as a browser does, and answer with both
+    /// audiences (#222).
+    async fn cook_event_both(
+        conn: &Connection,
+        channel: &str,
+        who: &str,
+        at: i64,
+    ) -> crate::events::Ingested {
         crate::events::ingest(
             conn,
             channel,
@@ -7068,6 +7346,11 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// The same, narrowed to what the room is told.
+    async fn cook_event(conn: &Connection, channel: &str, who: &str, at: i64) -> Vec<ServerMsg> {
+        cook_event_both(conn, channel, who, at).await.room
     }
 
     /// **The cook is recorded against the plan, and the room is told** — the two halves

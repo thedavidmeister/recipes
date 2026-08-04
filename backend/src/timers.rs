@@ -261,6 +261,7 @@ mod tests {
     use super::*;
     use crate::events::{ingest, ClockOffset, SessionEvent};
     use crate::session::test_support::{decide, started_plan};
+    use crate::session::ServerMsg;
 
     /// Chicken Handi's real stored reading is the fixture the frontend's stories use;
     /// what matters here is only that a step carries a duration and another does not.
@@ -513,7 +514,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(frames.len(), 1, "the room is told");
+        assert_eq!(frames.room.len(), 1, "the room is told");
+        assert!(
+            frames.initiator.is_empty(),
+            "and an accepted event answers its own device nothing beyond that"
+        );
         let timers = load(&conn, "c", "themealdb", "52795").await.unwrap();
         assert_eq!(
             timers[0].started_at,
@@ -525,6 +530,11 @@ mod tests {
 
     /// A watcher's event is refused at the framework's choke point: nothing written, and
     /// nothing announced — so no peer's screen so much as flickers.
+    ///
+    /// Their **own** screen is answered, with the plan's timers for that recipe as they
+    /// actually are (#222). Empty here, and that emptiness is the point: it is the frame
+    /// that takes a would-be countdown off the refused device rather than leaving one
+    /// running against a deadline nobody recorded.
     #[tokio::test]
     async fn the_framework_refuses_a_watcher_and_announces_nothing() {
         let conn = conn().await;
@@ -545,16 +555,24 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            frames.is_empty(),
-            "silence, as every refusal on this socket is"
+            frames.room.is_empty(),
+            "nothing happened, so the room hears nothing"
         );
+        match frames.initiator.as_slice() {
+            [ServerMsg::Timers { source, id, timers }] => {
+                assert_eq!((source.as_str(), id.as_str()), ("themealdb", "52795"));
+                assert!(timers.is_empty(), "and the truth is that no pot is on");
+            }
+            other => panic!("the refused device was told {other:?}"),
+        }
         assert!(load(&conn, "c", "themealdb", "52795")
             .await
             .unwrap()
             .is_empty());
     }
 
-    /// And cannot dismiss a running one.
+    /// And cannot dismiss a running one — nor take one off their own screen by being
+    /// refused: the answer is the pot that **is** on, not an empty list (#222).
     #[tokio::test]
     async fn the_framework_refuses_a_watchers_dismiss() {
         let conn = conn().await;
@@ -577,7 +595,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(frames.is_empty());
+        assert!(frames.room.is_empty(), "the room hears nothing");
+        match frames.initiator.as_slice() {
+            [ServerMsg::Timers { timers, .. }] => assert_eq!(
+                timers.len(),
+                1,
+                "and the refused device is told the timer is still running"
+            ),
+            other => panic!("the refused device was told {other:?}"),
+        }
         assert_eq!(
             load(&conn, "c", "themealdb", "52795").await.unwrap().len(),
             1

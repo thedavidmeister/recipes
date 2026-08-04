@@ -7,11 +7,13 @@ import type { Voter } from "./pick";
  * people on it are the people a recipe has to win over, and anybody else holding the
  * link can see the plan but not vote in it. #179 made that true where it counts — a
  * vote from outside the roster is refused by `record_vote`'s own predicate — and this
- * is the half that says so on screen, because the refusal cannot say it itself: a
- * vote travels as a socket frame the server never answers (`socket_loop` records
- * "the socket has nowhere to report either"), so a swipe that lands nowhere produces
- * no error to render. There is nothing to catch and nothing to show *after* the fact,
- * which is exactly why watching has to be stated *before* it.
+ * is the half that says so on screen, because the refusal cannot say *why* itself. A
+ * write travels as a socket frame, and since #222 the server does answer a refused one
+ * — with the plan's own recorded state, so a screen that had painted the tap
+ * re-converges instead of drifting. But a whole-state frame is a **fact**, not an
+ * explanation: nothing in it says *you are not on this roster*, and nothing on this
+ * wire can. There is still no error to render after the fact, which is exactly why
+ * watching has to be stated *before* it.
  *
  * Pure, and its own module rather than a corner of `$lib/pick`, for the
  * `$lib/shopping` reason (#176/7): `$lib/pick` reaches `$lib/client`, which reads
