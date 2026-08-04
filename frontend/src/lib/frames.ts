@@ -49,5 +49,7 @@ export function applyFrame(msg: ServerMsg, handlers: PickHandlers): void {
     handlers.onTimeSync?.(msg.offset_ms, msg.rtt_ms);
   } else if (msg.type === "timers") {
     handlers.onTimers?.(msg.source, msg.id, msg.timers);
+  } else if (msg.type === "music") {
+    handlers.onMusic?.(msg.section, msg.track, msg.started_at);
   }
 }

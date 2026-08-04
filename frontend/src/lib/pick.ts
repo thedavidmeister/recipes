@@ -3,7 +3,7 @@ import { applyFrame } from "./frames";
 import { pongFor, raise } from "./session-events";
 import type { RunningTimer, SessionEvent } from "./session-events";
 import { turso } from "./turso";
-import type { MealAddition, MealType, RecipeCard } from "./types";
+import type { MealAddition, MealType, RecipeCard, Section } from "./types";
 
 /**
  * The live, shared machinery of `pick` (#20).
@@ -144,7 +144,13 @@ export type ServerMsg =
   | { type: "decided"; source: string; id: string; decided_at: number }
   | { type: "time_ping"; server_ms: number }
   | { type: "time_sync"; offset_ms: number; rtt_ms: number }
-  | { type: "timers"; source: string; id: string; timers: RunningTimer[] };
+  | { type: "timers"; source: string; id: string; timers: RunningTimer[] }
+  | {
+      type: "music";
+      section: Section;
+      track: string;
+      started_at: number;
+    };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -230,6 +236,17 @@ export interface PickHandlers {
    * timeline** — translate with `toLocal` and this connection's offset before comparing
    * them to `Date.now()`. */
   onTimers?: (source: string, id: string, timers: RunningTimer[]) => void;
+  /** **What the room is listening to in one section** (#212) — on connect, once per
+   * section the plan has music in, and again on every advance anybody in it reports.
+   *
+   * Whole rather than a delta, like {@link onBuy} and {@link onTimers}, and here that
+   * does a second job: it is how a device whose own report lost the race is told what
+   * the winner chose, rather than being left on a track nobody else is playing.
+   *
+   * `startedAt` is a **shared-timeline** instant. The device's own playback position is
+   * `now − startedAt` through this connection's offset (`$lib/music`); nothing here says
+   * whether this device is making a sound, which stays the personal switch's business. */
+  onMusic?: (section: Section, track: string, startedAt: number) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
@@ -295,6 +312,18 @@ export class PickClient {
    * the tapper and everybody shopping beside them in one message instead of two. */
   tick(source: string, id: string, index: number, checked: boolean): void {
     this.event({ kind: "buy_tick", source, id, index, checked });
+  }
+
+  /** Report that the room's soundtrack should move on (#212): this section's track has
+   * ended, or it has none yet.
+   *
+   * `after` is the start instant of the state being answered — the track that ended, or
+   * `null` for a section with no music. Several devices raise this at once by design;
+   * the server's compare-and-set picks one and the `music` frame tells the rest.
+   *
+   * There is no track on it: which song plays is the room's, chosen server-side. */
+  advanceMusic(section: Section, after: number | null): void {
+    this.event({ kind: "music_advance", section, after });
   }
 
   /**

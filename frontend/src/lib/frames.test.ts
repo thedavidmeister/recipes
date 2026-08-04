@@ -31,6 +31,7 @@ function spies() {
     onTimePing: vi.fn(),
     onTimeSync: vi.fn(),
     onTimers: vi.fn(),
+    onMusic: vi.fn(),
   } satisfies PickHandlers;
 }
 
@@ -146,6 +147,33 @@ describe("applyFrame", () => {
     for (const [name, fn] of Object.entries(h)) {
       if (name === "onTimers") continue;
       expect(fn, `${name} must not see a timers frame`).not.toHaveBeenCalled();
+    }
+  });
+
+  /**
+   * **The room's soundtrack** (#212). The two facts that make one, and only they: a
+   * frame read into the wrong handler here is a player that never hears the room change
+   * song, which on the device you are testing on looks exactly like music working.
+   */
+  it("hands the room's music to onMusic, and to nothing else", () => {
+    const h = spies();
+    applyFrame(
+      {
+        type: "music",
+        section: "cook",
+        track: "/music/cook-2.mp3",
+        started_at: 1_700_000_000_000,
+      },
+      h,
+    );
+    expect(h.onMusic).toHaveBeenCalledWith(
+      "cook",
+      "/music/cook-2.mp3",
+      1_700_000_000_000,
+    );
+    for (const [name, fn] of Object.entries(h)) {
+      if (name === "onMusic") continue;
+      expect(fn, `${name} must not see a music frame`).not.toHaveBeenCalled();
     }
   });
 

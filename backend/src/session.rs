@@ -226,6 +226,27 @@ pub(crate) enum ServerMsg {
         id: String,
         timers: Vec<crate::timers::RunningTimer>,
     },
+    /// **The plan's soundtrack for one section** (#212): what the room is playing, and
+    /// the instant it started.
+    ///
+    /// Whole rather than a delta, for [`ServerMsg::Buy`]'s reason — and here that rule
+    /// does a second job. Several devices report the same rollover, exactly one wins the
+    /// compare-and-set on `started_at`, and this frame is how every loser is told what
+    /// the winner chose rather than being left on a track nobody else is playing.
+    ///
+    /// Sent to every socket on connect, once per section the plan has music in (the
+    /// rehydrate half — a returning device joins the current track **mid-flight**,
+    /// because the position is derived from `started_at` and was never stored), and to
+    /// the room on every advance.
+    ///
+    /// `started_at` is in the **shared timeline**; a device's own playback position is
+    /// `now − started_at` read through the offset it was given above. Nothing here says
+    /// whether a given device is making a sound — the on/off switch is personal.
+    Music {
+        section: crate::music::Section,
+        track: String,
+        started_at: i64,
+    },
 }
 
 /// `pub(crate)` only because [`ServerMsg`] is: the event framework builds frames, so the
@@ -1221,6 +1242,32 @@ async fn socket_loop(
         }
     }
 
+    // And what the room is listening to (#212), for every section the plan has music in.
+    //
+    // The same durability story the three frames above tell, on the one piece of plan
+    // state where "rehydrate" and "join mid-track" are the same act: the position was
+    // never stored, so being handed the track and the instant it began *is* being handed
+    // the middle of it. A device that reconnects after a spin-down, or arrives hours late
+    // through the kitchen page (#207), lands where the room actually is rather than
+    // starting a private song at the top.
+    //
+    // Every section, not merely the one this client is on: it is one socket for a room
+    // that is walking an arc, and a client ignores a section it is not in the way `buy`
+    // ignores another recipe's checklist.
+    if let Ok(all) = crate::music::load_all(&db, &channel).await {
+        for track in all {
+            if let Ok(txt) = serde_json::to_string(&ServerMsg::Music {
+                section: track.section,
+                track: track.track,
+                started_at: track.started_at,
+            }) {
+                if sink.send(Message::Text(txt.into())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
     // Render's free tier closes a WS idle for 5 min; a ping well inside that keeps
     // an active session's socket — and the box — awake. It is also the event
     // framework's drift-refresh cadence: the clock measurement rides this frame, so
@@ -1795,9 +1842,32 @@ async fn update_additions(
 /// an id — the channel is always `?1`, and the person's position differs between the
 /// statements below. Every argument it is ever given is a literal written here.
 pub(crate) fn seated_in_a_started_plan(person: &str) -> String {
+    seated(person, " AND s.started_at IS NOT NULL")
+}
+
+/// **On the roster of a plan, started or not** — the same people, one state earlier.
+///
+/// Written out of the same fragment as [`seated_in_a_started_plan`] rather than beside
+/// it, so there is one description of who is *in* a plan and the two differ by the one
+/// clause that is the whole difference between them.
+///
+/// This is the predicate for the room's soundtrack (#212), and nothing else, because a
+/// soundtrack is not part of the meal's outcome: a vote, a claim on a shopping line and
+/// a countdown on a pot all require the roster to have closed, while a lobby waiting for
+/// the host to start is a room that is already hearing music. The line it does **not**
+/// move is the one that matters — a watcher (#180/#200) and a signed-in stranger holding
+/// the invite link fail this exactly as they fail the stricter one.
+pub(crate) fn seated_in_a_plan(person: &str) -> String {
+    seated(person, "")
+}
+
+/// The shared shape of the two above: on the roster of a plan that exists, plus whatever
+/// `extra` the caller requires of the plan itself. `person` is a placeholder, never an
+/// id; the channel is always `?1`.
+fn seated(person: &str, extra: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM pick_sessions s, pick_voters v
-                  WHERE s.channel_id = ?1 AND s.started_at IS NOT NULL
+                  WHERE s.channel_id = ?1{extra}
                     AND v.channel_id = ?1 AND v.user_id = {person})"
     )
 }
@@ -1816,9 +1886,29 @@ pub(crate) async fn is_seated_in_a_started_plan(
     channel: &str,
     person: &str,
 ) -> anyhow::Result<bool> {
+    asked(conn, channel, person, seated_in_a_started_plan("?2")).await
+}
+
+/// [`seated_in_a_plan`] asked as a question — the event framework's other guard
+/// (`events::Guard::SeatedInPlan`), applied at its choke point (#212).
+pub(crate) async fn is_seated_in_a_plan(
+    conn: &Connection,
+    channel: &str,
+    person: &str,
+) -> anyhow::Result<bool> {
+    asked(conn, channel, person, seated_in_a_plan("?2")).await
+}
+
+/// One of the fragments above, asked of the database.
+async fn asked(
+    conn: &Connection,
+    channel: &str,
+    person: &str,
+    predicate: String,
+) -> anyhow::Result<bool> {
     let mut rows = conn
         .query(
-            &format!("SELECT 1 WHERE {}", seated_in_a_started_plan("?2")),
+            &format!("SELECT 1 WHERE {predicate}"),
             libsql::params![channel, person],
         )
         .await?;

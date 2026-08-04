@@ -86,7 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libsql::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{is_seated_in_a_started_plan, ServerMsg};
+use crate::session::{is_seated_in_a_plan, is_seated_in_a_started_plan, ServerMsg};
 
 /// The server clock, in unix milliseconds — **the shared timeline**.
 ///
@@ -335,6 +335,27 @@ pub enum SessionEvent {
         index: i64,
         checked: bool,
     },
+    /// **The room's soundtrack moves on** (#212) — one section's music starts, or the
+    /// track that was playing has ended.
+    ///
+    /// One kind for both, because they are one act with one race in it: several devices
+    /// arrive in a section at once, and several devices' tracks end at once, and in each
+    /// case exactly one report may move the room while the rest accept what it chose.
+    ///
+    /// `after` is **the start instant of the state this device is answering** — the
+    /// track it heard end, or `null` for "this section has no music yet". It is a value
+    /// that came from the server in the first place, and the write is a compare-and-set
+    /// on it ([`crate::music::advance`]), so a device that slept through two rollovers
+    /// is refused rather than dragging the room back a song.
+    ///
+    /// **No track on the wire, deliberately**, and it is the [`SessionEvent::TimerStart`]
+    /// rule with more at stake: the initiator owns *when*, the room owns *what*. A track
+    /// name from a client is a URL every phone in the plan would load, and
+    /// `deny_unknown_fields` refuses a frame carrying one instead of quietly ignoring it.
+    MusicAdvance {
+        section: crate::music::Section,
+        after: Option<i64>,
+    },
 }
 
 /// **What a kind requires of whoever raised it** — policy, named once per kind and
@@ -350,6 +371,16 @@ pub enum Guard {
     /// write in this app already uses (`session::seated_in_a_started_plan`). Watchers
     /// (#180/#200) fail it, and so does a signed-in stranger holding the invite link.
     SeatedInStartedPlan,
+    /// On the roster of a plan, **started or not** (`session::seated_in_a_plan`).
+    ///
+    /// The same people, one state earlier. Everything guarded above writes to the
+    /// *outcome* of a meal — a vote, a claim on a shopping line, a countdown on a pot —
+    /// and none of those may be written before the roster closes. The room's soundtrack
+    /// (#212) is not an outcome: a lobby waiting for the host to start is a room, and it
+    /// is hearing the music. So this variant moves exactly one line and not the one that
+    /// matters: a watcher and a stranger with the link still fail it, which is the
+    /// boundary #200 draws.
+    SeatedInPlan,
 }
 
 impl SessionEvent {
@@ -365,6 +396,9 @@ impl SessionEvent {
             | SessionEvent::TimerDismiss { .. }
             | SessionEvent::Vote { .. }
             | SessionEvent::BuyTick { .. } => Guard::SeatedInStartedPlan,
+            // The one kind that is not about the meal's outcome, and so the one kind
+            // the room has before the host starts it (#212). See `Guard::SeatedInPlan`.
+            SessionEvent::MusicAdvance { .. } => Guard::SeatedInPlan,
         }
     }
 }
@@ -437,6 +471,7 @@ async fn authorized(
         Guard::SeatedInStartedPlan => {
             is_seated_in_a_started_plan(conn, &event.channel, &event.initiator).await
         }
+        Guard::SeatedInPlan => is_seated_in_a_plan(conn, &event.channel, &event.initiator).await,
     }
 }
 
@@ -575,7 +610,48 @@ async fn apply(
             }
             announce_buy(conn, &event.channel, source, id).await
         }
+        // The room's soundtrack moves on (#212).
+        //
+        // Announced **whether or not the write moved the row**, which is
+        // [`announce_timers`]' rule on the state it matters most for: several devices
+        // report the same rollover, one wins the compare-and-set, and this frame is how
+        // every loser is told what the winner chose. A refusal answered with silence
+        // would leave each of them playing a track nobody else in the room is on — the
+        // exact desync this kind exists to close.
+        //
+        // A section with no tracks (`joy`, today) announces nothing, because there is no
+        // state to state — not a frame claiming silence.
+        SessionEvent::MusicAdvance { section, after } => {
+            crate::music::advance(
+                conn,
+                &event.channel,
+                *section,
+                &event.initiator,
+                *after,
+                event.at,
+            )
+            .await?;
+            announce_music(conn, &event.channel, *section).await
+        }
     }
+}
+
+/// One section's soundtrack, as a frame — [`announce_timers`]' whole-state rule, on the
+/// room's music (#212).
+async fn announce_music(
+    conn: &Connection,
+    channel: &str,
+    section: crate::music::Section,
+) -> anyhow::Result<Vec<ServerMsg>> {
+    Ok(crate::music::current(conn, channel, section)
+        .await?
+        .map(|t| ServerMsg::Music {
+            section: t.section,
+            track: t.track,
+            started_at: t.started_at,
+        })
+        .into_iter()
+        .collect())
 }
 
 /// The room's whole shopping checklist for one recipe, as a frame — [`announce_timers`]'
@@ -805,6 +881,20 @@ mod tests {
         };
         assert_eq!(start.guard(), Guard::SeatedInStartedPlan);
         assert_eq!(dismiss.guard(), Guard::SeatedInStartedPlan);
+    }
+
+    /// **The one kind whose policy is not the others'** (#212). Music is the room's
+    /// atmosphere rather than the meal's outcome, so it is the only thing on this socket
+    /// a lobby may raise — and the line it does *not* move is the one that matters: a
+    /// watcher fails `SeatedInPlan` exactly as it fails `SeatedInStartedPlan`.
+    #[test]
+    fn the_soundtrack_is_the_room_s_before_the_plan_starts() {
+        let advance = SessionEvent::MusicAdvance {
+            section: crate::music::Section::Buy,
+            after: None,
+        };
+        assert_eq!(advance.guard(), Guard::SeatedInPlan);
+        assert_ne!(advance.guard(), Guard::SeatedInStartedPlan);
     }
 
     /// **No duration on the wire.** The initiator owns *when*; the recipe owns *how
