@@ -86,7 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libsql::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{is_seated_in_a_plan, is_seated_in_a_started_plan, ServerMsg};
+use crate::session::{is_seated_in_a_decided_plan, is_seated_in_a_started_plan, ServerMsg};
 
 /// The server clock, in unix milliseconds — **the shared timeline**.
 ///
@@ -335,27 +335,34 @@ pub enum SessionEvent {
         index: i64,
         checked: bool,
     },
-    /// **The room's soundtrack moves on** (#212) — one section's music starts, or the
-    /// track that was playing has ended.
+    /// **The room starts cooking** (#211) — "Let's cook!" on the shopping list, raised as
+    /// an event instead of followed as a link.
     ///
-    /// One kind for both, because they are one act with one race in it: several devices
-    /// arrive in a section at once, and several devices' tracks end at once, and in each
-    /// case exactly one report may move the room while the rest accept what it chose.
+    /// The transition the pick's decision already makes one step earlier: a `Decided`
+    /// frame carries the whole room from swiping to shopping, and this carries it from
+    /// shopping to the stove. Before it, whoever tapped went to `/cook` locally and
+    /// everybody else stayed on the shopping list with nothing to tell them otherwise.
     ///
-    /// `after` is **the start instant of the state this device is answering** — the
-    /// track it heard end, or `null` for "this section has no music yet". It is a value
-    /// that came from the server in the first place, and the write is a compare-and-set
-    /// on it ([`crate::music::advance`]), so a device that slept through two rollovers
-    /// is refused rather than dragging the room back a song.
+    /// **It names nothing**, and that is the same discipline `TimerStart` follows about a
+    /// duration. A plan cooks the meal it decided, which the server already holds
+    /// (#205) — so there is no recipe on this wire for one phone to point the room at,
+    /// and `deny_unknown_fields` refuses a frame that tries rather than quietly ignoring
+    /// it. The initiator owns *that the cook started* and *when*; the plan owns *what*.
     ///
-    /// **No track on the wire, deliberately**, and it is the [`SessionEvent::TimerStart`]
-    /// rule with more at stake: the initiator owns *when*, the room owns *what*. A track
-    /// name from a client is a URL every phone in the plan would load, and
-    /// `deny_unknown_fields` refuses a frame carrying one instead of quietly ignoring it.
-    MusicAdvance {
-        section: crate::music::Section,
-        after: Option<i64>,
-    },
+    /// **A struct variant with no fields, not a unit variant**, and the difference is not
+    /// style. Serde applies `deny_unknown_fields` to a struct variant of an internally
+    /// tagged enum and **not** to a unit one: written `CookStarted`, this deserialises
+    /// happily from `{"kind":"cook_started","source":"themealdb","id":"52795"}` and drops
+    /// the recipe on the floor — the exact "looked accepted while a field was silently
+    /// dropped" failure the docs above promise this wire does not have. Written
+    /// `CookStarted {}` it is refused. Both forms serialise identically to
+    /// `{"kind":"cook_started"}`, so the difference is invisible except to a client
+    /// trying to say something it may not.
+    /// (`the_wire_has_nowhere_to_name_a_recipe` is what caught it and is what keeps it.)
+    ///
+    /// Its guard is the one thing about it that is new: [`Guard::SeatedInDecidedPlan`],
+    /// because you cook the decision.
+    CookStarted {},
 }
 
 /// **What a kind requires of whoever raised it** — policy, named once per kind and
@@ -371,16 +378,18 @@ pub enum Guard {
     /// write in this app already uses (`session::seated_in_a_started_plan`). Watchers
     /// (#180/#200) fail it, and so does a signed-in stranger holding the invite link.
     SeatedInStartedPlan,
-    /// On the roster of a plan, **started or not** (`session::seated_in_a_plan`).
+    /// The same, **and the plan has decided** (`session::is_seated_in_a_decided_plan`).
     ///
-    /// The same people, one state earlier. Everything guarded above writes to the
-    /// *outcome* of a meal — a vote, a claim on a shopping line, a countdown on a pot —
-    /// and none of those may be written before the roster closes. The room's soundtrack
-    /// (#212) is not an outcome: a lobby waiting for the host to start is a room, and it
-    /// is hearing the music. So this variant moves exactly one line and not the one that
-    /// matters: a watcher and a stranger with the link still fail it, which is the
-    /// boundary #200 draws.
-    SeatedInPlan,
+    /// The framework's second guard, and the first evidence that having a [`Guard`] at
+    /// all was worth it: adding a kind that needs a *different* answer to "who may raise
+    /// this" cost one variant here and one arm in [`authorized`], with no handler
+    /// learning a policy and no existing kind touched.
+    ///
+    /// It exists for the cook (#211), because you cook the decision — a plan still
+    /// swiping has no recipe, no shopping list keyed to one, and nothing at the other end
+    /// of the transition, so a cook raised there could only move the room to an empty
+    /// stove. Watchers fail it for the same reason they fail the one above.
+    SeatedInDecidedPlan,
 }
 
 impl SessionEvent {
@@ -396,9 +405,12 @@ impl SessionEvent {
             | SessionEvent::TimerDismiss { .. }
             | SessionEvent::Vote { .. }
             | SessionEvent::BuyTick { .. } => Guard::SeatedInStartedPlan,
-            // The one kind that is not about the meal's outcome, and so the one kind
-            // the room has before the host starts it (#212). See `Guard::SeatedInPlan`.
-            SessionEvent::MusicAdvance { .. } => Guard::SeatedInPlan,
+            // The exception that shows the table is a table (#211). Starting the cook is
+            // the one thing a member of a started plan may not do until the plan has
+            // decided, so it names a stricter predicate here rather than checking one
+            // inside its handler — which is what "policy is declared per kind and lives
+            // on the framework" has to mean the first time two kinds disagree.
+            SessionEvent::CookStarted {} => Guard::SeatedInDecidedPlan,
         }
     }
 }
@@ -471,7 +483,9 @@ async fn authorized(
         Guard::SeatedInStartedPlan => {
             is_seated_in_a_started_plan(conn, &event.channel, &event.initiator).await
         }
-        Guard::SeatedInPlan => is_seated_in_a_plan(conn, &event.channel, &event.initiator).await,
+        Guard::SeatedInDecidedPlan => {
+            is_seated_in_a_decided_plan(conn, &event.channel, &event.initiator).await
+        }
     }
 }
 
@@ -610,47 +624,44 @@ async fn apply(
             }
             announce_buy(conn, &event.channel, source, id).await
         }
-        // The room's soundtrack moves on (#212).
+        // The room goes to the stove (#211) — the `Decided` transition, one step later in
+        // the arc and by the same mechanism: one frame to the whole room, and every
+        // screen moves off it, the initiator's included.
         //
-        // Announced **whether or not the write moved the row**, which is
-        // [`announce_timers`]' rule on the state it matters most for: several devices
-        // report the same rollover, one wins the compare-and-set, and this frame is how
-        // every loser is told what the winner chose. A refusal answered with silence
-        // would leave each of them playing a track nobody else in the room is on — the
-        // exact desync this kind exists to close.
+        // The write is **first past the post** (`cook_started_at_ms IS NULL`, inside the
+        // UPDATE) and the announcement is **unconditional**, which is [`announce_timers`]'
+        // rule rather than [`SessionEvent::Vote`]'s, and the pairing is what makes a
+        // second tap a no-op instead of an error: the first tap owns the recorded instant
+        // and no later one moves it, while the room — and the person who tapped again —
+        // is still handed the truth about a cook that is already on. A whole-state frame
+        // is self-healing, so re-stating a fact is the cheapest possible way to be right.
         //
-        // A section with no tracks (`joy`, today) announces nothing, because there is no
-        // state to state — not a frame claiming silence.
-        SessionEvent::MusicAdvance { section, after } => {
-            crate::music::advance(
-                conn,
-                &event.channel,
-                *section,
-                &event.initiator,
-                *after,
-                event.at,
-            )
-            .await?;
-            announce_music(conn, &event.channel, *section).await
+        // `start_cook`'s answer is deliberately not branched on. What the room is told is
+        // what is *recorded*, read back after the write, so the frame cannot describe a
+        // write that did not land — and the exotic race where the write was refused and
+        // nothing is recorded comes back as no frames at all, which is the silence every
+        // refusal on this socket keeps (#179/#180).
+        SessionEvent::CookStarted {} => {
+            crate::session::start_cook(conn, &event.channel, &event.initiator, event.at).await?;
+            announce_cook(conn, &event.channel).await
         }
     }
 }
 
-/// One section's soundtrack, as a frame — [`announce_timers`]' whole-state rule, on the
-/// room's music (#212).
-async fn announce_music(
-    conn: &Connection,
-    channel: &str,
-    section: crate::music::Section,
-) -> anyhow::Result<Vec<ServerMsg>> {
-    Ok(crate::music::current(conn, channel, section)
+/// That the plan is cooking, and since whose tap — as a frame, or nothing at all when
+/// nothing is recorded.
+///
+/// The whole state rather than "somebody tapped", so it reads identically live and on
+/// connect: the same two columns answer "is this room cooking" for the person who tapped,
+/// for the room, and for whoever opens the plan a day later.
+async fn announce_cook(conn: &Connection, channel: &str) -> anyhow::Result<Vec<ServerMsg>> {
+    Ok(crate::session::load_cook(conn, channel)
         .await?
-        .map(|t| ServerMsg::Music {
-            section: t.section,
-            track: t.track,
-            started_at: t.started_at,
-        })
         .into_iter()
+        .map(|c| ServerMsg::Cooking {
+            started_at: c.started_at,
+            started_by: c.started_by,
+        })
         .collect())
 }
 
@@ -883,18 +894,48 @@ mod tests {
         assert_eq!(dismiss.guard(), Guard::SeatedInStartedPlan);
     }
 
-    /// **The one kind whose policy is not the others'** (#212). Music is the room's
-    /// atmosphere rather than the meal's outcome, so it is the only thing on this socket
-    /// a lobby may raise — and the line it does *not* move is the one that matters: a
-    /// watcher fails `SeatedInPlan` exactly as it fails `SeatedInStartedPlan`.
+    /// **Two kinds want two different answers**, which is the whole reason [`Guard`] is a
+    /// table rather than a constant. Starting the cook needs the plan to have decided
+    /// (#211); everything else needs only a seat.
     #[test]
-    fn the_soundtrack_is_the_room_s_before_the_plan_starts() {
-        let advance = SessionEvent::MusicAdvance {
-            section: crate::music::Section::Buy,
-            after: None,
-        };
-        assert_eq!(advance.guard(), Guard::SeatedInPlan);
-        assert_ne!(advance.guard(), Guard::SeatedInStartedPlan);
+    fn starting_the_cook_wants_a_decided_plan() {
+        assert_eq!(
+            SessionEvent::CookStarted {}.guard(),
+            Guard::SeatedInDecidedPlan,
+            "you cook the decision"
+        );
+        assert_eq!(
+            SessionEvent::Vote {
+                source: "themealdb".into(),
+                id: "52795".into(),
+                vote: true,
+            }
+            .guard(),
+            Guard::SeatedInStartedPlan,
+            "and a swipe is what makes one"
+        );
+    }
+
+    /// **The cook names no recipe.** A plan cooks what it decided, which the server
+    /// already holds, so there is nowhere on this wire for one phone to point the room at
+    /// a different meal — and a client that tries is refused rather than quietly obeyed
+    /// in part.
+    #[test]
+    fn the_wire_has_nowhere_to_name_a_recipe() {
+        let ok: SessionEvent = serde_json::from_str(r#"{"kind":"cook_started"}"#).unwrap();
+        assert_eq!(ok, SessionEvent::CookStarted {});
+
+        let wire = serde_json::to_string(&ok).unwrap();
+        assert_eq!(wire, r#"{"kind":"cook_started"}"#);
+
+        for frame in [
+            r#"{"kind":"cook_started","source":"themealdb","id":"52795"}"#,
+            r#"{"kind":"cook_started","at":1700000000000}"#,
+            r#"{"kind":"cook_started","initiator":"mallory"}"#,
+        ] {
+            let refused = serde_json::from_str::<SessionEvent>(frame);
+            assert!(refused.is_err(), "{frame} was accepted: {refused:?}");
+        }
     }
 
     /// **No duration on the wire.** The initiator owns *when*; the recipe owns *how

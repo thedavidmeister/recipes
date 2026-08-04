@@ -3,7 +3,7 @@ import { applyFrame } from "./frames";
 import { pongFor, raise } from "./session-events";
 import type { RunningTimer, SessionEvent } from "./session-events";
 import { turso } from "./turso";
-import type { MealAddition, MealType, RecipeCard, Section } from "./types";
+import type { MealAddition, MealType, RecipeCard } from "./types";
 
 /**
  * The live, shared machinery of `pick` (#20).
@@ -129,6 +129,24 @@ export interface Decided {
   decided_at: number;
 }
 
+/**
+ * **The plan is cooking** (#211). Mirrors `session::Cooking`.
+ *
+ * The server's record of the moment somebody tapped "Let's cook!", not a client's
+ * reading of anything — the same standing as {@link Decided} one step later in the arc,
+ * and it arrives the same two ways: live to the room, and on every connect.
+ *
+ * It names no recipe. A plan cooks what it decided, which this side already holds, and a
+ * second copy of it here would be a second answer to what the room is having.
+ */
+export interface Cooking {
+  /** When the cook started, on the **shared timeline** — translate with `toLocal` and
+   * this connection's offset before comparing it to `Date.now()`. */
+  started_at: number;
+  /** Whose tap started it. */
+  started_by: Voter;
+}
+
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
@@ -145,12 +163,7 @@ export type ServerMsg =
   | { type: "time_ping"; server_ms: number }
   | { type: "time_sync"; offset_ms: number; rtt_ms: number }
   | { type: "timers"; source: string; id: string; timers: RunningTimer[] }
-  | {
-      type: "music";
-      section: Section;
-      track: string;
-      started_at: number;
-    };
+  | { type: "cooking"; started_at: number; started_by: Voter };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -236,17 +249,19 @@ export interface PickHandlers {
    * timeline** — translate with `toLocal` and this connection's offset before comparing
    * them to `Date.now()`. */
   onTimers?: (source: string, id: string, timers: RunningTimer[]) => void;
-  /** **What the room is listening to in one section** (#212) — on connect, once per
-   * section the plan has music in, and again on every advance anybody in it reports.
+  /** **The plan is cooking** (#211) — the frame that moves the room to the stove.
    *
-   * Whole rather than a delta, like {@link onBuy} and {@link onTimers}, and here that
-   * does a second job: it is how a device whose own report lost the race is told what
-   * the winner chose, rather than being left on a track nobody else is playing.
+   * Sent to the room the instant somebody taps "Let's cook!", and again to every socket
+   * on connect, so a member who dropped — or who came back into the plan through their
+   * kitchen (#207) — lands at the stove rather than on a shopping list nobody is
+   * shopping from. A watcher (#180/#200) is told the same way and comes along read-only:
+   * the frame goes to the room, not to the roster.
    *
-   * `startedAt` is a **shared-timeline** instant. The device's own playback position is
-   * `now − startedAt` through this connection's offset (`$lib/music`); nothing here says
-   * whether this device is making a sound, which stays the personal switch's business. */
-  onMusic?: (section: Section, track: string, startedAt: number) => void;
+   * It is what moves the **initiator** too. `PickClient.startCook` navigates nothing on
+   * its own, exactly as {@link onDecided} is what ends a pick rather than the swipe that
+   * completed it — one path, so the person who tapped cannot arrive somewhere the room
+   * did not. */
+  onCooking?: (cooking: Cooking) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
@@ -314,16 +329,20 @@ export class PickClient {
     this.event({ kind: "buy_tick", source, id, index, checked });
   }
 
-  /** Report that the room's soundtrack should move on (#212): this section's track has
-   * ended, or it has none yet.
+  /**
+   * Start the room's cook (#211) — the shopping list's "Let's cook!", raised rather than
+   * followed.
    *
-   * `after` is the start instant of the state being answered — the track that ended, or
-   * `null` for a section with no music. Several devices raise this at once by design;
-   * the server's compare-and-set picks one and the `music` frame tells the rest.
+   * **This navigates nothing.** What moves a screen is the `cooking` frame the server
+   * sends the whole room ({@link PickHandlers.onCooking}), which reaches the person who
+   * tapped by exactly the same path as everybody else — the {@link PickHandlers.onDecided}
+   * arrangement one step later in the arc, and for the same reason: two ways to arrive
+   * are two chances for the initiator to be somewhere the room is not.
    *
-   * There is no track on it: which song plays is the room's, chosen server-side. */
-  advanceMusic(section: Section, after: number | null): void {
-    this.event({ kind: "music_advance", section, after });
+   * No recipe travels with it. The plan cooks what it decided, and the server holds that.
+   */
+  startCook(): void {
+    this.event({ kind: "cook_started" });
   }
 
   /**

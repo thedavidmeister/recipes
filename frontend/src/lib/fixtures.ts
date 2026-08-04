@@ -438,6 +438,12 @@ export function kitchenDetail(): KitchenDetail {
  * The meals planned in a kitchen (#207), newest first — one in each state a plan can
  * be in: gathering, deciding, decided.
  *
+ * **Cooking (#211) is a fourth word on the third of them, not a fourth row.** It is the
+ * decided state with the hob on, so a story asks for it by turning the decided meal's
+ * `cooking` on (`kitchenMeals([{}, {}, { cooking: true }])`) rather than by inventing a
+ * plan that exists only to be cooking — which would also put a fourth household on a
+ * page whose point is that these are households.
+ *
  * **The plans are invented, and have to be.** A plan is a room of people who followed a
  * link — the corpus holds no record of one, exactly as it holds none of a kitchen (see
  * [`kitchenList`]), and `Pick.stories.ts` says the same of a roster. The channels are
@@ -462,6 +468,7 @@ export function kitchenMeals(over: Partial<KitchenMeal>[] = []): KitchenMeal[] {
       started: false,
       deciders: 2,
       decided: null,
+      cooking: false,
     },
     {
       channel_id: "ab12cd34ef56",
@@ -470,6 +477,7 @@ export function kitchenMeals(over: Partial<KitchenMeal>[] = []): KitchenMeal[] {
       started: true,
       deciders: 4,
       decided: null,
+      cooking: false,
     },
     {
       channel_id: "7e3b5a1d9c04",
@@ -478,6 +486,7 @@ export function kitchenMeals(over: Partial<KitchenMeal>[] = []): KitchenMeal[] {
       started: true,
       deciders: 3,
       decided: decidedRecipe(BASE_ID),
+      cooking: false,
     },
   ];
   return base.map((meal, i) => ({ ...meal, ...over[i] }));

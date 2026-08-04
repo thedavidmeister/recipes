@@ -38,11 +38,6 @@ const RESERVED: &[i64] = &[
     // written, then never used. It is below the production floor now, so it can
     // never be filled.
     20,
-    // Claimed by the branches in flight beside #212 while 31 was being written. The
-    // runner applies by `MAX(version)`, so taking the next number above *everything* is
-    // the only choice that is safe whichever branch deploys first — and that leaves
-    // these two empty here whether or not they are still in use elsewhere.
-    29, 30,
 ];
 
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
@@ -120,10 +115,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 28 by the same rule: 0027 (#208) is the highest number in the tree and has landed
     // on `main`, so this is the next number above everything.
     (28, include_str!("../migrations/0028_event_instants.sql")),
-    // 31 by the same rule: 0028 (#209) is the highest number on `main`, and 29 and 30
-    // are claimed by the branches in flight beside this one (see RESERVED), so this is
-    // the next number above everything.
-    (31, include_str!("../migrations/0031_plan_music.sql")),
+    // 29 by the same rule: 0028 (#209) is the highest number in the tree and has landed
+    // on `main`, so this is the next number above everything.
+    (29, include_str!("../migrations/0029_cook_started.sql")),
 ];
 
 /// Open the database described by `DATABASE_URL`.

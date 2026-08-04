@@ -40,7 +40,6 @@ mod kitchens;
 mod mcp;
 mod meal_time_api;
 mod meal_times;
-mod music;
 mod nutrition;
 mod nutrition_api;
 mod proxy;

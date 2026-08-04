@@ -98,6 +98,20 @@ describe("raise", () => {
       "source",
     ]);
   });
+
+  it("puts no recipe on the cook — the plan cooks what it decided", () => {
+    // The `timer_start` duration argument, one step along the arc (#211): the initiator
+    // owns *that the cook started* and *when*; the plan owns *what*. A recipe here would
+    // let one phone point the whole room at a dish nobody agreed on, and the server
+    // refuses the field rather than obeying the rest of the frame.
+    const tapped = 1_700_000_000_000;
+    const event: SessionEvent = { kind: "cook_started" };
+    expect(raise(event, tapped)).toEqual({ type: "event", at: tapped, event });
+    expect(Object.keys(event)).toEqual(["kind"]);
+    const wire = JSON.stringify(raise(event, tapped));
+    expect(wire).not.toContain("source");
+    expect(wire).not.toContain("themealdb");
+  });
 });
 
 describe("pongFor", () => {

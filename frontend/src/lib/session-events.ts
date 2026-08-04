@@ -1,5 +1,4 @@
 import type { Voter } from "./pick";
-import type { Section } from "./types";
 
 /**
  * **The browser half of the app's shared framework for time-sensitive event handling**
@@ -76,22 +75,21 @@ export type SessionEvent =
    * which is the same projection the server counts against. One kind for both
    * directions, because that is what the control is: one row, two states. */
   | ({ kind: "buy_tick"; index: number; checked: boolean } & RecipeRef)
-  /** **The room's soundtrack moves on** (#212): a section's music starts, or the track
-   * that was playing has ended.
+  /**
+   * **The room starts cooking** (#211) — "Let's cook!" on the shopping list, raised
+   * rather than followed.
    *
-   * One kind for both, because they are one act with one race in it — several devices
-   * arrive in a section at once, and several devices' tracks end at once, and in each
-   * case exactly one report may move the room while the rest accept what it chose.
+   * The only kind with **no `RecipeRef`**, and deliberately: a plan cooks the meal it
+   * decided, which the server already holds (#205), so there is nowhere here for one
+   * phone to point the room at a different dish. The server refuses a frame that adds
+   * one rather than quietly ignoring it — the same `deny_unknown_fields` treatment that
+   * keeps a duration off `timer_start`.
    *
-   * `after` is the start instant of the state this device is answering: the track it
-   * heard end, or `null` for "this section has no music yet". It is a number that came
-   * from the server, and the server's write is a compare-and-set on it.
-   *
-   * **No track here, deliberately** — the `timer_start` rule with more at stake. The
-   * initiator owns *when*; the room owns *what*. A track name this side could choose is
-   * a URL every phone in the plan would load, so there is nowhere on this wire to put
-   * one. */
-  | { kind: "music_advance"; section: Section; after: number | null };
+   * What comes back is a `cooking` frame to the whole room, and *that* is what moves
+   * every screen — including the screen that raised this. One path, so the person who
+   * tapped can never arrive somewhere the room did not.
+   */
+  | { kind: "cook_started" };
 
 /** An event on its way to the server: the payload, plus when the initiator did it. */
 export interface EventFrame {
