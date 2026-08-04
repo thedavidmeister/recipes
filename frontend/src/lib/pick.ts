@@ -129,6 +129,24 @@ export interface Decided {
   decided_at: number;
 }
 
+/**
+ * **The plan is cooking** (#211). Mirrors `session::Cooking`.
+ *
+ * The server's record of the moment somebody tapped "Let's cook!", not a client's
+ * reading of anything — the same standing as {@link Decided} one step later in the arc,
+ * and it arrives the same two ways: live to the room, and on every connect.
+ *
+ * It names no recipe. A plan cooks what it decided, which this side already holds, and a
+ * second copy of it here would be a second answer to what the room is having.
+ */
+export interface Cooking {
+  /** When the cook started, on the **shared timeline** — translate with `toLocal` and
+   * this connection's offset before comparing it to `Date.now()`. */
+  started_at: number;
+  /** Whose tap started it. */
+  started_by: Voter;
+}
+
 /** A frame the backend sends over the room. Mirrors `session::ServerMsg`. */
 export type ServerMsg =
   | { type: "tally"; participants: number; votes: TallyRow[] }
@@ -144,7 +162,8 @@ export type ServerMsg =
   | { type: "decided"; source: string; id: string; decided_at: number }
   | { type: "time_ping"; server_ms: number }
   | { type: "time_sync"; offset_ms: number; rtt_ms: number }
-  | { type: "timers"; source: string; id: string; timers: RunningTimer[] };
+  | { type: "timers"; source: string; id: string; timers: RunningTimer[] }
+  | { type: "cooking"; started_at: number; started_by: Voter };
 
 /**
  * One ticked line as the room announces it. Structurally `BuyCheck` from `$lib/buy`,
@@ -230,6 +249,19 @@ export interface PickHandlers {
    * timeline** — translate with `toLocal` and this connection's offset before comparing
    * them to `Date.now()`. */
   onTimers?: (source: string, id: string, timers: RunningTimer[]) => void;
+  /** **The plan is cooking** (#211) — the frame that moves the room to the stove.
+   *
+   * Sent to the room the instant somebody taps "Let's cook!", and again to every socket
+   * on connect, so a member who dropped — or who came back into the plan through their
+   * kitchen (#207) — lands at the stove rather than on a shopping list nobody is
+   * shopping from. A watcher (#180/#200) is told the same way and comes along read-only:
+   * the frame goes to the room, not to the roster.
+   *
+   * It is what moves the **initiator** too. `PickClient.startCook` navigates nothing on
+   * its own, exactly as {@link onDecided} is what ends a pick rather than the swipe that
+   * completed it — one path, so the person who tapped cannot arrive somewhere the room
+   * did not. */
+  onCooking?: (cooking: Cooking) => void;
   onStatus?: (status: ConnStatus) => void;
 }
 
@@ -295,6 +327,22 @@ export class PickClient {
    * the tapper and everybody shopping beside them in one message instead of two. */
   tick(source: string, id: string, index: number, checked: boolean): void {
     this.event({ kind: "buy_tick", source, id, index, checked });
+  }
+
+  /**
+   * Start the room's cook (#211) — the shopping list's "Let's cook!", raised rather than
+   * followed.
+   *
+   * **This navigates nothing.** What moves a screen is the `cooking` frame the server
+   * sends the whole room ({@link PickHandlers.onCooking}), which reaches the person who
+   * tapped by exactly the same path as everybody else — the {@link PickHandlers.onDecided}
+   * arrangement one step later in the arc, and for the same reason: two ways to arrive
+   * are two chances for the initiator to be somewhere the room is not.
+   *
+   * No recipe travels with it. The plan cooks what it decided, and the server holds that.
+   */
+  startCook(): void {
+    this.event({ kind: "cook_started" });
   }
 
   /**

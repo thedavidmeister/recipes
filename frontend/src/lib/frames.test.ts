@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyFrame } from "./frames";
-import type { Decided, PickHandlers, ServerMsg } from "./pick";
+import type { Cooking, Decided, PickHandlers, ServerMsg } from "./pick";
 
 /**
  * The room's frames, and which handler each reaches (#20, #201).
@@ -31,6 +31,7 @@ function spies() {
     onTimePing: vi.fn(),
     onTimeSync: vi.fn(),
     onTimers: vi.fn(),
+    onCooking: vi.fn(),
   } satisfies PickHandlers;
 }
 
@@ -47,6 +48,13 @@ const decided: ServerMsg = {
   source: "themealdb",
   id: "52772",
   decided_at: 1_759_000_000,
+};
+
+/** The plan is cooking (#211) — the `decided` frame's neighbour one step along the arc. */
+const cooking: ServerMsg = {
+  type: "cooking",
+  started_at: 1_700_000_000_000,
+  started_by: { telegram_user_id: "5150", username: "mel" },
 };
 
 describe("applyFrame", () => {
@@ -147,6 +155,40 @@ describe("applyFrame", () => {
       if (name === "onTimers") continue;
       expect(fn, `${name} must not see a timers frame`).not.toHaveBeenCalled();
     }
+  });
+
+  it("hands the cook to onCooking, whole", () => {
+    // The frame that moves the room to the stove (#211), and the one this side does the
+    // least with — which is exactly why it is pinned here. `startCook` navigates nothing
+    // on its own, so if this branch stopped firing the tap would look like a dead button
+    // for the whole room rather than like one person walking off alone.
+    const h = spies();
+    applyFrame(cooking, h);
+    expect(h.onCooking).toHaveBeenCalledTimes(1);
+    // When, and whose — the two facts the record holds. The instant is on the shared
+    // timeline, so dropping it would leave a screen with no honest way to say since when.
+    expect(h.onCooking).toHaveBeenCalledWith({
+      started_at: 1_700_000_000_000,
+      started_by: { telegram_user_id: "5150", username: "mel" },
+    } satisfies Cooking);
+  });
+
+  it("wakes nothing else, so a cook is never read as a decision", () => {
+    // The two frames are neighbours in the arc and carry the same shape of fact: one
+    // says what the room is having, the other that it is already on the hob. Crossing
+    // them would send a plan to `/buy` when it should be at the stove, or the reverse.
+    const h = spies();
+    applyFrame(cooking, h);
+    for (const [name, fn] of Object.entries(h)) {
+      if (name === "onCooking") continue;
+      expect(fn, `${name} must not see a cooking frame`).not.toHaveBeenCalled();
+    }
+  });
+
+  it("is fine with a page that is not listening for the cook", () => {
+    // The pick page shares this room and has no business in the cook; its handler is
+    // simply absent, and the socket's read must not throw over that.
+    expect(() => applyFrame(cooking, {})).not.toThrow();
   });
 
   it("drops a frame it does not know rather than throwing", () => {

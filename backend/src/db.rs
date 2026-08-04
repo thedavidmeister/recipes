@@ -38,14 +38,6 @@ const RESERVED: &[i64] = &[
     // written, then never used. It is below the production floor now, so it can
     // never be filled.
     20,
-    // Claimed by work in flight beside #213 while 0030 was being written, which is why
-    // 0030 took the number above everything rather than the next free one.
-    //
-    // **This line comes out the moment a 0029 lands**, and the ledger says so itself:
-    // a version that is registered *and* reserved fails the check by name, so whichever
-    // branch merges second is told exactly what to delete. Nothing else may fill 29 —
-    // once a database has applied 30, a later 29 never runs at all.
-    29,
 ];
 
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
@@ -123,10 +115,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 28 by the same rule: 0027 (#208) is the highest number in the tree and has landed
     // on `main`, so this is the next number above everything.
     (28, include_str!("../migrations/0028_event_instants.sql")),
-    // 30 by the same rule, with 29 deliberately skipped: 0028 is the highest number on
-    // `main`, and 29 is taken by work in flight beside this one, so 30 is the next
-    // number above *everything* and applies whichever branch deploys first. A hole is
-    // cheap; a number that never runs is the failure this rule exists to avoid.
+    // 29 by the same rule: 0028 (#209) is the highest number in the tree and has landed
+    // on `main`, so this is the next number above everything.
+    (29, include_str!("../migrations/0029_cook_started.sql")),
+    // 30 was numbered above 29 while both were in flight on separate branches; 29
+    // (#211) landed first, so the ledger reads in order with no hole.
     (
         30,
         include_str!("../migrations/0030_pick_calorie_range.sql"),

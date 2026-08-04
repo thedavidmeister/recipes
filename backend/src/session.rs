@@ -226,6 +226,39 @@ pub(crate) enum ServerMsg {
         id: String,
         timers: Vec<crate::timers::RunningTimer>,
     },
+    /// **The plan is cooking** (#211): somebody in it tapped "Let's cook!", and the
+    /// server has recorded that against the plan.
+    ///
+    /// The frame that moves the room to the stove, and the exact counterpart of
+    /// [`ServerMsg::Decided`] one step later in the arc. It is sent twice over, and both
+    /// sends are the same two columns read the same way:
+    ///
+    /// - to the room the instant the tap lands, so everybody goes together — including
+    ///   the person who tapped, who navigates on the announcement like everybody else
+    ///   rather than on their own click. One path, so the initiator cannot arrive
+    ///   somewhere the room did not;
+    /// - to every socket **on connect**, which is the durability half (#202): a member
+    ///   who dropped, or who came back into the plan through their kitchen (#207), is
+    ///   *told* the cook is on rather than left holding a shopping list nobody is
+    ///   shopping from.
+    ///
+    /// It goes to the **room**, not to the roster, so a watcher (#180/#200) comes along
+    /// exactly as they were carried through the decision — read-only, since every write
+    /// they could make from the stove is refused at the framework's guard.
+    ///
+    /// Carries no recipe. A plan cooks what it decided, and that is already a server
+    /// fact the client holds; naming it again here would be a second answer to what the
+    /// plan is having.
+    Cooking {
+        /// When the cook started, in the **shared timeline** (unix ms) — the initiator's
+        /// own tap, corrected for their measured clock drift by
+        /// [`crate::events::normalize`].
+        started_at: i64,
+        /// Whose tap it was. The whole person, like [`BuyCheck::by`] and
+        /// [`crate::timers::RunningTimer::started_by`] — a room that is told the cook
+        /// started should not have to join back against the roster to say by whom.
+        started_by: Voter,
+    },
 }
 
 /// `pub(crate)` only because [`ServerMsg`] is: the event framework builds frames, so the
@@ -1350,6 +1383,27 @@ async fn socket_loop(
         }
     }
 
+    // And whether the room is already cooking (#211) — the same durability rule one step
+    // further along the arc. A member who dropped, or who came back into the plan through
+    // their kitchen (#207), is *told* the cook is on and lands at the stove, rather than
+    // opening a shopping list nobody is shopping from. Sent to whoever opened the socket,
+    // so a watcher (#200) comes along read-only exactly as they were carried through the
+    // decision.
+    //
+    // After the decision on purpose: a client reads its frames in order, and being told
+    // the room is cooking before being told what it decided would be a stove with no pot
+    // named on it.
+    if let Ok(Some(cook)) = load_cook(&db, &channel).await {
+        if let Ok(txt) = serde_json::to_string(&ServerMsg::Cooking {
+            started_at: cook.started_at,
+            started_by: cook.started_by,
+        }) {
+            if sink.send(Message::Text(txt.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // And the pots that are on (#208). Plan state survives a drop and a long session
     // exactly the way the lobby and the decision above do: a countdown started an hour
     // ago is still counting, and one that finished while every browser was closed is
@@ -2030,6 +2084,22 @@ pub(crate) async fn is_seated_in_a_started_plan(
     Ok(rows.next().await?.is_some())
 }
 
+/// **The plan has decided** (#201) — the precondition of everything that happens after
+/// the pick.
+///
+/// Written once and read in both directions: as itself by the cook's guard (#211, which
+/// is the whole of "you cook the decision"), and negated by
+/// [`in_an_undecided_plan`] below for the vote that may no longer be cast. One
+/// description of a plan's decision means a change to it cannot reach one side and miss
+/// the other, and it means the two can never drift into disagreeing about what a decided
+/// plan is.
+///
+/// The channel is always `?1`, so this fragment takes no argument.
+fn in_a_decided_plan() -> &'static str {
+    "EXISTS (SELECT 1 FROM pick_sessions s
+              WHERE s.channel_id = ?1 AND s.decided_at IS NOT NULL)"
+}
+
 /// The other half of a vote's precondition since #201: **the plan has not decided**.
 ///
 /// A decided plan's deck is over, so a swipe arriving after it is refused rather than
@@ -2043,10 +2113,8 @@ pub(crate) async fn is_seated_in_a_started_plan(
 /// and never back, so a socket that read "undecided" a round trip ago may be writing
 /// into a plan that has since decided; the guard has to be inside the insert, which is
 /// the #169/#179 discipline said for the last state a vote can arrive too late for.
-/// The channel is always `?1`, so this fragment takes no argument.
-fn in_an_undecided_plan() -> &'static str {
-    "NOT EXISTS (SELECT 1 FROM pick_sessions s
-                  WHERE s.channel_id = ?1 AND s.decided_at IS NOT NULL)"
+fn in_an_undecided_plan() -> String {
+    format!("NOT {}", in_a_decided_plan())
 }
 
 /// Record (or update) a voter's call on a recipe, reporting whether it was written.
@@ -2243,6 +2311,161 @@ async fn load_decision(conn: &Connection, channel: &str) -> anyhow::Result<Optio
     decision_of(row.get(0)?, row.get(1)?, row.get(2)?)
 }
 
+// ---- the cook (#211) -------------------------------------------------------
+
+/// **A plan that is cooking**: when the cook started, and whose tap started it.
+///
+/// The room's own record of the moment "Let's cook!" was pressed, read back for the
+/// [`ServerMsg::Cooking`] frame — live, and again on every connect. It carries no recipe
+/// for the reason the frame does not: a plan cooks the meal it decided, which is already
+/// a recorded fact ([`DecidedRecipe`]), and a second copy of it here would be a second
+/// answer to what the room is having.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Cooking {
+    /// The initiator's tap, in the shared timeline (unix ms) — see migration 0029.
+    pub started_at: i64,
+    /// Whose it was, as a whole person.
+    pub started_by: Voter,
+}
+
+/// The framework's guard for the cook (`events::Guard::SeatedInDecidedPlan`), asked at
+/// its one choke point: **on the roster of a started plan, and that plan has decided.**
+///
+/// Built out of [`seated_in_a_started_plan`] and [`in_a_decided_plan`] rather than beside
+/// them, so there is one description of each half and a change to either reaches the
+/// framework and every write at once.
+///
+/// **You cook the decision, so the decision is part of who may start a cook**, and that
+/// is the design choice this predicate states. A plan still swiping has nothing to cook:
+/// there is no recipe, no shopping list keyed to one (`not_against_the_decision`), and no
+/// screen at the other end of the transition — so a cook raised there could only move the
+/// room to a stove with no pot on it. The framework already had a guard for "may write to
+/// this plan at all"; this is the second one it has ever needed, which is the test of
+/// [`crate::events::Guard`] naming a predicate about a person and a plan rather than a
+/// feature.
+pub(crate) async fn is_seated_in_a_decided_plan(
+    conn: &Connection,
+    channel: &str,
+    person: &str,
+) -> anyhow::Result<bool> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT 1 WHERE {} AND {}",
+                seated_in_a_started_plan("?2"),
+                in_a_decided_plan()
+            ),
+            libsql::params![channel, person],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+/// **Record that this plan is cooking**, reporting whether *this* call is what recorded
+/// it.
+///
+/// `at` is the tap's own instant on the shared timeline, from the envelope — this
+/// function reads no clock, exactly as [`crate::timers::start`] and [`record_vote`] read
+/// none. The tap is the event; the moment the row happened to be written is a fact about
+/// the network.
+///
+/// **Idempotent, in two halves, and both are load-bearing.**
+///
+/// - `cook_started_at_ms IS NULL` is inside the write, so the **first** tap is the one
+///   recorded and no later tap moves it. That is first-past-the-post, exactly as
+///   [`decide_if_agreed`]'s `decided_at IS NULL` is: two people tapping at the same
+///   instant both run this UPDATE and exactly one changes a row. A cook has one start,
+///   and a second tap must not restate it as five minutes later than it was — a plan that
+///   re-anchored its own start every time somebody pressed a button would be lying about
+///   when dinner went on.
+/// - The **announcement does not depend on the write** ([`crate::events::apply`] re-reads
+///   and announces whatever is recorded). So a second tap is a no-op that is still
+///   answered with the truth, which is the [`ServerMsg::Timers`]/[`ServerMsg::Buy`] rule
+///   — a whole-state frame is self-healing, and re-stating a fact is the cheapest way to
+///   be right. That is what makes a second tap **a no-op rather than an error**: nothing
+///   moves, nobody is refused, and the tapper's screen is carried to the stove by the
+///   same frame that carried everybody else's.
+///
+/// The roster, the start and the decision are all in the predicate here as well as at the
+/// framework's choke point ([`is_seated_in_a_decided_plan`]), which is the #175/#179
+/// discipline: that read decides whether the handler runs at all, and this predicate is
+/// what makes the answer race-free when a seat is given up — or a plan decides — in the
+/// round trip between the two.
+pub(crate) async fn start_cook(
+    conn: &Connection,
+    channel: &str,
+    user: &str,
+    at: i64,
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            &format!(
+                "UPDATE pick_sessions
+                    SET cook_started_at_ms = ?3, cook_started_by = ?2
+                  WHERE channel_id = ?1
+                    AND cook_started_at_ms IS NULL
+                    AND {} AND {}",
+                seated_in_a_started_plan("?2"),
+                in_a_decided_plan()
+            ),
+            libsql::params![channel, user, at],
+        )
+        .await?;
+    Ok(written > 0)
+}
+
+/// Whether this plan is cooking, and since when — `None` while it is not, and `None` too
+/// for a channel that does not exist.
+///
+/// The username is joined here rather than looked up by whoever renders it, the way
+/// [`crate::timers::load`] joins the person who started a countdown: the frame says whose
+/// cook it is, so the read that builds it is where the name comes from.
+pub(crate) async fn load_cook(conn: &Connection, channel: &str) -> anyhow::Result<Option<Cooking>> {
+    let mut rows = conn
+        .query(
+            "SELECT s.cook_started_at_ms, s.cook_started_by, u.username
+             FROM pick_sessions s
+             LEFT JOIN users u ON u.telegram_user_id = s.cook_started_by
+             WHERE s.channel_id = ?1",
+            libsql::params![channel],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    cook_of(row.get(0)?, row.get(1)?, row.get::<Option<String>>(2)?)
+}
+
+/// The two cook columns of one `pick_sessions` row, read as one fact.
+///
+/// Both are written by one statement ([`start_cook`]) or by neither, so the only two
+/// shapes that exist are both-set and both-null. Anything else is corruption and is
+/// refused **loudly**, the same ruling [`decision_of`] applies to half a decision and
+/// [`load_lobby`] applies to a `meal_type` outside the vocabulary: a plan cooking with
+/// nobody's hand on it — or somebody cooking at no time — is exactly the kind of wrong
+/// database that must not run beautifully. SQLite cannot add a CHECK with
+/// `ALTER TABLE ADD COLUMN`, so this is where the invariant is asserted instead.
+fn cook_of(
+    started_at: Option<i64>,
+    started_by: Option<String>,
+    username: Option<String>,
+) -> anyhow::Result<Option<Cooking>> {
+    match (started_at, started_by) {
+        (Some(started_at), Some(telegram_user_id)) => Ok(Some(Cooking {
+            started_at,
+            started_by: Voter {
+                telegram_user_id,
+                username,
+            },
+        })),
+        (None, None) => Ok(None),
+        (started_at, started_by) => Err(anyhow::anyhow!(
+            "pick_sessions holds half a cook: \
+             cook_started_at_ms={started_at:?} cook_started_by={started_by:?}"
+        )),
+    }
+}
+
 /// The winning recipe of a kitchen's meal (#207): what a plan decided, **named**.
 ///
 /// [`DecidedRecipe`] is the same fact for the plan's own screens, and carries
@@ -2269,10 +2492,15 @@ pub struct DecidedMeal {
 /// same reason: how many are in is the fact a list is asking about, and six names per
 /// row would be six lookups per row for a page that is not the lobby.
 ///
-/// Three states, and they are exactly the three the columns can be in: gathering
-/// (`started` false), deciding (`started` true, no decision), and decided. A plan
-/// everybody walked out of is a deleted row (#96/#169), so a fourth "over" state is not
-/// something this can hold — such a meal is simply not in the list.
+/// Four states, and they are exactly the four the columns can be in: gathering
+/// (`started` false), deciding (`started` true, no decision), decided, and **cooking**
+/// (#211 — decided, and somebody has started the cook). A plan everybody walked out of is
+/// a deleted row (#96/#169), so an "over" state is not something this can hold — such a
+/// meal is simply not in the list.
+///
+/// The fourth arrived for free: it is one more column of the row this read already
+/// fetches, on no new join and no second query, so a kitchen can say which of its meals
+/// is on the hob for exactly what the other three cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KitchenMeal {
     /// The plan's channel — what `/pick/{channel}` is, so the row is a link.
@@ -2288,6 +2516,14 @@ pub struct KitchenMeal {
     pub deciders: i64,
     /// What this meal decided (#201/#205), or `None` while its deck is still running.
     pub decided: Option<DecidedMeal>,
+    /// Whether somebody has started the cook (#211).
+    ///
+    /// Only ever `true` beside a `decided`, because the cook's guard is "seated in a
+    /// decided plan" and a decision never goes back to none — a row that says otherwise
+    /// is refused loudly in [`kitchen_meals`] rather than listed. It is a `bool` and not
+    /// the instant, because a list is asking *which* meal is on the hob and not for how
+    /// long; the plan's own screens read [`Cooking`] for that.
+    pub cooking: bool,
 }
 
 /// A kitchen's meals (#207), newest first.
@@ -2319,7 +2555,8 @@ pub async fn kitchen_meals(
         .query(
             "SELECT s.channel_id, s.meal_type, s.additions, s.started_at,
                     (SELECT COUNT(*) FROM pick_voters v WHERE v.channel_id = s.channel_id),
-                    s.decided_source, s.decided_id, s.decided_at, r.title
+                    s.decided_source, s.decided_id, s.decided_at, r.title,
+                    s.cook_started_at_ms
              FROM pick_sessions s
              LEFT JOIN recipes r
                     ON r.source = s.decided_source AND r.id = s.decided_id
@@ -2366,6 +2603,17 @@ pub async fn kitchen_meals(
             }
             (None, _) => None,
         };
+        // The fourth word (#211), off one more column of the row already in hand. A cook
+        // on a plan that decided nothing is refused the way a decision the corpus cannot
+        // name is: `start_cook`'s own predicate makes it unwritable, so a row holding one
+        // is corruption rather than a state to render — and rendering it would be a
+        // kitchen offering a way into a stove with no pot named on it.
+        let cooking: Option<i64> = row.get(9)?;
+        if cooking.is_some() && decided.is_none() {
+            return Err(anyhow::anyhow!(
+                "plan {channel_id} is cooking a meal it never decided"
+            ));
+        }
 
         out.push(KitchenMeal {
             channel_id,
@@ -2374,6 +2622,7 @@ pub async fn kitchen_meals(
             started: started_at.is_some(),
             deciders,
             decided,
+            cooking: cooking.is_some(),
         });
     }
     Ok(out)
@@ -2870,7 +3119,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::started_plan;
+    use super::test_support::{decide, started_plan};
     use super::*;
 
     async fn conn() -> Connection {
@@ -5856,6 +6105,33 @@ mod tests {
             .unwrap(),
             r#"{"type":"timers","source":"themealdb","id":"52795","timers":[{"step":7,"started_at":1700000000000,"deadline":1700000300000,"started_by":{"telegram_user_id":"5150","username":"mel"}}]}"#
         );
+
+        // In: the cook, which names nothing — the plan cooks what it decided (#211).
+        let cook: ClientMsg = serde_json::from_str(
+            r#"{"type":"event","at":1700000000000,"event":{"kind":"cook_started"}}"#,
+        )
+        .unwrap();
+        match cook {
+            ClientMsg::Event { at, event } => {
+                assert_eq!(at, 1_700_000_000_000);
+                assert_eq!(event, crate::events::SessionEvent::CookStarted {});
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        // Out: that the room is cooking, and since whose tap — the frame every screen
+        // moves to the stove on, the initiator's included.
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::Cooking {
+                started_at: 1_700_000_000_000,
+                started_by: Voter {
+                    telegram_user_id: "5150".into(),
+                    username: Some("mel".into())
+                }
+            })
+            .unwrap(),
+            r#"{"type":"cooking","started_at":1700000000000,"started_by":{"telegram_user_id":"5150","username":"mel"}}"#
+        );
     }
 
     // ---- the events migrate onto the framework (#209) ------------------------
@@ -6502,6 +6778,307 @@ mod tests {
         .is_err());
     }
 
+    // ---- the cook (#211) -----------------------------------------------------
+
+    /// A started plan of `who` that has decided on Chicken Handi — the only state a cook
+    /// can be started in, built the way the deciding vote builds it rather than by
+    /// writing the columns by hand.
+    async fn decided_plan(conn: &Connection, channel: &str, who: &[&str]) {
+        started_plan(conn, channel, who).await;
+        for person in who {
+            record_vote(conn, channel, "themealdb", "52795", person, true, TAP)
+                .await
+                .unwrap();
+        }
+        decide_if_agreed(conn, channel, "themealdb", "52795", TAP)
+            .await
+            .unwrap()
+            .expect("everybody said yes, so the plan decided");
+    }
+
+    /// Raise a cook through the framework, as a browser does, and answer with the frames
+    /// the room is told.
+    async fn cook_event(conn: &Connection, channel: &str, who: &str, at: i64) -> Vec<ServerMsg> {
+        crate::events::ingest(
+            conn,
+            channel,
+            who,
+            &crate::events::ClockOffset::new(),
+            at,
+            at,
+            crate::events::SessionEvent::CookStarted {},
+        )
+        .await
+        .unwrap()
+    }
+
+    /// **The cook is recorded against the plan, and the room is told** — the two halves
+    /// #211 asks for, in one path.
+    ///
+    /// Recorded is the half a broadcast cannot supply: a plan runs for days, and a
+    /// transition that existed only as a frame in flight would be lost to everybody whose
+    /// browser was shut at the moment it happened.
+    #[tokio::test]
+    async fn starting_the_cook_is_recorded_and_announced() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice", "bob"]).await;
+
+        let frames = cook_event(&conn, "c", "alice", TAP).await;
+        assert_eq!(frames.len(), 1, "the room is told, once");
+        match &frames[0] {
+            ServerMsg::Cooking {
+                started_at,
+                started_by,
+            } => {
+                assert_eq!(*started_at, TAP, "her tap, not the receipt");
+                assert_eq!(started_by.telegram_user_id, "alice");
+            }
+            other => panic!("announced {other:?}"),
+        }
+
+        let cook = load_cook(&conn, "c")
+            .await
+            .unwrap()
+            .expect("and it is on the plan afterwards");
+        assert_eq!(cook.started_at, TAP);
+        assert_eq!(cook.started_by.telegram_user_id, "alice");
+    }
+
+    /// **The rehydrate half** (#202): the cook survives every browser closing, and comes
+    /// back as the same fact the room was told live.
+    ///
+    /// This is what `socket_loop` sends on connect, so somebody who dropped — or who came
+    /// back into the plan through their kitchen (#207) — lands at the stove rather than on
+    /// a shopping list nobody is shopping from.
+    #[tokio::test]
+    async fn a_plan_rehydrates_into_the_cook_it_started() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice"]).await;
+        assert_eq!(
+            load_cook(&conn, "c").await.unwrap(),
+            None,
+            "a decided plan is not yet a cooking one"
+        );
+
+        cook_event(&conn, "c", "alice", TAP).await;
+
+        // A fresh read, as a reconnecting socket makes: nothing is held in memory.
+        assert_eq!(
+            load_cook(&conn, "c").await.unwrap(),
+            Some(Cooking {
+                started_at: TAP,
+                started_by: Voter {
+                    telegram_user_id: "alice".to_owned(),
+                    username: None,
+                },
+            })
+        );
+    }
+
+    /// The person is joined by name, like a ticked shopping line and a running timer — a
+    /// room told the cook started should not have to look up whose.
+    #[tokio::test]
+    async fn the_cook_carries_the_name_of_whoever_started_it() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO users (telegram_user_id, username) VALUES ('5150', 'mel')",
+            (),
+        )
+        .await
+        .unwrap();
+        decided_plan(&conn, "c", &["5150"]).await;
+        cook_event(&conn, "c", "5150", TAP).await;
+
+        let cook = load_cook(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(cook.started_by.username.as_deref(), Some("mel"));
+    }
+
+    /// **A second tap is a no-op, not an error** — and the room is still told the truth.
+    ///
+    /// Both halves are the design. The recorded instant is the tap that *started* the
+    /// cook and does not move, so a plan cannot restate when dinner went on every time
+    /// somebody presses the button; and the announcement does not depend on the write
+    /// having moved a row, so the second tapper is carried to the stove by the same frame
+    /// as everybody else instead of meeting silence.
+    #[tokio::test]
+    async fn a_second_tap_moves_nothing_and_is_still_answered() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice", "bob"]).await;
+
+        assert!(
+            start_cook(&conn, "c", "alice", TAP).await.unwrap(),
+            "alice's tap is the one that records it"
+        );
+        assert!(
+            !start_cook(&conn, "c", "bob", TAP + 60_000).await.unwrap(),
+            "bob's changes no row"
+        );
+
+        let frames = cook_event(&conn, "c", "bob", TAP + 120_000).await;
+        assert_eq!(frames.len(), 1, "and is answered all the same");
+        match &frames[0] {
+            ServerMsg::Cooking {
+                started_at,
+                started_by,
+            } => {
+                assert_eq!(*started_at, TAP, "the first tap still owns the instant");
+                assert_eq!(started_by.telegram_user_id, "alice", "and the hand");
+            }
+            other => panic!("announced {other:?}"),
+        }
+
+        let cook = load_cook(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(cook.started_at, TAP);
+        assert_eq!(cook.started_by.telegram_user_id, "alice");
+    }
+
+    /// **A watcher starts nothing** (#180/#200): not on the roster, so the framework
+    /// refuses the event, nothing is written and nothing is announced — no peer's screen
+    /// so much as flickers, let alone moves to the stove.
+    ///
+    /// The **third phase is what the choke point is for**, and it is why this kind's guard
+    /// is *not* redundant with its own write predicate the way the vote's is
+    /// (`events::apply` names that equivalence for the vote). This arm announces whatever
+    /// is **recorded**, not only what this call wrote — so with the guard gone, a watcher
+    /// tapping into a plan that is already cooking would change no row and still make the
+    /// server fan a frame out to the whole room. A refusal on this socket is silent
+    /// (#179/#180); one that speaks to everybody is not a refusal.
+    #[tokio::test]
+    async fn a_watcher_starts_no_cook_and_the_room_hears_nothing() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice"]).await;
+
+        let frames = cook_event(&conn, "c", "wanda", TAP).await;
+        assert!(frames.is_empty(), "silence, as every refusal here is");
+        assert_eq!(load_cook(&conn, "c").await.unwrap(), None);
+
+        // And the write refuses it on its own, which is what makes the answer race-free
+        // when a seat moves between the guard and the UPDATE (#175/#179).
+        assert!(!start_cook(&conn, "c", "wanda", TAP).await.unwrap());
+        assert_eq!(load_cook(&conn, "c").await.unwrap(), None);
+
+        // Now the plan really is cooking, on alice's tap — and a watcher still says
+        // nothing to anybody.
+        assert!(start_cook(&conn, "c", "alice", TAP).await.unwrap());
+        let frames = cook_event(&conn, "c", "wanda", TAP + 60_000).await;
+        assert!(
+            frames.is_empty(),
+            "a watcher does not get to make the room's screens speak"
+        );
+    }
+
+    /// **You cook the decision**: a plan still swiping has nothing to cook, so a member of
+    /// it — the host, even — starts nothing and the room is told nothing.
+    ///
+    /// The guard that separates this kind from every other one. A cook here would move the
+    /// room to a stove with no pot named on it: no recipe, no shopping list keyed to one,
+    /// and a `cook` page with nothing to render.
+    #[tokio::test]
+    async fn an_undecided_plan_cooks_nothing() {
+        let conn = conn().await;
+        started_plan(&conn, "c", &["alice"]).await;
+
+        let frames = cook_event(&conn, "c", "alice", TAP).await;
+        assert!(frames.is_empty());
+        assert_eq!(load_cook(&conn, "c").await.unwrap(), None);
+        assert!(!start_cook(&conn, "c", "alice", TAP).await.unwrap());
+
+        // The same person, the same plan, one decision later.
+        decide(&conn, "c", "themealdb", "52795").await;
+        assert!(start_cook(&conn, "c", "alice", TAP).await.unwrap());
+    }
+
+    /// A lobby cooks nothing either — the swiping has not begun, so there is no roster
+    /// closed behind it and nothing has been decided to cook.
+    #[tokio::test]
+    async fn a_lobby_cooks_nothing() {
+        let conn = conn().await;
+        super::test_support::lobby(&conn, "c", &["alice"]).await;
+        assert!(!start_cook(&conn, "c", "alice", TAP).await.unwrap());
+        assert!(cook_event(&conn, "c", "alice", TAP).await.is_empty());
+    }
+
+    /// The guard is a *whole* predicate: a stranger is refused in a decided plan, and a
+    /// member is refused in an undecided one, so neither half can be dropped without
+    /// something noticing.
+    #[tokio::test]
+    async fn the_cooks_guard_asks_both_halves() {
+        let conn = conn().await;
+        decided_plan(&conn, "decided", &["alice"]).await;
+        started_plan(&conn, "swiping", &["alice"]).await;
+
+        assert!(is_seated_in_a_decided_plan(&conn, "decided", "alice")
+            .await
+            .unwrap());
+        assert!(
+            !is_seated_in_a_decided_plan(&conn, "decided", "wanda")
+                .await
+                .unwrap(),
+            "a watcher of a decided plan is still a watcher"
+        );
+        assert!(
+            !is_seated_in_a_decided_plan(&conn, "swiping", "alice")
+                .await
+                .unwrap(),
+            "and a decider of an undecided plan has not decided yet"
+        );
+    }
+
+    /// **The initiator's tap is the event**, through the whole path: a phone whose clock
+    /// is a minute fast records the same instant as everybody else's, and receipt latency
+    /// does not move it.
+    #[tokio::test]
+    async fn the_framework_normalises_the_cooks_tap() {
+        let conn = conn().await;
+        decided_plan(&conn, "c", &["alice"]).await;
+
+        // Alice's phone is a minute fast, and she tapped 200ms before the frame landed.
+        let mut clock = crate::events::ClockOffset::new();
+        clock.ping_sent(1_000);
+        assert!(clock.pong(1_000, 1_020 + 60_000, 1_040));
+
+        crate::events::ingest(
+            &conn,
+            "c",
+            "alice",
+            &clock,
+            TAP - 200 + 60_000,
+            TAP,
+            crate::events::SessionEvent::CookStarted {},
+        )
+        .await
+        .unwrap();
+
+        let cook = load_cook(&conn, "c").await.unwrap().unwrap();
+        assert_eq!(cook.started_at, TAP - 200, "her tap, not her clock");
+    }
+
+    /// Half a cook is corruption and is refused loudly rather than served — a plan
+    /// cooking with nobody's hand on it, or somebody cooking at no time, is a wrong
+    /// database that must not run beautifully.
+    #[test]
+    fn half_a_cook_is_refused() {
+        assert_eq!(cook_of(None, None, None).unwrap(), None);
+        assert_eq!(
+            cook_of(Some(TAP), Some("alice".into()), None).unwrap(),
+            Some(Cooking {
+                started_at: TAP,
+                started_by: Voter {
+                    telegram_user_id: "alice".to_owned(),
+                    username: None,
+                },
+            })
+        );
+        assert!(
+            cook_of(Some(TAP), None, None).is_err(),
+            "a cook with nobody"
+        );
+        assert!(
+            cook_of(None, Some("alice".into()), None).is_err(),
+            "and somebody cooking at no time"
+        );
+    }
+
     // ---- a kitchen's meals (#207) -------------------------------------------
 
     /// A plan for `kitchen`, called at `at`, with `who` gathered in it. `at` is stated
@@ -6660,6 +7237,76 @@ mod tests {
                 title: "Chicken Handi".to_owned(),
             }),
             "a decided meal names the recipe it landed on"
+        );
+        assert!(
+            meals.iter().all(|m| !m.cooking),
+            "and not one of the three is on the hob"
+        );
+    }
+
+    /// **The fourth word** (#211): a kitchen says which of its meals is cooking, and says
+    /// it about that meal only.
+    ///
+    /// Two decided plans, one of them started, so a flag read off the wrong row — or off
+    /// the kitchen rather than the plan — shows up as the quiet meal claiming the hob.
+    #[tokio::test]
+    async fn a_kitchen_says_which_of_its_meals_is_cooking() {
+        let conn = conn().await;
+        conn.execute(
+            "INSERT INTO recipes (source, id, title, ingredients, instructions)
+             VALUES ('themealdb', '52795', 'Chicken Handi', '[]', 'Cook.')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        for (channel, at) in [("cooking", 2_000), ("settled", 1_000)] {
+            kitchen_plan(&conn, channel, "k1", at, &["alice"]).await;
+            begin_session(&conn, channel).await.unwrap();
+            record_vote(&conn, channel, "themealdb", "52795", "alice", true, TAP)
+                .await
+                .unwrap();
+            decide_if_agreed(&conn, channel, "themealdb", "52795", TAP)
+                .await
+                .unwrap()
+                .expect("the only decider agreed");
+        }
+        assert!(start_cook(&conn, "cooking", "alice", TAP).await.unwrap());
+
+        let meals = kitchen_meals(&conn, "k1").await.unwrap();
+        assert_eq!(channels(&meals), vec!["cooking", "settled"]);
+        assert!(meals[0].cooking, "this one is on the hob");
+        assert!(
+            meals[1].decided.is_some() && !meals[1].cooking,
+            "and this one is decided and not"
+        );
+    }
+
+    /// A plan recorded as cooking with no decision behind it is corruption and is refused
+    /// out loud, exactly as a decision the corpus cannot name is.
+    ///
+    /// `start_cook`'s own predicate makes the state unwritable — you cook the decision —
+    /// so a row holding it is a wrong database, and listing it would offer a member a way
+    /// into a stove with no pot named on it.
+    #[tokio::test]
+    async fn a_cook_on_a_plan_that_decided_nothing_is_refused() {
+        let conn = conn().await;
+        kitchen_plan(&conn, "c", "k1", 1_000, &["alice"]).await;
+        begin_session(&conn, "c").await.unwrap();
+        conn.execute(
+            "UPDATE pick_sessions SET cook_started_at_ms = ?2, cook_started_by = 'alice'
+              WHERE channel_id = ?1",
+            libsql::params!["c", TAP],
+        )
+        .await
+        .unwrap();
+
+        let err = kitchen_meals(&conn, "k1")
+            .await
+            .expect_err("cooking without a decision is corruption");
+        assert!(
+            err.to_string().contains("never decided"),
+            "and it says what is wrong: {err}"
         );
     }
 
