@@ -191,6 +191,19 @@
   /** Whether the plan is bounded by calories at all: one open end still bounds. */
   const calorieRangeSet = $derived(minKcal !== null || maxKcal !== null);
 
+  /**
+   * A pill's label dropped into the middle of a sentence.
+   *
+   * `calorieRangeLabel` capitalises for the pill it is mostly read on, and the note
+   * under the row quotes that same label so the two can never say different things —
+   * which left "counted at Up to 500 kcal a serving" mid-sentence. Lowering the first
+   * letter here keeps one source for the words and reads as English in both places.
+   * Safe over this whole vocabulary: the labels are numbers and ordinary words, with
+   * no proper noun a lowercase would damage.
+   */
+  const midSentence = (label: string) =>
+    label.charAt(0).toLowerCase() + label.slice(1);
+
   /** "30 min" / "1 hour" / "2 hours" — or plain minutes for an off-bucket cap. */
   const capLabel = (s: number) =>
     s % 3600 === 0
@@ -426,9 +439,10 @@
                Said here, where the choice is made, not discovered as an empty deck
                later. -->
           <p class="mt-2 text-xs text-stone-500">
-            Only recipes we've counted at {calorieRangeLabel(minKcal, maxKcal)} kcal
-            a serving. Ones nobody has counted yet — or could only count part of —
-            stay out while this is set.
+            Only recipes we've counted at {midSentence(
+              calorieRangeLabel(minKcal, maxKcal),
+            )} kcal a serving. Ones nobody has counted yet — or could only count
+            part of — stay out while this is set.
           </p>
         {/if}
       {:else}
@@ -452,8 +466,8 @@
               {/if}
               {capLabel(cap)}</span
             >
-            Anything longer is left out. A time is the least a recipe can take,
-            so some run longer — and ones with no time on them still show.
+            Anything longer is left out. A time is the least a recipe can take, so
+            some run longer — and ones with no time on them still show.
           </p>
         {/if}
         {#if calorieRangeSet}
