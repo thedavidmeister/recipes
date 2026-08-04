@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calorieHint, formatCalories } from "./nutrition";
+import { calorieHint, calorieRangeLabel, formatCalories } from "./nutrition";
 
 /**
  * Unit tests for the pick card's calorie badge (#162) — the arithmetic a story cannot
@@ -119,5 +119,40 @@ describe("calorieHint", () => {
 
   it("defaults to the weaker claim, like the mark it explains", () => {
     expect(calorieHint()).toBe(calorieHint(false));
+  });
+});
+
+/**
+ * The lobby's calorie range label (#213) — the one place a plan's bound is put into
+ * words, read by both the pill and the sentence under the row, so the two can never
+ * word the same bound differently.
+ */
+describe("calorieRangeLabel", () => {
+  it("calls an unbounded plan Any, the same word the time cap uses", () => {
+    // A lobby that called the bound-that-bounds-nothing two different things across
+    // two rows would read as two kinds of control. It is one idea.
+    expect(calorieRangeLabel(null, null)).toBe("Any");
+    expect(calorieRangeLabel(undefined, undefined)).toBe("Any");
+  });
+
+  it("says which end is open when only one is", () => {
+    // One open end still bounds — the walk enforces exactly this asymmetry — so the
+    // label has to name the end that is doing the work and not imply the other.
+    expect(calorieRangeLabel(null, 500)).toBe("Up to 500");
+    expect(calorieRangeLabel(800, null)).toBe("800 or more");
+  });
+
+  it("names both ends when both are stated", () => {
+    expect(calorieRangeLabel(500, 800)).toBe("500 to 800");
+    // A range of one value is a range, not an error: the ends are inclusive.
+    expect(calorieRangeLabel(702, 702)).toBe("702 to 702");
+  });
+
+  it("leaves the unit to the surface, which says it once", () => {
+    // The unit never varies (kcal a serving, always), so a row of four pills would
+    // repeat it four times. The question above the row and the note below it carry
+    // it; the label carries only the numbers.
+    expect(calorieRangeLabel(500, 800)).not.toContain("kcal");
+    expect(calorieRangeLabel(null, 500)).not.toContain("serving");
   });
 });

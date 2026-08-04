@@ -38,10 +38,6 @@ const RESERVED: &[i64] = &[
     // written, then never used. It is below the production floor now, so it can
     // never be filled.
     20,
-    // Claimed by #224 while 31 was being written, and still unmerged as this was
-    // committed. The runner applies by `MAX(version)`, so taking the next number above
-    // *everything* is the only choice that is safe whichever branch deploys first.
-    30,
 ];
 
 /// `(version, sql)` pairs, embedded at compile time, applied in ascending order.
@@ -122,10 +118,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // 29 by the same rule: 0028 (#209) is the highest number in the tree and has landed
     // on `main`, so this is the next number above everything.
     (29, include_str!("../migrations/0029_cook_started.sql")),
-    // 31 rather than 30, and the gap is not a hole: 30 was taken by #224 while this was
-    // being written, and the runner applies by `MAX(version)`, so the next number above
-    // *everything* — including what is unmerged elsewhere — is the only choice that is
-    // safe whichever branch deploys first.
+    // 30 was numbered above 29 while both were in flight on separate branches; 29
+    // (#211) landed first, so the ledger reads in order with no hole.
+    (
+        30,
+        include_str!("../migrations/0030_pick_calorie_range.sql"),
+    ),
+    // 31 by the same rule: 30 (#224) was still in flight when this was numbered, so this
+    // took the next number above *everything*. Both have since landed, so the three sit
+    // in order with no hole and nothing had to be renumbered — which is what taking the
+    // top number rather than the next free one buys.
     (31, include_str!("../migrations/0031_plan_seed.sql")),
 ];
 

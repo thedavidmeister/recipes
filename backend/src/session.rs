@@ -427,6 +427,22 @@ pub struct CreateBody {
     /// the whole corpus asks for it, instead of being unable to say so.
     #[serde(default = "default_cap")]
     max_total_seconds: Option<i64>,
+    /// The plan's calorie range, in **kcal a serving** (#213). `null` at either end is
+    /// an open end, and both `null` is "Any". Not opaque like `filter`: the walk
+    /// enforces it server-side against the same number the card shows, so the backend
+    /// must understand it.
+    ///
+    /// **Absent and `null` are the same here**, which is the opposite call to
+    /// [`Self::max_total_seconds`] (#163) and is deliberate: there is no default range
+    /// for an absent field to stand for. A plan is born capped because an unbounded cap
+    /// offers a five-hour braise to whoever is hungry now; a plan born *inside* a
+    /// calorie range would thin the deck to whatever the nutrition worker happens to
+    /// have read — the range is strict (#193) — which is a bound nobody chose standing
+    /// in for a data gap.
+    #[serde(default)]
+    min_kcal_per_serving: Option<i64>,
+    #[serde(default)]
+    max_kcal_per_serving: Option<i64>,
 }
 
 /// The bounds a time cap must sit in: at least a minute, at most a day.
@@ -476,6 +492,52 @@ fn validate_cap(cap: Option<i64>) -> Result<(), AppError> {
     }
 }
 
+/// The bounds an end of the calorie range must sit in, in kcal a serving (#213).
+///
+/// **1 at the bottom**, because that is where the card's own arithmetic stops: a
+/// serving that floors to less than 1 kcal is unreachable from real food, and
+/// `$lib/nutrition.formatCalories` shows nothing at all for one. A bound the badge can
+/// never display is a bound nothing can explicitly fit.
+///
+/// **10,000 at the top**, because nothing edible reaches it: the densest food we count
+/// is oil at about 900 kcal per 100 g, so a 10,000 kcal serving is over a kilogram of
+/// pure oil on one plate. Above that is an author error — a whole-recipe total typed
+/// into a per-serving field, most likely — not a meal anyone is planning.
+///
+/// The UI presents fixed buckets (Up to 500 / 500 to 800 / 800 or more / Any); the API
+/// deliberately accepts any sane number instead of that enum, exactly as the time cap
+/// does, so the buckets stay a presentation choice rather than a schema — changing them
+/// is a frontend edit, not a migration.
+const MIN_KCAL_PER_SERVING: i64 = 1;
+const MAX_KCAL_PER_SERVING: i64 = 10_000;
+
+/// Refuse a nonsense calorie range (#213). Either end may be `None` — that is an open
+/// end, and two of them are "Any" — but a stated end has to be a number a serving could
+/// be, and a stated pair has to be a range rather than an empty set.
+///
+/// `min > max` is refused rather than quietly swapped or clamped. It selects nothing at
+/// all, so honouring it literally would deal an empty deck that looks exactly like the
+/// honest thinning the strict filter produces (#193) — the one failure a person could
+/// not tell from correct behaviour. Swapping the ends would be worse: it deals a deck
+/// nobody asked for and says nothing.
+fn validate_kcal_range(min: Option<i64>, max: Option<i64>) -> Result<(), AppError> {
+    for (name, end) in [("min_kcal_per_serving", min), ("max_kcal_per_serving", max)] {
+        if let Some(v) = end {
+            if !(MIN_KCAL_PER_SERVING..=MAX_KCAL_PER_SERVING).contains(&v) {
+                return Err(AppError::BadRequest(format!(
+                    "{name} must be between {MIN_KCAL_PER_SERVING} and {MAX_KCAL_PER_SERVING}, got {v}"
+                )));
+            }
+        }
+    }
+    match (min, max) {
+        (Some(lo), Some(hi)) if lo > hi => Err(AppError::BadRequest(format!(
+            "min_kcal_per_serving {lo} is above max_kcal_per_serving {hi}, which no recipe can fit"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Created {
     channel_id: String,
@@ -488,6 +550,7 @@ pub async fn create(
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Created>, AppError> {
     validate_cap(body.max_total_seconds)?;
+    validate_kcal_range(body.min_kcal_per_serving, body.max_kcal_per_serving)?;
     // Minted once, *outside* the retryable closure, so every attempt writes the
     // same plan: a re-run after a lost response then hits the primary key and
     // fails honestly instead of minting a second plan (#130).
@@ -509,6 +572,8 @@ pub async fn create(
                 body.meal_type.unwrap_or(DEFAULT_MEAL_TYPE),
                 &body.additions,
                 body.max_total_seconds,
+                body.min_kcal_per_serving,
+                body.max_kcal_per_serving,
             )
             .await?;
             // The host is in their own plan from the moment it exists, so a lobby is
@@ -603,6 +668,15 @@ pub struct LobbyView {
     /// The plan's total-time cap in seconds (#80); `None` = no cap. Everyone in the
     /// lobby sees the bound they will be swiping within.
     pub max_total_seconds: Option<i64>,
+    /// The plan's calorie range in kcal a serving (#213) — the number the card shows,
+    /// not the whole-recipe total. `None` at either end is an open end and both `None`
+    /// is "Any", which is what every plan is born as.
+    ///
+    /// Here for the same reason the cap is: everyone in the lobby sees the bound they
+    /// will be swiping within, and it is the host's call — a guest reads it, and the
+    /// announcement puts the new one on their screen the moment it moves.
+    pub min_kcal_per_serving: Option<i64>,
+    pub max_kcal_per_serving: Option<i64>,
     /// Whether we know what this plan's kitchen owns (#82) — i.e. whether it has any
     /// equipment recorded at all.
     ///
@@ -1017,6 +1091,81 @@ pub async fn set_cap(
     // the read above wins and this changes nothing (see `set_time_cap`).
     let written = state
         .with_db(move |db| async move { set_time_cap(&db, channel, body.max_total_seconds).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !written {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+    let view = reload_and_announce(&state, channel).await?;
+    Ok(Json(view))
+}
+
+/// What the host is bounding the plan's servings to — kcal a serving at either end, or
+/// `null` for an open one. Both `null` is "Any", which lifts the range entirely.
+///
+/// Both ends travel together on every call, like [`AdditionsBody`]'s whole set and
+/// unlike a delta: a range is one setting, and a body that could name one edge would
+/// make "clear the min" and "leave the min alone" the same request.
+#[derive(Debug, Deserialize)]
+pub struct CalorieRangeBody {
+    #[serde(default)]
+    min_kcal_per_serving: Option<i64>,
+    #[serde(default)]
+    max_kcal_per_serving: Option<i64>,
+}
+
+/// `POST /api/session/{channel}/calories` — the host sets (or lifts) the plan's calorie
+/// range, in kcal a serving (#213).
+///
+/// Same guards as [`set_cap`], for the same reasons — host only, and only while the
+/// lobby is open: the range defines the shared corpus everyone in the session swipes
+/// within, so it must not move once people are voting. Announced to the room so every
+/// open client sees the new bound at once.
+///
+/// The bound this sets is **strict** (#193, ruled): while it is set, only a recipe whose
+/// calorie reading explicitly fits is dealt, and an incomplete reading (`kcal_complete =
+/// 0`, a floor) never explicitly fits. So the deck honestly thins as the range narrows,
+/// and the way to widen it is to read the corpus — never to loosen the filter. See
+/// [`crate::walk::load_corpus`], which is where that is enforced.
+pub async fn set_calories(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(channel): Path<String>,
+    Json(body): Json<CalorieRangeBody>,
+) -> Result<Json<LobbyView>, AppError> {
+    validate_kcal_range(body.min_kcal_per_serving, body.max_kcal_per_serving)?;
+    let channel = channel.as_str();
+    let view = state
+        .with_db(move |db| async move { load_lobby(&db, channel).await })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown session: {channel}")))?;
+
+    if view.host != user.telegram_user_id {
+        return Err(AppError::Forbidden(
+            "only whoever started this plan can set its calorie range".into(),
+        ));
+    }
+    if view.started {
+        return Err(AppError::BadRequest(
+            "this meal plan has already started".into(),
+        ));
+    }
+
+    // The write carries the not-started condition too, so a start() that landed since
+    // the read above wins and this changes nothing (see `set_time_cap`).
+    let written = state
+        .with_db(move |db| async move {
+            set_calorie_range(
+                &db,
+                channel,
+                body.min_kcal_per_serving,
+                body.max_kcal_per_serving,
+            )
+            .await
+        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !written {
@@ -1609,7 +1758,8 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     let mut rows = conn
         .query(
             "SELECT created_by, kitchen_id, started_at, meal_type, additions, max_total_seconds,
-                    decided_source, decided_id, decided_at, seed, created_at
+                    decided_source, decided_id, decided_at,
+                    min_kcal_per_serving, max_kcal_per_serving, seed, created_at
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1636,11 +1786,16 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
     // Read from this row rather than by a second query, so the lobby's `started` and
     // its `decided` can never describe two different instants of the same plan.
     let decided = decision_of(row.get(6)?, row.get(7)?, row.get(8)?)?;
-    // Read from this same row for the same reason the decision is: a plan's seed and its
-    // birth instant are the pair every derived-shared thing is computed from, and reading
-    // them separately would be two reads that could describe two plans.
-    let seed: Option<i64> = row.get(9)?;
-    let created_at: i64 = row.get(10)?;
+    // Appended to the end of the SELECT rather than beside the cap they belong with:
+    // every read here is positional, so a column inserted above the decision's three
+    // would silently re-point them (#109). New columns go on the end.
+    let min_kcal_per_serving: Option<i64> = row.get(9)?;
+    let max_kcal_per_serving: Option<i64> = row.get(10)?;
+    // On the end for that same reason. Read from this one row for the reason the
+    // decision is: a plan's seed and its birth instant are the pair every derived-shared
+    // thing is computed from, and two reads could describe two plans.
+    let seed: Option<i64> = row.get(11)?;
+    let created_at: i64 = row.get(12)?;
 
     let mut vrows = conn
         .query(
@@ -1687,6 +1842,8 @@ async fn load_lobby(conn: &Connection, channel: &str) -> anyhow::Result<Option<L
         host,
         started: started_at.is_some(),
         max_total_seconds,
+        min_kcal_per_serving,
+        max_kcal_per_serving,
         voters,
         candidates,
         decided,
@@ -1708,7 +1865,7 @@ async fn session_exists(conn: &Connection, channel: &str) -> anyhow::Result<bool
 /// Insert a new session. `channel_id` is unique (the primary key).
 ///
 /// The parameter list mirrors the INSERT's column list one-for-one — a struct
-/// here would relabel the same seven values without making any call site
+/// here would relabel the same nine values without making any call site
 /// clearer (the same trade `derive.rs` makes).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_session(
@@ -1720,15 +1877,17 @@ pub async fn create_session(
     meal_type: MealType,
     additions: &[MealAddition],
     max_total_seconds: Option<i64>,
+    min_kcal_per_serving: Option<i64>,
+    max_kcal_per_serving: Option<i64>,
 ) -> anyhow::Result<()> {
     conn.execute(
         // The seed is minted here and never again: it is a fact about the plan's birth,
         // like `created_at` beside it, and a plan whose seed could change is a plan whose
         // room could be dealt two different sequences of the same thing.
         "INSERT INTO pick_sessions
-            (channel_id, created_by, filter, kitchen_id, meal_type, additions,
-             max_total_seconds, seed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (channel_id, created_by, filter, kitchen_id, meal_type, additions, max_total_seconds,
+             min_kcal_per_serving, max_kcal_per_serving, seed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         libsql::params![
             channel_id,
             created_by,
@@ -1737,6 +1896,8 @@ pub async fn create_session(
             meal_type.as_str(),
             serde_json::to_string(&normalize_additions(additions))?,
             max_total_seconds,
+            min_kcal_per_serving,
+            max_kcal_per_serving,
             mint_seed()
         ],
     )
@@ -1766,6 +1927,34 @@ async fn set_time_cap(
     Ok(written > 0)
 }
 
+/// Set (or lift, with two `None`s) a plan's calorie range (#213), reporting whether it
+/// was written.
+///
+/// Both ends move in one statement, never one column at a time: a range is one setting
+/// with two edges, and writing them separately would leave a plan momentarily bounded by
+/// a min from the new choice and a max from the old one — a range nobody picked, which
+/// the walk would deal from.
+///
+/// `started_at IS NULL` is the same race guard [`set_time_cap`] carries, for the same
+/// reason: a `start()` landing between the handler's read and this write would otherwise
+/// move the corpus bound out from under a plan already being swiped.
+async fn set_calorie_range(
+    conn: &Connection,
+    channel: &str,
+    min_kcal_per_serving: Option<i64>,
+    max_kcal_per_serving: Option<i64>,
+) -> anyhow::Result<bool> {
+    let written = conn
+        .execute(
+            "UPDATE pick_sessions
+                SET min_kcal_per_serving = ?2, max_kcal_per_serving = ?3
+              WHERE channel_id = ?1 AND started_at IS NULL",
+            libsql::params![channel, min_kcal_per_serving, max_kcal_per_serving],
+        )
+        .await?;
+    Ok(written > 0)
+}
+
 /// Everything about a plan that bounds the walk it deals (#80, #82, #184).
 ///
 /// One struct and one read, rather than a query per facet: the walk resolves the whole
@@ -1786,6 +1975,16 @@ pub struct PlanBounds {
     /// Not an `Option`: migration 0016 made the column `NOT NULL DEFAULT 'dinner'` and
     /// the create handler applies the same default, so every plan is for some meal.
     pub meal_type: MealType,
+    /// The plan's calorie range in kcal a serving (#213); `None` at either end is an
+    /// open end, and both `None` — what every plan is born as — bounds nothing at all.
+    ///
+    /// Two plain `Option`s rather than an `Option<Range>` struct, because "no range" has
+    /// to have exactly one representation. A `Some(range)` whose two ends were both
+    /// `None` would be a second way to say the same thing, and the strict rule keys off
+    /// *whether a range is set at all* — so two spellings of "not set" is precisely the
+    /// state that could deal two different decks.
+    pub min_kcal_per_serving: Option<i64>,
+    pub max_kcal_per_serving: Option<i64>,
 }
 
 /// The bounds of a plan that named nothing: no cap, no kitchen, and the meal every plan
@@ -1801,6 +2000,8 @@ impl Default for PlanBounds {
             max_total_seconds: None,
             kitchen_id: None,
             meal_type: DEFAULT_MEAL_TYPE,
+            min_kcal_per_serving: None,
+            max_kcal_per_serving: None,
         }
     }
 }
@@ -1812,7 +2013,8 @@ impl Default for PlanBounds {
 pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Option<PlanBounds>> {
     let mut rows = conn
         .query(
-            "SELECT max_total_seconds, kitchen_id, meal_type
+            "SELECT max_total_seconds, kitchen_id, meal_type,
+                    min_kcal_per_serving, max_kcal_per_serving
              FROM pick_sessions WHERE channel_id = ?1",
             libsql::params![channel],
         )
@@ -1831,6 +2033,8 @@ pub async fn plan_bounds(conn: &Connection, channel: &str) -> anyhow::Result<Opt
         max_total_seconds: row.get(0)?,
         kitchen_id: row.get(1)?,
         meal_type,
+        min_kcal_per_serving: row.get(3)?,
+        max_kcal_per_serving: row.get(4)?,
     }))
 }
 
@@ -2947,6 +3151,8 @@ pub(crate) mod test_support {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -3025,6 +3231,8 @@ mod tests {
                 MealType::Dinner,
                 &[],
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -3052,6 +3260,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -3085,6 +3295,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -3155,6 +3367,8 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -3182,9 +3396,20 @@ mod tests {
         )
         .await
         .unwrap();
-        create_session(&conn, "c", "4242", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "4242",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "4242").await.unwrap();
 
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
@@ -3213,6 +3438,8 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -3236,9 +3463,20 @@ mod tests {
     #[tokio::test]
     async fn a_kitchenless_plan_has_no_candidates() {
         let conn = conn().await;
-        create_session(&conn, "c", "host", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "host",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "host").await.unwrap();
         assert!(load_lobby(&conn, "c")
             .await
@@ -3253,9 +3491,20 @@ mod tests {
     #[tokio::test]
     async fn starting_is_idempotent() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         begin_session(&conn, "c").await.unwrap();
         let first: Option<i64> = {
             let mut rows = conn
@@ -3382,9 +3631,20 @@ mod tests {
     #[tokio::test]
     async fn a_vote_before_the_start_is_not_a_vote() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
 
         assert!(
@@ -3722,9 +3982,20 @@ mod tests {
     #[tokio::test]
     async fn a_plan_that_has_not_started_decides_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
         // Written straight in: `record_vote` would refuse this, which is the point —
         // the two guards make each other's gap unreachable, and each still holds alone.
@@ -3933,9 +4204,20 @@ mod tests {
     #[tokio::test]
     async fn empty_channel_tallies_to_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let (participants, rows) = load_tally(&conn, "c").await.unwrap();
         assert_eq!(participants, 0);
         assert!(rows.is_empty());
@@ -3953,6 +4235,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -3973,6 +4257,8 @@ mod tests {
             None,
             MealType::Breakfast,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -4016,9 +4302,20 @@ mod tests {
     #[tokio::test]
     async fn the_meal_type_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         update_meal_type(&conn, "c", MealType::Lunch).await.unwrap();
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(view.meal_type, MealType::Lunch);
@@ -4128,6 +4425,8 @@ mod tests {
                 MealAddition::Side,
             ],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4144,9 +4443,20 @@ mod tests {
     #[tokio::test]
     async fn additions_can_change_while_the_lobby_is_open() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         update_additions(&conn, "c", &[MealAddition::Side])
             .await
             .unwrap();
@@ -4232,6 +4542,8 @@ mod tests {
             MealType::Dinner,
             &[],
             Some(1800),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4243,6 +4555,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -4259,9 +4573,20 @@ mod tests {
     #[tokio::test]
     async fn the_cap_can_be_set_and_lifted() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         set_time_cap(&conn, "c", Some(3600)).await.unwrap();
         assert_eq!(
             load_lobby(&conn, "c")
@@ -4282,6 +4607,196 @@ mod tests {
         );
     }
 
+    /// The calorie range's bounds (#213): `None` at either end is an open end and
+    /// always fine, the presented buckets all pass, and the three ways to state
+    /// nonsense are refused.
+    ///
+    /// `min > max` is the one worth naming. It selects nothing, so honouring it
+    /// literally would deal an empty deck that looks exactly like the honest thinning
+    /// the strict filter produces (#193) — the one failure a person could not tell from
+    /// correct behaviour. It is refused rather than swapped or clamped, because a
+    /// swapped range deals a deck nobody asked for and says nothing about it.
+    #[test]
+    fn a_calorie_range_is_validated_at_both_ends() {
+        for (min, max) in [
+            (None, None),
+            (None, Some(500)),
+            (Some(500), Some(800)),
+            (Some(800), None),
+            (Some(1), Some(10_000)),
+            // Equal ends are a range of one value, not an empty one.
+            (Some(702), Some(702)),
+        ] {
+            assert!(
+                validate_kcal_range(min, max).is_ok(),
+                "{min:?}..{max:?} must be accepted"
+            );
+        }
+        for (min, max) in [
+            (Some(0), None),
+            (None, Some(0)),
+            (Some(-1), None),
+            (None, Some(-1)),
+            (Some(10_001), None),
+            (None, Some(10_001)),
+            (Some(i64::MIN), None),
+            (None, Some(i64::MAX)),
+            // The range that no recipe can be in.
+            (Some(800), Some(200)),
+        ] {
+            assert!(
+                validate_kcal_range(min, max).is_err(),
+                "{min:?}..{max:?} must be refused"
+            );
+        }
+    }
+
+    /// A plan written with a calorie range reads it back in the lobby; one written with
+    /// two `None`s is unbounded — "Any", which is what every plan is born as.
+    ///
+    /// Unlike the time cap (#163) there is no default underneath this: migration 0030
+    /// gives the columns none and the create handler passes what it was given, so an
+    /// unstated range and an explicitly lifted one are the same plan.
+    #[tokio::test]
+    async fn a_plan_carries_its_calorie_range_and_none_is_any() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "light",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            Some(500),
+        )
+        .await
+        .unwrap();
+        create_session(
+            &conn,
+            "any",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let light = load_lobby(&conn, "light").await.unwrap().unwrap();
+        assert_eq!(light.min_kcal_per_serving, None, "an open bottom end");
+        assert_eq!(light.max_kcal_per_serving, Some(500));
+        let any = load_lobby(&conn, "any").await.unwrap().unwrap();
+        assert_eq!(any.min_kcal_per_serving, None);
+        assert_eq!(any.max_kcal_per_serving, None);
+    }
+
+    /// The host can move the range while the lobby is open, and lift it back to "Any";
+    /// the lobby reads whatever the plan currently says.
+    ///
+    /// Both ends move in one write, so the intermediate state — a min from the new
+    /// choice beside a max from the old one — is not a state the plan can be read in.
+    #[tokio::test]
+    async fn the_calorie_range_can_be_set_and_lifted() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let range = |view: LobbyView| (view.min_kcal_per_serving, view.max_kcal_per_serving);
+
+        set_calorie_range(&conn, "c", Some(500), Some(800))
+            .await
+            .unwrap();
+        assert_eq!(
+            range(load_lobby(&conn, "c").await.unwrap().unwrap()),
+            (Some(500), Some(800))
+        );
+
+        // Moved to an open-ended one: the old min is gone, not kept beside the new max.
+        set_calorie_range(&conn, "c", None, Some(500))
+            .await
+            .unwrap();
+        assert_eq!(
+            range(load_lobby(&conn, "c").await.unwrap().unwrap()),
+            (None, Some(500))
+        );
+
+        set_calorie_range(&conn, "c", None, None).await.unwrap();
+        assert_eq!(
+            range(load_lobby(&conn, "c").await.unwrap().unwrap()),
+            (None, None),
+            "two nulls lift the range entirely"
+        );
+    }
+
+    /// The walk reads the range off the plan (#213), beside the cap and the meal — so
+    /// the deck a room is dealt is bounded by the answer its host gave in the lobby,
+    /// which is the whole point of asking.
+    #[tokio::test]
+    async fn plan_bounds_carry_the_calorie_range() {
+        let conn = conn().await;
+        create_session(
+            &conn,
+            "ranged",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            Some(500),
+            Some(800),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan_bounds(&conn, "ranged").await.unwrap(),
+            Some(PlanBounds {
+                max_total_seconds: None,
+                kitchen_id: None,
+                meal_type: MealType::Dinner,
+                min_kcal_per_serving: Some(500),
+                max_kcal_per_serving: Some(800),
+            })
+        );
+        // …and a plan that named none bounds nothing, which is what `Default` says.
+        create_session(
+            &conn,
+            "any",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan_bounds(&conn, "any").await.unwrap(),
+            Some(PlanBounds::default())
+        );
+    }
+
     /// Start freezes the lobby's settings *in the write*, not merely in the handler's
     /// earlier read. Those are two round trips, so a start landing between them would
     /// otherwise move the corpus bound — or what the plan is even for — out from under
@@ -4290,13 +4805,27 @@ mod tests {
     #[tokio::test]
     async fn a_started_plan_refuses_every_lobby_write() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // Everything is still movable while the lobby is open.
         assert!(set_time_cap(&conn, "c", Some(1800)).await.unwrap());
         assert!(update_meal_type(&conn, "c", MealType::Lunch).await.unwrap());
         assert!(update_additions(&conn, "c", &[MealAddition::Dessert])
+            .await
+            .unwrap());
+        assert!(set_calorie_range(&conn, "c", Some(200), Some(800))
             .await
             .unwrap());
 
@@ -4310,12 +4839,15 @@ mod tests {
         assert!(!update_additions(&conn, "c", &[MealAddition::Side])
             .await
             .unwrap());
+        assert!(!set_calorie_range(&conn, "c", None, None).await.unwrap());
 
         // The frozen values are the ones the deck was dealt against.
         let view = load_lobby(&conn, "c").await.unwrap().unwrap();
         assert_eq!(view.max_total_seconds, Some(1800));
         assert_eq!(view.meal_type, MealType::Lunch);
         assert_eq!(view.additions, vec![MealAddition::Dessert]);
+        assert_eq!(view.min_kcal_per_serving, Some(200));
+        assert_eq!(view.max_kcal_per_serving, Some(800));
     }
 
     /// The walk's read of the bounds distinguishes "no such session" from "no bound":
@@ -4333,6 +4865,8 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4349,6 +4883,8 @@ mod tests {
             MealType::Dinner,
             &[],
             Some(7200),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4358,6 +4894,8 @@ mod tests {
                 max_total_seconds: Some(7200),
                 kitchen_id: None,
                 meal_type: MealType::Dinner,
+                min_kcal_per_serving: None,
+                max_kcal_per_serving: None,
             })
         );
     }
@@ -4376,15 +4914,28 @@ mod tests {
             MealType::Snack,
         ] {
             let channel = format!("plan-{}", meal.as_str());
-            create_session(&conn, &channel, "alice", None, None, meal, &[], None)
-                .await
-                .unwrap();
+            create_session(
+                &conn,
+                &channel,
+                "alice",
+                None,
+                None,
+                meal,
+                &[],
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 plan_bounds(&conn, &channel).await.unwrap(),
                 Some(PlanBounds {
                     max_total_seconds: None,
                     kitchen_id: None,
                     meal_type: meal,
+                    min_kcal_per_serving: None,
+                    max_kcal_per_serving: None,
                 }),
                 "a {meal:?} plan bounds its walk to {meal:?}"
             );
@@ -4438,6 +4989,8 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4458,6 +5011,8 @@ mod tests {
                 max_total_seconds: None,
                 kitchen_id: Some(kid),
                 meal_type: MealType::Dinner,
+                min_kcal_per_serving: None,
+                max_kcal_per_serving: None,
             })
         );
         assert_eq!(
@@ -4627,9 +5182,20 @@ mod tests {
     #[tokio::test]
     async fn a_shopping_claim_needs_a_seat_at_a_started_plan() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
 
         tick_item(&conn, "c", "themealdb", "52772", 0, "alice", TAP)
@@ -5217,9 +5783,20 @@ mod tests {
     #[tokio::test]
     async fn leaving_the_lobby_shrinks_the_roster() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob", "carol"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5244,9 +5821,20 @@ mod tests {
     #[tokio::test]
     async fn leaving_after_the_start_is_refused_and_writes_nothing() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob", "carol"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5276,9 +5864,20 @@ mod tests {
     #[tokio::test]
     async fn a_started_plan_cannot_be_ended_or_handed_on_by_leaving() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5301,6 +5900,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -5326,9 +5927,20 @@ mod tests {
     #[tokio::test]
     async fn a_started_tally_can_never_outlive_its_roster() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob", "carol"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5382,6 +5994,8 @@ mod tests {
                 MealType::Dinner,
                 &[],
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -5412,6 +6026,8 @@ mod tests {
             MealType::Breakfast,
             &[MealAddition::Side],
             Some(1800),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -5448,9 +6064,20 @@ mod tests {
     #[tokio::test]
     async fn a_guest_leaving_does_not_move_the_host() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5472,9 +6099,20 @@ mod tests {
     #[tokio::test]
     async fn the_last_person_out_closes_the_plan() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
 
         assert_eq!(
@@ -5494,9 +6132,20 @@ mod tests {
     #[tokio::test]
     async fn a_plan_someone_else_joined_is_not_closed() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         seat_voter(&conn, "c", "alice").await.unwrap();
         // The race, played out: the newcomer is seated before the delete runs.
         seat_voter(&conn, "c", "newcomer").await.unwrap();
@@ -5523,9 +6172,20 @@ mod tests {
     #[tokio::test]
     async fn leaving_twice_is_the_same_departure() {
         let conn = conn().await;
-        create_session(&conn, "c", "alice", None, None, MealType::Dinner, &[], None)
-            .await
-            .unwrap();
+        create_session(
+            &conn,
+            "c",
+            "alice",
+            None,
+            None,
+            MealType::Dinner,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         for who in ["alice", "bob"] {
             seat_voter(&conn, "c", who).await.unwrap();
         }
@@ -5555,6 +6215,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -6636,6 +7298,8 @@ mod tests {
             MealType::Dinner,
             &[],
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -6675,6 +7339,8 @@ mod tests {
             None,
             MealType::Dinner,
             &[],
+            None,
+            None,
             None,
         )
         .await
@@ -6720,6 +7386,8 @@ mod tests {
             Some("k1"),
             MealType::Lunch,
             &[MealAddition::Dessert],
+            None,
+            None,
             None,
         )
         .await
