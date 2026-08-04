@@ -1,0 +1,53 @@
+-- A meal plan's calorie range (#213): min/max **kcal a serving**, either end open.
+--
+-- The lobby already carries the plan's other bounds — the meal (0016) and the time
+-- cap (0017/0019) — and the walk deals only what fits them. Calories are on every
+-- card since #162 (`~700 kcal a serving`), and this is the column pair that lets a
+-- room say "we're planning light dinners" and have the deck respect it.
+--
+-- ## Numbering: why 30
+--
+-- `db.rs` applies migrations by `MAX(version)`, so a number at or below one already
+-- applied on production never runs at all. 0028 is the highest on `main`; 0029 is
+-- taken by work in flight beside this. Taking the next number above everything —
+-- rather than filling a hole — is the only choice that is safe against whatever
+-- deploys first, which is 0023's ruling applied again.
+--
+-- ## Additive, nullable, and NULL means "Any"
+--
+-- Two `ADD COLUMN`s and no rebuild. Both are **nullable with no default**, and that
+-- is the whole semantics: NULL is an open end, both NULL is "Any", and every plan
+-- that exists today reads as "Any" without a backfill. The default has to be Any,
+-- because #213 says so in as many words — "no range set changes nothing: the
+-- default deals what today deals". This is deliberately **not** the call 0019 made
+-- for the time cap: a plan is born capped because an unbounded cap offers a
+-- five-hour braise to whoever is hungry now, whereas a plan born inside a calorie
+-- range would silently thin the deck to the recipes the nutrition worker happens to
+-- have read (#193, strict) — a bound nobody chose, hiding a data gap behind a
+-- setting.
+--
+-- ## The unit is kcal a serving, which is the number the card shows
+--
+-- Not the whole-recipe total the `recipes.kcal` column holds. #162 ruled that per
+-- serving is a division the surface does (`kcal / servings`), because a bare total
+-- is ambiguous exactly where it matters — 2,400 kcal is a reasonable tray of lasagne
+-- and an absurd plate of it. A range stated in whole-recipe kcal would therefore
+-- bound a number no cook ever sees, so these are stated in the number the card shows
+-- and `walk::load_corpus` derives that number in SQL the same way
+-- `$lib/nutrition.formatCalories` derives it for the badge.
+--
+-- Whole kcal, like `recipes.kcal`, for the same reason: the estimate is not accurate
+-- to a calorie and a float would invite a display that renders one.
+--
+-- ## Bounds, not buckets
+--
+-- The UI presents fixed buckets (Up to 500 / 500 to 800 / 800 or more / Any); the
+-- columns deliberately do not enshrine them, exactly as 0017 refused to enshrine the
+-- time cap's, so changing the buckets is a frontend edit rather than a migration.
+--
+-- The pair is validated in `session::validate_kcal_range` (each end 1..=10000, and
+-- min <= max when both are stated) rather than by a CHECK constraint here, for the
+-- reason 0017 gave: the handler is where a bad request gets an honest 400 with a
+-- sentence, and a CHECK would answer the same mistake with a 500 and a SQL string.
+ALTER TABLE pick_sessions ADD COLUMN min_kcal_per_serving INTEGER;
+ALTER TABLE pick_sessions ADD COLUMN max_kcal_per_serving INTEGER;

@@ -11,6 +11,7 @@ const meta = {
     onMealType: () => {},
     onAdditions: () => {},
     onCap: () => {},
+    onCalories: () => {},
     onLeave: () => {},
     // Every plan is born capped at half an hour (#163), so that is the shared
     // starting state and the stories below vary from it, rather than each one
@@ -139,6 +140,69 @@ export const GuestSeesTheCap: Story = {
     hostId: "4242",
     mealType: "dinner",
     cap: 3600,
+    voters: [
+      { telegram_user_id: "4242", username: "dave" },
+      { telegram_user_id: "9317", username: "mel" },
+    ],
+  },
+};
+
+/**
+ * The room is planning light dinners (#213), so the host bounded the deck to servings
+ * of up to 500 kcal — the calorie row's first pill, chosen, wearing their colour like
+ * every other choice on this plan.
+ *
+ * The note under it is the whole of what the strict filter (#193) owes the room, said
+ * where the choice is made rather than discovered as a thin deck later: a range deals
+ * only what we have counted **in full**, so an unread recipe and one whose total is
+ * only a floor are both out while it is set. Missing calorie data is enrichment work,
+ * never a reason to widen the bound.
+ */
+export const LightDinners: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "4242",
+    mealType: "dinner",
+    inviteLink: invite,
+    maxKcal: 500,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/**
+ * A range with both ends stated (#213): 500 to 800 kcal a serving, the middle pill.
+ *
+ * Declared beside `LightDinners` because the two ends of the label are produced by
+ * different branches of `calorieRangeLabel` — "Up to 500" against "500 to 800" — and
+ * the pill and the sentence under it read off the same function, so a story that only
+ * ever showed one branch would leave the other undeclared.
+ */
+export const ARangeOfServings: Story = {
+  args: {
+    status: "ready",
+    host: true,
+    hostId: "4242",
+    mealType: "dinner",
+    inviteLink: invite,
+    minKcal: 500,
+    maxKcal: 800,
+    voters: [{ telegram_user_id: "4242", username: "dave" }],
+  },
+};
+
+/** A guest in a plan bounded by calories reads the bound they will be swiping within
+ * — shown, not settable, exactly like the cap beside it (#213/#80). Both bounds are on
+ * this plan at once, which is the state that proves they are two independent lines
+ * rather than one chained on the other. */
+export const GuestSeesTheCalorieRange: Story = {
+  args: {
+    status: "ready",
+    host: false,
+    hostId: "4242",
+    mealType: "dinner",
+    cap: 3600,
+    minKcal: 800,
     voters: [
       { telegram_user_id: "4242", username: "dave" },
       { telegram_user_id: "9317", username: "mel" },

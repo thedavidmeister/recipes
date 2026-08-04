@@ -302,6 +302,16 @@ fn wander<R: RngCore>(corpus: &Corpus, len: usize, rng: &mut R) -> Vec<Stop> {
 struct Bounds {
     /// The pick session's time cap in seconds (#80); `None` = "Any".
     max_total_seconds: Option<i64>,
+    /// The plan's calorie range, in **kcal a serving** (#213) — the number the card
+    /// shows, not `recipes.kcal`'s whole-recipe total. `None` at either end is an open
+    /// end; both `None` is "Any" and bounds nothing at all, which is what every plan is
+    /// born as and what [`Default`] gives the plan-less walk.
+    ///
+    /// Two plain `Option`s, not an `Option<Range>`: "no range" must have exactly one
+    /// representation, because the whole strictness rule keys off whether a range is set
+    /// at all (see [`load_corpus`]).
+    min_kcal_per_serving: Option<i64>,
+    max_kcal_per_serving: Option<i64>,
     /// The equipment the plan's kitchen is recorded as holding (#82). Already
     /// normalised (#81), so matching it is containment, never a fuzzy compare.
     ///
@@ -418,6 +428,62 @@ fn deals_as_the_meal(meal: Sitting, category: Option<&str>, sittings: &[Sitting]
 /// exception, which is the same measurement seen from the other side: a 1800-second cap
 /// leaves 390 of 790 recipes — 313 that fit it on the estimate we have, plus those 77 we
 /// cannot time at all.
+///
+/// # The calorie range (#213)
+///
+/// A plan can say how big a serving it is planning, and the deck respects it. This sits
+/// in SQL beside the cap, for the cap's reason: it is a scalar comparison SQL does
+/// natively, over columns the row already carries.
+///
+/// **It reads the number the card shows, and derives it the way the card derives it.**
+/// `recipes.kcal` is the *whole-recipe* total and `recipes.servings` is what that total
+/// feeds; per serving is a division the surface does (#162), so a range stated in
+/// whole-recipe kcal would bound a number no cook ever sees. The derivation here is
+/// therefore `recipes.kcal / recipes.servings`, and it is `$lib/nutrition.formatCalories`
+/// line for line:
+///
+/// ```text
+/// formatCalories (the badge)                 load_corpus (this filter)
+/// ──────────────────────────                 ─────────────────────────
+/// kcal == null → null                        kcal IS NOT NULL
+/// kcal <= 0    → null                        kcal > 0
+/// servings == null → null                    servings IS NOT NULL
+/// servings <= 0    → null                    servings > 0
+/// each = Math.floor(kcal / servings)         kcal / servings   (integer division;
+/// each < 1 → null                            kcal / servings >= 1
+/// ```
+///
+/// SQLite's `/` on two INTEGERs truncates toward zero, and both operands are positive by
+/// the lines above, so it **is** `Math.floor` — the two cannot disagree about a card.
+/// Every early `null` in the badge is a case where there is no per-serving number at
+/// all, and a recipe with no number cannot explicitly fit a range, so each maps to an
+/// exclusion here rather than to a special case.
+///
+/// **Strict, by ruling (#193).** With a range set, a recipe is dealt only when its
+/// reading explicitly fits, and that includes `kcal_complete = 1`:
+///
+/// - `kcal_complete = 0` means at least one line stated a number nothing could weigh, so
+///   the total is a **floor** (#162). A floor **above** the max proves the recipe does
+///   not fit; a floor **below** the max proves nothing at all — the real dish could be
+///   anywhere above it. Only one of those two is a proof, so an incomplete reading is
+///   dealt in neither case, and the clause that says so is `kcal_complete = 1`.
+/// - An unread recipe (`kcal IS NULL`) is out for the same reason it is out of a meal
+///   round: missing data is enrichment work (#162's worker), never a reason to widen the
+///   filter. The deck honestly thins, and thinning is the pressure that gets the corpus
+///   read.
+///
+/// This is the **opposite** call to the time cap directly above, and the difference is
+/// the same one the kitchen bound draws: a time estimate is a lower bound *even when we
+/// have it*, so the cap is choosing between two flavours of uncertainty and has no
+/// reason to be stricter with one — whereas `kcal_complete` tells us exactly which
+/// readings are complete, so there is a proof to insist on and no reason to accept a
+/// guess beside it.
+///
+/// **No range set changes nothing.** Both parameters `NULL` short-circuits the whole
+/// clause, so an unbounded walk, a plan-less walk and every plan that exists today deal
+/// exactly what they deal now. That is why the columns have no default (migration 0030):
+/// a plan born inside a range would silently thin its own deck to whatever the nutrition
+/// worker had reached.
 ///
 /// # The kitchen limit (#82)
 ///
@@ -549,8 +615,32 @@ async fn load_corpus(conn: &libsql::Connection, bounds: &Bounds) -> anyhow::Resu
                       WHERE votes.channel_id = ?2
                         AND votes.voter_id = ?3
                         AND votes.source = recipes.source
-                        AND votes.id = recipes.id))",
-            libsql::params![bounds.max_total_seconds, channel, voter],
+                        AND votes.id = recipes.id))
+               AND (
+                     -- No range set: both ends open, so this bounds nothing and the
+                     -- deck is exactly today's (#213).
+                     (?4 IS NULL AND ?5 IS NULL)
+                     -- A range IS set, so only an explicit fit is dealt (#193, ruled).
+                     -- `kcal / servings` is the number the card shows, derived here the
+                     -- way `$lib/nutrition.formatCalories` derives it: integer division
+                     -- over two positive integers is its `Math.floor`, and each of its
+                     -- early `null` exits is a line below. `kcal_complete = 1` is the
+                     -- ruling itself — an incomplete total is a floor, and a floor below
+                     -- the max proves nothing.
+                     OR (recipes.kcal_complete = 1
+                         AND recipes.kcal IS NOT NULL AND recipes.kcal > 0
+                         AND recipes.servings IS NOT NULL AND recipes.servings > 0
+                         AND recipes.kcal / recipes.servings >= 1
+                         AND (?4 IS NULL OR recipes.kcal / recipes.servings >= ?4)
+                         AND (?5 IS NULL OR recipes.kcal / recipes.servings <= ?5))
+                   )",
+            libsql::params![
+                bounds.max_total_seconds,
+                channel,
+                voter,
+                bounds.min_kcal_per_serving,
+                bounds.max_kcal_per_serving
+            ],
         )
         .await?;
 
@@ -706,6 +796,10 @@ async fn resolve_bounds(
     };
     Ok(Bounds {
         max_total_seconds: plan.max_total_seconds,
+        // Read fresh off the plan on every walk, like the cap: the client passes only the
+        // channel, so what bounds the deck is what the plan currently says (#213/#80).
+        min_kcal_per_serving: plan.min_kcal_per_serving,
+        max_kcal_per_serving: plan.max_kcal_per_serving,
         owned_equipment,
         // A channel names a plan, and the pick's one round deals that plan's meal, so a
         // channelled walk is always a meal round (#184). `None` — the unbounded,
@@ -723,8 +817,9 @@ async fn resolve_bounds(
 }
 
 /// `GET /api/walk?len=<n>&channel=<pick>` — a fresh variety-first walk over the
-/// corpus, bounded to the pick session's time cap (#80), to what its kitchen can make
-/// (#82), and to the meal it is for (#184) whenever a channel is named.
+/// corpus, bounded to the pick session's time cap (#80), to its calorie range (#213),
+/// to what its kitchen can make (#82), and to the meal it is for (#184) whenever a
+/// channel is named.
 ///
 /// Session-gated like every person-facing route (#25). Each call re-seeds from OS
 /// entropy, so the same corpus yields a different journey every time — freshness is
@@ -1239,6 +1334,352 @@ mod tests {
         conn
     }
 
+    // ---- the calorie range (#213) ------------------------------------------
+
+    /// A corpus shaped for the calorie range: one recipe per relationship a reading can
+    /// have with a bound over **kcal a serving**.
+    ///
+    /// Every total here is a whole-recipe total with a servings count beside it, as
+    /// `recipes` stores them (#162), so the per-serving figure each row is about is a
+    /// division and not a stored number — which is the thing under test. The right-hand
+    /// column is worked out by hand, off `formatCalories`' rule (the floor of
+    /// `kcal / servings`), and never by re-running the SQL:
+    ///
+    /// ```text
+    /// id          kcal  complete  servings   a serving   what it is
+    /// ─────────── ────  ────────  ────────   ─────────   ──────────────────────────
+    /// salad       1240      1         4          310     light, counted in full
+    /// lasagne     2810      1         4          702     2810/4 = 702.5, floors to 702
+    /// feast       4800      1         4         1200     hearty, counted in full
+    /// floor_low   1200      0         4          300     a floor UNDER a 500 max
+    /// floor_high  6000      0         4         1500     a floor OVER a 500 max
+    /// unread      NULL      0       NULL           —     the worker has not reached it
+    /// rub           90      1       100            0     0.9 floors to 0 — no number
+    /// ```
+    ///
+    /// `rub` is a big-batch spice rub: one weighable line, read as feeding a hundred. It
+    /// is the row that makes `kcal / servings >= 1` a rule rather than a formality —
+    /// `formatCalories` shows *nothing* for it, so it is a card the badge is silent
+    /// about and no range can explicitly fit.
+    async fn calorie_conn() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        for (id, kcal, complete, servings) in [
+            ("salad", Some(1240i64), 1i64, Some(4i64)),
+            ("lasagne", Some(2810), 1, Some(4)),
+            ("feast", Some(4800), 1, Some(4)),
+            ("floor_low", Some(1200), 0, Some(4)),
+            ("floor_high", Some(6000), 0, Some(4)),
+            ("unread", None, 0, None),
+            ("rub", Some(90), 1, Some(100)),
+        ] {
+            conn.execute(
+                "INSERT INTO recipes (source, id, title, kcal, kcal_complete, servings)
+                 VALUES ('test', ?1, ?1, ?2, ?3, ?4)",
+                libsql::params![id, kcal, complete, servings],
+            )
+            .await
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Bounded by a calorie range alone (#213), in kcal a serving.
+    fn ranged(min: Option<i64>, max: Option<i64>) -> Bounds {
+        Bounds {
+            min_kcal_per_serving: min,
+            max_kcal_per_serving: max,
+            ..Bounds::default()
+        }
+    }
+
+    /// **No range set changes nothing.** Both ends open is "Any", which is what every
+    /// plan is born as (migration 0030 gives the columns no default), and the deck is
+    /// the whole corpus — the unread recipe and both floors included, exactly as they
+    /// are dealt today.
+    ///
+    /// This is the guard on the strict rule below: strictness is the price of *asking*,
+    /// and a plan that asked nothing must not pay it.
+    #[tokio::test]
+    async fn no_calorie_range_takes_the_whole_corpus() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(None, None)).await.unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec![
+                "feast",
+                "floor_high",
+                "floor_low",
+                "lasagne",
+                "rub",
+                "salad",
+                "unread"
+            ]
+        );
+        // …and identical to the default bounds, so "Any" and "no plan" are one deck.
+        assert_eq!(
+            ids(&load_corpus(&conn, &Bounds::default()).await.unwrap()),
+            ids(&corpus)
+        );
+    }
+
+    /// A range deals the readings that explicitly fit it, and nothing else (#193).
+    ///
+    /// `salad` at 310 a serving is inside 200–800; `lasagne` at 702 is inside it;
+    /// `feast` at 1200 is outside. The two floors and the unread recipe are out on the
+    /// strictness rule, which the tests below pin one at a time.
+    #[tokio::test]
+    async fn a_calorie_range_deals_only_readings_that_fit_it() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(Some(200), Some(800)))
+            .await
+            .unwrap();
+        assert_eq!(ids(&corpus), vec!["lasagne", "salad"]);
+    }
+
+    /// The bound is **inclusive at both ends**, the same call the time cap makes (a
+    /// 30-minute recipe fits a 30-minute cap).
+    ///
+    /// Pinned on `lasagne`'s hand-computed 702 from both sides: a range that starts
+    /// exactly there deals it, and one that ends exactly there deals it. A `>=`
+    /// weakened to `>`, or a `<=` weakened to `<`, drops it from one of these two decks.
+    #[tokio::test]
+    async fn the_calorie_range_includes_both_of_its_ends() {
+        let conn = calorie_conn().await;
+        let from_exactly = load_corpus(&conn, &ranged(Some(702), Some(800)))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&from_exactly),
+            vec!["lasagne"],
+            "a serving exactly at the min fits"
+        );
+        let to_exactly = load_corpus(&conn, &ranged(Some(400), Some(702)))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&to_exactly),
+            vec!["lasagne"],
+            "a serving exactly at the max fits"
+        );
+    }
+
+    /// **The strict rule, by name (#193).** An incomplete reading whose floor sits
+    /// *below* the max is **not dealt**.
+    ///
+    /// `floor_low` is 1200 kcal over 4 servings — 300 a serving — with
+    /// `kcal_complete = 0`, so at least one line stated a number nothing could weigh and
+    /// 300 is the least it can be. A range of "up to 500 a serving" therefore proves
+    /// nothing about it: the real dish is somewhere at or above 300 and could be 900.
+    /// Admitting it would put a guess in a deck that promised a proof.
+    ///
+    /// `salad` sits at 310 in the very same window with a complete reading and *is*
+    /// dealt, which is what makes this a test about completeness rather than about the
+    /// number.
+    #[tokio::test]
+    async fn an_incomplete_reading_below_the_max_is_not_dealt_while_a_range_is_set() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(None, Some(500))).await.unwrap();
+        assert!(
+            !ids(&corpus).contains(&"floor_low"),
+            "a floor below the max proves nothing, so it is not dealt: {:?}",
+            ids(&corpus)
+        );
+        assert!(
+            ids(&corpus).contains(&"salad"),
+            "the same window with a complete reading is dealt: {:?}",
+            ids(&corpus)
+        );
+    }
+
+    /// The other side of the same rule: an incomplete reading whose floor is already
+    /// *above* the max is out too — there the exclusion really is a proof, and the deck
+    /// looks the same either way, which is exactly why the test above is the one that
+    /// carries the ruling.
+    #[tokio::test]
+    async fn an_incomplete_reading_above_the_max_is_not_dealt_either() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(None, Some(500))).await.unwrap();
+        assert!(
+            !ids(&corpus).contains(&"floor_high"),
+            "a floor already over the max cannot fit: {:?}",
+            ids(&corpus)
+        );
+    }
+
+    /// An unread recipe is in no ranged deck — #162's worker has not reached it — the
+    /// same treatment the meal round gives an unread sitting and for the same written
+    /// reason: missing data is enrichment work, never a reason to widen the filter.
+    ///
+    /// A range as wide as the API allows still leaves it out, so this is about the
+    /// absence and not about the number.
+    #[tokio::test]
+    async fn an_unread_recipe_is_not_dealt_while_a_range_is_set() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(Some(1), Some(10_000)))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec!["feast", "lasagne", "salad"],
+            "only the three complete readings, however wide the range"
+        );
+    }
+
+    /// **The range reads kcal a *serving*, not the whole-recipe total**, and derives it
+    /// the way the card does.
+    ///
+    /// `lasagne` stores 2810 kcal over 4 servings. Worked out by hand off
+    /// `formatCalories`' rule, that is `floor(2810 / 4) = 702` a serving — the number
+    /// the badge prints. So:
+    ///
+    /// - a range of 700–800 **deals** it, because 702 is in it;
+    /// - a range of 2500–3000 deals **nothing**, even though 2810 is squarely inside —
+    ///   which is only true if the filter divides.
+    ///
+    /// The second half is the point: it fails on any implementation that compares the
+    /// stored total, and passes only on one that compares what the cook is shown.
+    #[tokio::test]
+    async fn the_range_reads_kcal_a_serving_not_the_whole_recipe_total() {
+        let conn = calorie_conn().await;
+        assert_eq!(
+            ids(&load_corpus(&conn, &ranged(Some(700), Some(800)))
+                .await
+                .unwrap()),
+            vec!["lasagne"],
+            "702 a serving is in a 700-800 range"
+        );
+        assert!(
+            ids(&load_corpus(&conn, &ranged(Some(2500), Some(3000)))
+                .await
+                .unwrap())
+            .is_empty(),
+            "2810 is the tray, not the plate — nothing is dealt by the total"
+        );
+    }
+
+    /// The division floors, it does not round: `2810 / 4` is 702.5 and the card prints
+    /// 702, so a range pinned at 702 holds this recipe and one pinned at 703 does not.
+    /// Rounding would have reversed both answers.
+    #[tokio::test]
+    async fn the_per_serving_division_floors_exactly_as_the_card_does() {
+        let conn = calorie_conn().await;
+        assert_eq!(
+            ids(&load_corpus(&conn, &ranged(Some(702), Some(702)))
+                .await
+                .unwrap()),
+            vec!["lasagne"],
+            "the floored figure is 702"
+        );
+        assert!(
+            ids(&load_corpus(&conn, &ranged(Some(703), Some(703)))
+                .await
+                .unwrap())
+            .is_empty(),
+            "703 is what rounding would have given, and it is not the card's number"
+        );
+    }
+
+    /// A serving the card cannot print is a serving no range can fit. `rub` is 90 kcal
+    /// read as feeding a hundred, which floors to 0 — `formatCalories` returns `null`
+    /// and the badge shows nothing — so it stays out of a range that would otherwise
+    /// hold anything small, rather than being dealt as a card the bound promised
+    /// something about and the badge is silent on.
+    #[tokio::test]
+    async fn a_serving_that_floors_below_one_kcal_is_not_dealt() {
+        let conn = calorie_conn().await;
+        let corpus = load_corpus(&conn, &ranged(None, Some(500))).await.unwrap();
+        assert_eq!(
+            ids(&corpus),
+            vec!["salad"],
+            "the sub-1 serving has no number to fit"
+        );
+    }
+
+    /// **Either end may be open, and one open end still bounds.** A min alone keeps the
+    /// hearty ones; a max alone keeps the light ones; the two are not the same deck, and
+    /// neither is the whole corpus.
+    ///
+    /// This is what "no range set" has to be told apart from: the short-circuit is both
+    /// ends `NULL` *together*, so a half-open range that fell through it would deal the
+    /// unread recipe and both floors.
+    #[tokio::test]
+    async fn one_open_end_still_bounds_the_deck() {
+        let conn = calorie_conn().await;
+        assert_eq!(
+            ids(&load_corpus(&conn, &ranged(Some(700), None)).await.unwrap()),
+            vec!["feast", "lasagne"],
+            "a min alone keeps 702 and 1200 and drops 310"
+        );
+        assert_eq!(
+            ids(&load_corpus(&conn, &ranged(None, Some(700))).await.unwrap()),
+            vec!["salad"],
+            "a max alone keeps 310 and drops 702 and 1200"
+        );
+    }
+
+    /// The two ends are not interchangeable: 200–800 and 800–200 are different
+    /// questions and only the first has an answer. The lobby cannot send the second
+    /// (`session::validate_kcal_range` refuses it), so this pins that the SQL reads `?4`
+    /// as the floor and `?5` as the ceiling rather than the other way round.
+    #[tokio::test]
+    async fn the_two_ends_are_not_interchangeable() {
+        let conn = calorie_conn().await;
+        assert_eq!(
+            ids(&load_corpus(&conn, &ranged(Some(200), Some(800)))
+                .await
+                .unwrap()),
+            vec!["lasagne", "salad"]
+        );
+        assert!(
+            ids(&load_corpus(&conn, &ranged(Some(800), Some(200)))
+                .await
+                .unwrap())
+            .is_empty(),
+            "an upside-down range selects nothing rather than the same deck"
+        );
+    }
+
+    /// The calorie range composes with the bounds already on the plan (#80, #184): each
+    /// narrows, none replaces, and a recipe has to satisfy all of them.
+    ///
+    /// `lasagne` and `salad` both fit the range; only `lasagne` is also read as a dinner
+    /// and estimated inside the cap, so it is the one recipe the deck holds.
+    #[tokio::test]
+    async fn the_calorie_range_composes_with_the_time_cap_and_the_meal() {
+        let conn = calorie_conn().await;
+        conn.execute(
+            "UPDATE recipes SET total_seconds = 1500, sittings = '[\"dinner\"]'
+              WHERE id = 'lasagne'",
+            (),
+        )
+        .await
+        .unwrap();
+        // Fits the range and is read as a dinner, but takes too long.
+        conn.execute(
+            "UPDATE recipes SET total_seconds = 7200, sittings = '[\"dinner\"]'
+              WHERE id = 'salad'",
+            (),
+        )
+        .await
+        .unwrap();
+        let bounds = Bounds {
+            max_total_seconds: Some(1800),
+            meal_type: Some(MealType::Dinner),
+            min_kcal_per_serving: Some(200),
+            max_kcal_per_serving: Some(800),
+            ..Bounds::default()
+        };
+        assert_eq!(
+            ids(&load_corpus(&conn, &bounds).await.unwrap()),
+            vec!["lasagne"]
+        );
+    }
+
     /// A corpus shaped for the kitchen bound (#82): one recipe per relationship a
     /// kitchen can have with a reading — needs nothing you lack, needs one thing you
     /// lack, needs several, and one with no reading at all.
@@ -1569,6 +2010,7 @@ mod tests {
             // Nobody has answered anything, so #202 narrows nothing here — the three
             // bounds under test are time, kitchen and meal.
             answered_by: None,
+            ..Bounds::default()
         };
         let corpus = load_corpus(&conn, &bounds).await.unwrap();
         assert_eq!(ids(&corpus), vec!["blank", "pancakes"]);
