@@ -321,13 +321,27 @@ device scale, animations disabled, a wait on `document.fonts.ready`, and every
 external image fixture (the cards point at real `themealdb.com` photos) stubbed
 with a fixed local placeholder so nothing touches the network — an unstubbed
 photo would make the shot go red whenever a source rotates an image, which is
-noise, not a UI change. Two independent runs diff by **exactly 0px** — measured
-— so the diff budget is a few pixels of slack for a theoretical cross-machine AA
-fringe, not a noise allowance, and even a colour tweak on a tiny element (a nav
-"you are here" ring) is caught. `visual-shoot` drives puppeteer for a
-**full-page** capture rather than `storybook-shot`'s fixed viewport, because a
-cropped page would let a change below the fold land unreviewed — exactly what
-the fence exists to prevent.
+noise, not a UI change.
+
+The photographs the app ships are held to one more rule: they render **1:1**,
+one source pixel per device pixel, asserted on every shot. An image drawn at a
+fractional scale has a partly covered destination column at its edge, and the
+browser has more than one way to resolve it; under load it does not always pick
+the same one, so two shoots of one build disagreed about that column and the
+fence reported a change nobody had made (#223). That is worse than churn: it
+makes a real regression in a photo-backed page indistinguishable from noise, and
+the pressure becomes to re-bless. So `/kitchen.jpg` and `/pick.jpg` are
+1800x3200 — twice the 900x800 viewport on the axis `object-cover` scales by, so
+at device scale 2 there is nothing left to resample and no raster path can move
+a pixel. Re-crop one and the shoot fails, naming the scale it got.
+
+Two independent runs diff by **exactly 0px** — measured, on every story — so the
+diff budget is a few pixels of slack for a theoretical cross-machine AA fringe,
+not a noise allowance, and even a colour tweak on a tiny element (a nav "you are
+here" ring) is caught. `visual-shoot` drives puppeteer for a **full-page**
+capture rather than `storybook-shot`'s fixed viewport, because a cropped page
+would let a change below the fold land unreviewed — exactly what the fence
+exists to prevent.
 
 ## Deploying
 

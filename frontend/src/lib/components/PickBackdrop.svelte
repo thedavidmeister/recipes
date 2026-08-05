@@ -9,6 +9,13 @@
    *
    * Its own component so the page and the story that checks legibility over it render
    * the *same* markup.
+   *
+   * `/pick.jpg` is 1800x3200 — exactly twice the visual fence's 900x800 viewport on the
+   * axis `object-cover` scales by, so at the fence's device scale of 2 the photograph
+   * draws one source pixel per device pixel with nothing to resample. Under a
+   * fractional scale the browser was free to resolve the image's last column either of
+   * two ways, and two shoots of one build disagreed about it (#223). `visual-shoot`
+   * asserts the 1:1 on every shot, so a re-crop that breaks it fails loudly.
    */
 </script>
 

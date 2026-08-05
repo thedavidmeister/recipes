@@ -543,10 +543,15 @@ self-hosted fonts via `FONTCONFIG_FILE`, fixed viewport + scale, animations off,
 a wait on `document.fonts.ready`, and external images stubbed with a local
 placeholder (`visual-shoot` intercepts them; fixtures point at real
 `themealdb.com` photos, and an unstubbed one makes the shot depend on the
-network and go red on a photo rotation). **Two independent runs diff by exactly
-0px** (measured), so the tiny changed-pixel budget (`MAX_CHANGED`) is slack for
-a theoretical cross-machine AA fringe, not a noise allowance — even a colour
-tweak on a nav "you are here" ring (~248px) is caught. `visual-shoot` drives
-puppeteer for a **full-page** capture, not `storybook-shot`'s fixed viewport,
-because a cropped page hides below-fold changes — the one thing the fence exists
-to catch.
+network and go red on a photo rotation). The app's own photographs render
+**1:1** — one source pixel per device pixel — and `visual-shoot` asserts it per
+shot: a fractionally scaled image leaves its edge column to whichever raster
+path the browser takes, which under load is not always the same one, and two
+shoots of one build disagreed (#223). `/kitchen.jpg` and `/pick.jpg` are
+1800x3200 for that reason; re-crop one and the shoot fails rather than the fence
+going noisy. **Two independent runs diff by exactly 0px** (measured), so the
+tiny changed-pixel budget (`MAX_CHANGED`) is slack for a theoretical
+cross-machine AA fringe, not a noise allowance — even a colour tweak on a nav
+"you are here" ring (~248px) is caught. `visual-shoot` drives puppeteer for a
+**full-page** capture, not `storybook-shot`'s fixed viewport, because a cropped
+page hides below-fold changes — the one thing the fence exists to catch.
