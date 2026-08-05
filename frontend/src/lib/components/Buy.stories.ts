@@ -487,4 +487,3 @@ export const Error: Story = {
     error: "The server didn't answer (502). Try again in a moment.",
   },
 };
-
