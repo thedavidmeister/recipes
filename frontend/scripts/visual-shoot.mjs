@@ -13,6 +13,9 @@
  *   - a fixed width + deviceScaleFactor, animations disabled, and a wait on
  *     document.fonts.ready so text is never captured mid-swap, and every
  *     image's decode() so a photograph is never captured mid-decode.
+ *   - every image the app itself ships renders unresampled — one source pixel per
+ *     device pixel — asserted on every shot. This is the one thing above that no
+ *     amount of waiting can fix: see `assertUnresampled` (#223).
  *   - external images (fixtures point at real themealdb.com photos) are stubbed
  *     with a fixed local placeholder. The regression fence protects layout, not a
  *     remote CDN's pixels — an unstubbed photo would make the shot depend on the
@@ -53,6 +56,70 @@ if (!CHROMIUM) {
   );
   process.exit(1);
 }
+
+/**
+ * Runs in the page: every image served from our own origin must land on the device
+ * pixel grid exactly — one source pixel per device pixel, nothing to resample.
+ *
+ * A photograph drawn at a fractional scale has a partly covered destination column at
+ * its edge, and the browser has more than one way to resolve it. Which one it takes is
+ * a raster-path decision, and under load it does not always take the same one, so two
+ * shoots of the *same build* differ in that column — the fence reporting a change the
+ * app did not make, which defeats it (#223). At a scale of exactly 1 there is nothing
+ * to resolve: the destination is the source, whatever filter the rasterizer picks.
+ *
+ * The backdrops ship as a `srcset` ladder, so this works from `currentSrc` — the
+ * variant the browser actually *chose*, not the one the markup lists first. That makes
+ * it a check on the choice as well as on the file: the fence pins the viewport and the
+ * device scale, so the selection is a pure function of two fixed numbers, and a
+ * selection that landed on another rung would stop being 1:1 and be named here.
+ *
+ * It cannot use `naturalWidth` of the rendered element to do that. On an image with a
+ * `srcset`, that property is *density-corrected* — the browser divides the file's real
+ * pixels by the density of the candidate it picked and reports CSS pixels, so a 1800px
+ * file chosen at 2x reports 900 and every ladder would look like it was drawn at 2x.
+ * The chosen file is re-loaded on its own, without a `srcset` to correct against, which
+ * is the only way to ask what it actually is.
+ *
+ * Only our own assets are held to this. The external fixtures are answered with a flat
+ * 8x8 placeholder below, and no scale can change a pixel of one flat colour.
+ *
+ * Returns a list of offenders (empty when everything is on the grid).
+ */
+const assertUnresampled = async (origin) => {
+  const off = [];
+  for (const img of document.images) {
+    if (!img.currentSrc.startsWith(origin)) continue;
+    const probe = new Image();
+    probe.src = img.currentSrc;
+    await probe.decode().catch(() => {});
+    const sourceW = probe.naturalWidth;
+    const sourceH = probe.naturalHeight;
+    if (!sourceW || !sourceH) continue;
+    const box = img.getBoundingClientRect();
+    const fit = getComputedStyle(img).objectFit;
+    const x = box.width / sourceW;
+    const y = box.height / sourceH;
+    // `fill` stretches the axes independently, so it has no single scale — it can only
+    // be unresampled when both axes are, which is what comparing them each to 1 does.
+    const scales = fit === "cover"
+      ? [Math.max(x, y)]
+      : fit === "contain" || fit === "scale-down"
+      ? [Math.min(x, y)]
+      : fit === "none"
+      ? [1]
+      : [x, y];
+    if (scales.every((s) => s * devicePixelRatio === 1)) continue;
+    off.push(
+      `${
+        new URL(img.currentSrc).pathname
+      } is ${sourceW}x${sourceH} drawn into ${box.width}x${box.height} (object-fit: ${fit}) at ${
+        scales.map((s) => (s * devicePixelRatio).toFixed(4)).join("x")
+      } device px per source px`,
+    );
+  }
+  return off;
+};
 
 const MIME = {
   ".html": "text/html",
@@ -154,6 +221,20 @@ try {
         [...document.images].map((img) => img.decode().catch(() => {})),
       );
     });
+    const resampled = await page.evaluate(
+      assertUnresampled,
+      `http://127.0.0.1:${port}/`,
+    );
+    if (resampled.length) {
+      console.error(
+        `visual-shoot: ${id} draws an app image at a scale other than 1:1, so its\n` +
+          `pixels are a raster-path decision and two shoots of this build can differ:\n` +
+          resampled.map((r) => `  ${r}\n`).join("") +
+          `Re-export the asset at the size it is drawn — do not widen the diff budget.`,
+      );
+      process.exitCode = 1;
+      break;
+    }
     await page.screenshot({ path: join(OUT, `${id}.png`), fullPage: true });
     console.log(id);
   }

@@ -321,13 +321,36 @@ device scale, animations disabled, a wait on `document.fonts.ready`, and every
 external image fixture (the cards point at real `themealdb.com` photos) stubbed
 with a fixed local placeholder so nothing touches the network — an unstubbed
 photo would make the shot go red whenever a source rotates an image, which is
-noise, not a UI change. Two independent runs diff by **exactly 0px** — measured
-— so the diff budget is a few pixels of slack for a theoretical cross-machine AA
-fringe, not a noise allowance, and even a colour tweak on a tiny element (a nav
-"you are here" ring) is caught. `visual-shoot` drives puppeteer for a
-**full-page** capture rather than `storybook-shot`'s fixed viewport, because a
-cropped page would let a change below the fold land unreviewed — exactly what
-the fence exists to prevent.
+noise, not a UI change.
+
+The photographs the app ships are held to one more rule: **whatever variant the
+shot resolves renders 1:1**, one source pixel per device pixel, asserted on
+every shot. An image drawn at a fractional scale has a partly covered
+destination column at its edge, and the browser has more than one way to resolve
+it; under load it does not always pick the same one, so two shoots of one build
+disagreed about that column and the fence reported a change nobody had made
+(#223). That is worse than churn: it makes a real regression in a photo-backed
+page indistinguishable from noise, and the pressure becomes to re-bless.
+
+The backdrops ship as a `srcset` ladder — 720/1080/1440/1800 wide, one 9:16
+frame from one master, `sizes="100vw"` because the wrapper is `fixed inset-0`
+and the image really is viewport-wide. Devices take the rung their screen needs,
+and a phone downloads **less** than the single file that preceded the ladder.
+The fence pins the viewport to 900 CSS px and the device scale to 2, so `100vw`
+is exactly 900, the density asked for is exactly 2.0, and the 1800w rung is the
+narrowest candidate meeting it — the same rung every run, by arithmetic over two
+fixed numbers. At that rung there is nothing left to resample and no raster path
+can move a pixel. The shoot checks the variant the browser actually _chose_, so
+a selection landing on another rung, or a rung re-cropped off the ladder, fails
+the shoot and names the scale it got.
+
+Two independent runs diff by **exactly 0px** — measured, on every story — so the
+diff budget is a few pixels of slack for a theoretical cross-machine AA fringe,
+not a noise allowance, and even a colour tweak on a tiny element (a nav "you are
+here" ring) is caught. `visual-shoot` drives puppeteer for a **full-page**
+capture rather than `storybook-shot`'s fixed viewport, because a cropped page
+would let a change below the fold land unreviewed — exactly what the fence
+exists to prevent.
 
 ## Deploying
 
