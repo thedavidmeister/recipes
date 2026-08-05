@@ -68,19 +68,38 @@ if (!CHROMIUM) {
  * app did not make, which defeats it (#223). At a scale of exactly 1 there is nothing
  * to resolve: the destination is the source, whatever filter the rasterizer picks.
  *
+ * The backdrops ship as a `srcset` ladder, so this works from `currentSrc` — the
+ * variant the browser actually *chose*, not the one the markup lists first. That makes
+ * it a check on the choice as well as on the file: the fence pins the viewport and the
+ * device scale, so the selection is a pure function of two fixed numbers, and a
+ * selection that landed on another rung would stop being 1:1 and be named here.
+ *
+ * It cannot use `naturalWidth` of the rendered element to do that. On an image with a
+ * `srcset`, that property is *density-corrected* — the browser divides the file's real
+ * pixels by the density of the candidate it picked and reports CSS pixels, so a 1800px
+ * file chosen at 2x reports 900 and every ladder would look like it was drawn at 2x.
+ * The chosen file is re-loaded on its own, without a `srcset` to correct against, which
+ * is the only way to ask what it actually is.
+ *
  * Only our own assets are held to this. The external fixtures are answered with a flat
  * 8x8 placeholder below, and no scale can change a pixel of one flat colour.
  *
  * Returns a list of offenders (empty when everything is on the grid).
  */
-const assertUnresampled = (origin) => {
+const assertUnresampled = async (origin) => {
   const off = [];
   for (const img of document.images) {
     if (!img.currentSrc.startsWith(origin)) continue;
+    const probe = new Image();
+    probe.src = img.currentSrc;
+    await probe.decode().catch(() => {});
+    const sourceW = probe.naturalWidth;
+    const sourceH = probe.naturalHeight;
+    if (!sourceW || !sourceH) continue;
     const box = img.getBoundingClientRect();
     const fit = getComputedStyle(img).objectFit;
-    const x = box.width / img.naturalWidth;
-    const y = box.height / img.naturalHeight;
+    const x = box.width / sourceW;
+    const y = box.height / sourceH;
     // `fill` stretches the axes independently, so it has no single scale — it can only
     // be unresampled when both axes are, which is what comparing them each to 1 does.
     const scales = fit === "cover"
@@ -94,7 +113,7 @@ const assertUnresampled = (origin) => {
     off.push(
       `${
         new URL(img.currentSrc).pathname
-      } is ${img.naturalWidth}x${img.naturalHeight} drawn into ${box.width}x${box.height} (object-fit: ${fit}) at ${
+      } is ${sourceW}x${sourceH} drawn into ${box.width}x${box.height} (object-fit: ${fit}) at ${
         scales.map((s) => (s * devicePixelRatio).toFixed(4)).join("x")
       } device px per source px`,
     );
