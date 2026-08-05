@@ -471,9 +471,12 @@ pub struct EventEnvelope<T> {
 /// the plan moves together. `initiator` is what is *true* — sent down the one socket
 /// that raised the event, because a refusal is not news to anybody else (#222).
 ///
-/// Exactly one of them is ever non-empty, and that is a property of the path rather than
-/// a rule anything enforces: an accepted event announces and answers nothing, a refused
-/// one answers and announces nothing. Keeping them as separate fields is what stops the
+/// **At most one is ever non-empty**, which is a property of the path rather than a rule
+/// anything enforces: an accepted event fills `room` and never `initiator`, a refused one
+/// fills `initiator` and never `room`. Both empty is a real and ordinary answer — a vote
+/// the handler's own predicate declined, or a refused cook on a plan with no cook to
+/// state — and it is the one case where the old silence is still the honest reply.
+/// Keeping them as separate fields is what stops the
 /// transport from having to guess which it is holding — [`crate::session::socket_loop`]
 /// broadcasts one and writes the other to its own sink, and neither can be mistaken for
 /// the other by a caller that forgot to check.

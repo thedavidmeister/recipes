@@ -111,10 +111,12 @@ describe("sharedTicks", () => {
   });
 
   it("takes the colour back with the tick when the room refuses it", () => {
-    // A tick the server's own predicate refused still gets a whole-list frame back —
-    // the list as it actually is, which does not hold line 2 — and that frame clears
-    // `inFlight`. Nothing of the optimism survives it: not the tick, and so not the
-    // colour, because they were one entry.
+    // A refused tick gets a whole-list frame back — the list as it actually is, which
+    // does not hold line 2 — and that frame clears `inFlight`. Both refusals arrive
+    // that way now: the write predicate's, announced to the room, and the guard's,
+    // which since #222 answers the raising socket alone instead of saying nothing.
+    // Nothing of the optimism survives either: not the tick, and so not the colour,
+    // because they were one entry.
     expect(sharedTicks([], { 2: true }, you)).toHaveProperty("2");
     const rolledBack = sharedTicks([], {}, you);
     expect(rolledBack).toEqual({});

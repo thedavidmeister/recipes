@@ -400,9 +400,9 @@
             {/each}
             {roster.length === 1 ? "is" : "are"} shopping.
           {:else}
-            <!-- The roster has not been read. The plan is still somebody's, and
+            <!-- The roster has not been read. The shop is still somebody's, and
                  saying so without names beats saying nothing. -->
-            This plan is somebody else's shop.
+            Somebody else is shopping.
           {/if}
           You're watching — this plan started without you.
         </p>
