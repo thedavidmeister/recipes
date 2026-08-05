@@ -326,6 +326,94 @@ export const CompleteOnThisDevice: Story = {
   },
 };
 
+/**
+ * **Watching somebody else's shop** (#200/#222) — the state `buy` never had.
+ *
+ * Somebody who opened a plan that had already started is on no roster, so the server
+ * refuses every tick they could make. This is what they get instead: the whole list,
+ * every attribution on it — `mel`'s two lines, `kit`'s one, the jar that answered for
+ * the tomatoes — and no box to tap. The tick is *stated* where it used to be *offered*:
+ * a solid square in the colour of whoever got it, an outline where nobody has it.
+ *
+ * Read it against `PantryAndPeople` above, which is the same list for somebody who is
+ * shopping it. Everything that says *what is got and whose* is identical; the only
+ * difference is that nothing here is pressable, and the footer says whose shop it is —
+ * `Pick`'s watching line, one page along, because watching means one thing everywhere.
+ *
+ * It is the story that pins the suppression: dropping `watching` from `Buy` restores
+ * sixteen tappable checkboxes and takes the footer away, and the visual fence sees both.
+ */
+export const Watching: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    watching: true,
+    roster: [mel, kit, sam],
+    ticks: { 0: got(mel), 2: inPantry("tomato"), 5: got(kit), 8: got(mel) },
+  },
+};
+
+/**
+ * A watcher on a **finished** list: the shop is over, the room is about to cook, and
+ * there is still nothing here for them to press.
+ *
+ * "Let's cook!" goes with the checkboxes, and for the same reason — `Guard::
+ * SeatedInDecidedPlan` refuses a watcher's `cook_started`, so a button would offer
+ * itself and explain nothing (`Pick`'s rule about a greyed-out **Yes**, one page along).
+ * They are not left behind by it: the room's `cooking` frame reaches every socket, so a
+ * watcher is carried to the stove by the announcement exactly as they were carried here
+ * by the decision.
+ *
+ * Read against `Complete`, which is the same finish for somebody who is shopping it.
+ */
+export const WatchingAFinishedList: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    watching: true,
+    roster: [mel, kit],
+    ticks: {
+      0: got(mel),
+      1: got(kit),
+      2: got(mel),
+      3: got(kit),
+      4: got(mel),
+      5: got(kit),
+      6: got(mel),
+      7: got(kit),
+      8: got(mel),
+      9: got(kit),
+      10: got(mel),
+      11: got(kit),
+      12: got(mel),
+      13: got(kit),
+      14: got(mel),
+      15: got(kit),
+    },
+  },
+};
+
+/**
+ * Watching before the roster has been read.
+ *
+ * The lobby is a second request, so there is a frame in which this screen knows it is
+ * watching and cannot yet name anybody. The sentence holds without the names rather
+ * than blinking a half-built list of them into place — the plan is somebody else's
+ * either way, which is the part that explains the missing boxes.
+ */
+export const WatchingBeforeTheRosterArrives: Story = {
+  args: {
+    status: "ready",
+    recipe: buyRecipe(),
+    shared: true,
+    watching: true,
+    roster: [],
+    ticks: { 0: got(mel), 2: inPantry("tomato") },
+  },
+};
+
 /** A tick that did not take: the row goes back to what the server last said, and
  * the reason is on screen. A line that looks got but is not is how somebody comes
  * home without the flour. */

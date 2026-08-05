@@ -42,12 +42,38 @@
 //!            │
 //!            ├─ normalize   at → shared timeline, via this connection's ClockOffset
 //!            ├─ guard       the kind's policy, applied here and only here
+//!            │    └─ refused → truth: the recorded state of this event's subject,
+//!            │                 to the initiating connection and to nobody else
 //!            ├─ apply       the kind's handler: one durable write
 //!            └─ announce    the frames the handler produced, to the whole room
 //! ```
 //!
 //! Each stage is framework code and each is asked once, so a new event kind supplies a
 //! payload, a [`Guard`], and an `apply` arm — never its own copy of that choreography.
+//!
+//! ## A refusal answers with the room's truth (#222)
+//!
+//! A refusal used to be an **empty answer**: nothing written, nothing said, and nothing
+//! for the device that raised it to re-converge on. That was defensible while a refused
+//! tap changed nothing on screen either, and it stopped being defensible the moment the
+//! client started painting a tap before the room confirmed it (#210/#219) — a watcher's
+//! tick then stranded a claim, in somebody's colour, that no basket contained.
+//!
+//! So a guard refusal is answered, and the answer is not a reason but a **fact**: the
+//! current recorded state of the thing the event named, in the kind's own whole-state
+//! frame ([`truth`]). Three properties, each load-bearing:
+//!
+//! - **To the initiator only.** Nothing happened, so the room has nothing to hear; a
+//!   frame sent to everybody would be an announcement of a non-event.
+//! - **A read, never a write.** The refusal path touches no table at all — an event the
+//!   plan refused must not be a back door to the one write an accepted one performs
+//!   first ([`crate::session::seed_buy_list`]).
+//! - **Whole state, not a verdict.** Re-stating a fact is the cheapest possible way to be
+//!   right (the [`announce_timers`] rule): a device that was drifting is corrected
+//!   whatever it was drifting about, and one that was not sees nothing change.
+//!
+//! This does **not** move the line about *who* may raise what. The guard is byte for byte
+//! the predicate it was; the only difference is what a refused device is told afterwards.
 //!
 //! ## Everything a session raises comes through here (#209)
 //!
@@ -438,16 +464,46 @@ pub struct EventEnvelope<T> {
     pub payload: T,
 }
 
+/// **What one event produced, and who hears it.**
+///
+/// Two lists rather than one, because an event has two possible audiences and they are
+/// never the same audience. `room` is what *happened* — broadcast, so every screen in
+/// the plan moves together. `initiator` is what is *true* — sent down the one socket
+/// that raised the event, because a refusal is not news to anybody else (#222).
+///
+/// **At most one is ever non-empty**, which is a property of the path rather than a rule
+/// anything enforces: an accepted event fills `room` and never `initiator`, a refused one
+/// fills `initiator` and never `room`. Both empty is a real and ordinary answer — a vote
+/// the handler's own predicate declined, or a refused cook on a plan with no cook to
+/// state — and it is the one case where the old silence is still the honest reply.
+/// Keeping them as separate fields is what stops the
+/// transport from having to guess which it is holding — [`crate::session::socket_loop`]
+/// broadcasts one and writes the other to its own sink, and neither can be mistaken for
+/// the other by a caller that forgot to check.
+#[derive(Debug, Default)]
+pub struct Ingested {
+    /// To the whole plan, over its broadcast channel — including the initiator's own
+    /// socket, which is subscribed like every other.
+    pub room: Vec<ServerMsg>,
+    /// To the connection that raised the event, and to nobody else.
+    pub initiator: Vec<ServerMsg>,
+}
+
 /// **The choke point**: normalise, guard, apply, announce — for every event kind.
 ///
-/// Returns the frames to broadcast to the room; an empty vector is "nothing was
+/// Returns what the room is told and what the initiating device is told ([`Ingested`]).
+/// An accepted event announces to the room; an empty announcement is "nothing was
 /// recorded, so nothing is announced", which is the same rule `record_vote` follows and
 /// for the same reason — a room told about a write the database refused would show a
 /// countdown nobody can stop.
 ///
-/// A refusal is silent, as every refusal on this socket is (#179/#180): a frame the
-/// server never answers has nowhere to carry a reason. The client's half of that is not
-/// offering the control — see the cook page's `watching`.
+/// **A refusal is answered, not silent** (#222). The room hears nothing, because nothing
+/// happened; the device that raised it is handed the current recorded state of what it
+/// named ([`truth`]), so it re-converges instead of drifting. There is still no *reason*
+/// on this wire — a socket frame has nowhere to carry a sentence — and the client's half
+/// of that is still not offering the control in the first place (see the cook and `buy`
+/// pages' `watching`). What changed is that a device which offered one anyway, or raced
+/// the roster, is no longer left holding a claim the plan never accepted.
 ///
 /// The guard is asked here **and** re-asserted inside each handler's own write. That is
 /// not belt-and-braces, it is the #175/#179 discipline: this read tells the framework
@@ -461,7 +517,7 @@ pub async fn ingest(
     local_ms: i64,
     received_ms: i64,
     payload: SessionEvent,
-) -> anyhow::Result<Vec<ServerMsg>> {
+) -> anyhow::Result<Ingested> {
     let event = EventEnvelope {
         initiator: initiator.to_owned(),
         channel: channel.to_owned(),
@@ -469,9 +525,61 @@ pub async fn ingest(
         payload,
     };
     if !authorized(conn, &event).await? {
-        return Ok(Vec::new());
+        return Ok(Ingested {
+            room: Vec::new(),
+            initiator: truth(conn, &event).await?,
+        });
     }
-    apply(conn, &event).await
+    Ok(Ingested {
+        room: apply(conn, &event).await?,
+        initiator: Vec::new(),
+    })
+}
+
+/// **What a refused device is told**: the recorded state of this event's subject, per
+/// kind — the framework's half of #222.
+///
+/// A table, exactly as [`SessionEvent::guard`] is a table, and for the same reason: a new
+/// kind does not compile until somebody has said what its refusal answers with. Every arm
+/// reuses the kind's **existing** whole-state announcement, so there is no second
+/// description of a plan's state to disagree with the first one, and every arm is a
+/// **read** — a refusal writes nothing.
+///
+/// | kind | the subject | the answer |
+/// | --- | --- | --- |
+/// | [`SessionEvent::BuyTick`] | one recipe's shopping list | [`ServerMsg::Buy`] — the recorded checks, via [`announce_buy`] |
+/// | [`SessionEvent::TimerStart`] | one recipe's timers | [`ServerMsg::Timers`] — via [`announce_timers`] |
+/// | [`SessionEvent::TimerDismiss`] | one recipe's timers | [`ServerMsg::Timers`] — via [`announce_timers`] |
+/// | [`SessionEvent::Vote`] | the plan's votes | [`ServerMsg::Tally`] — the whole recorded tally, via [`announce_tally`] |
+/// | [`SessionEvent::CookStarted`] | the plan's cook | [`ServerMsg::Cooking`] when one is recorded, and **nothing** when none is — via [`announce_cook`] |
+///
+/// The one documented absence is the cook's, and it is an absence rather than an
+/// oversight: `Cooking` states *that the plan is cooking and since whose tap*, so a plan
+/// that is not cooking has no such fact to state and there is no "not cooking" frame to
+/// invent. The refused device's screen is already the truth in that case, which is why
+/// saying nothing is honest here and would not be for a list or a pot.
+///
+/// The vote's answer is the whole tally rather than a per-recipe row because that is the
+/// frame that exists and the frame the client already applies whole (it is what a socket
+/// rehydrates from). It also costs the vote its long-standing footnote: the choke point's
+/// guard used to be *equivalent* to `record_vote`'s own predicate, so passing every vote
+/// here changed no observable behaviour. It does now — a refused voter is answered, and a
+/// mutation that drops the guard stops answering them.
+async fn truth(
+    conn: &Connection,
+    event: &EventEnvelope<SessionEvent>,
+) -> anyhow::Result<Vec<ServerMsg>> {
+    match &event.payload {
+        SessionEvent::TimerStart { source, id, .. }
+        | SessionEvent::TimerDismiss { source, id, .. } => {
+            announce_timers(conn, &event.channel, source, id).await
+        }
+        SessionEvent::Vote { .. } => announce_tally(conn, &event.channel).await,
+        SessionEvent::BuyTick { source, id, .. } => {
+            announce_buy(conn, &event.channel, source, id).await
+        }
+        SessionEvent::CookStarted {} => announce_cook(conn, &event.channel).await,
+    }
 }
 
 /// Whether the plan admits this event from this person, by the kind's own [`Guard`].
@@ -491,9 +599,10 @@ async fn authorized(
 
 /// Hand an authorised event to its kind's handler and collect what the room is told.
 ///
-/// The only per-kind code in the module, and it is a table: a handler performs one
-/// durable write and answers with the frames that write produced, so ordering,
-/// broadcast and the silence-on-refusal rule stay here rather than being re-decided per
+/// One of the module's two per-kind tables — this one and [`truth`], which is the same
+/// table read for a refusal — and both are tables rather than code inside a handler: a
+/// handler performs one durable write and answers with the frames that write produced,
+/// so ordering, broadcast and who-hears-what stay here rather than being re-decided per
 /// feature.
 async fn apply(
     conn: &Connection,
@@ -536,18 +645,24 @@ async fn apply(
         // produce exactly one `Decided`: the loser of that race changed no row and says
         // nothing.
         //
-        // Worth stating, because a mutation pass finds it and a reader should not have
-        // to: for **this** kind the choke point's guard is currently *equivalent* to the
-        // write's own predicate. `record_vote` asks `seated_in_a_started_plan` and then
-        // some, and this arm announces nothing when it answers `false`, so making
-        // [`authorized`] pass a vote unconditionally changes no observable behaviour —
-        // an equivalent mutation, in the sense `crate::session::decide_if_agreed`'s
-        // redundant veto clause already names. It is not so for a timer or a tick, which
-        // announce whether or not the write moved a row (see
-        // `a_watcher_ticks_nothing_and_the_room_hears_nothing`), and the guard stays here
-        // for all four because policy belongs on the framework: the next kind to arrive
-        // gets asked whether it may run *before* anybody has remembered to put the
-        // predicate inside its write.
+        // This arm used to carry a footnote saying the choke point's guard was
+        // *equivalent* to the write's own predicate for this one kind — `record_vote`
+        // asks `seated_in_a_started_plan` and then some, and this arm announces nothing
+        // when it answers `false`, so passing every vote at [`authorized`] changed no
+        // observable behaviour. **#222 ended that.** A refused vote is now answered with
+        // the plan's tally, down the socket that raised it, so dropping the guard here
+        // stops a refused voter being told anything and
+        // `a_refused_swipe_is_answered_with_the_tally` goes red. The guard was always
+        // going to stay for all five, because policy belongs on the framework and the
+        // next kind to arrive gets asked whether it may run *before* anybody has
+        // remembered to put the predicate inside its write; it is simply no longer a
+        // mutation nothing can see.
+        //
+        // The refusal the framework answers is the framework's own. A vote this arm
+        // records nothing for is a **handler** predicate refusing (not a decider, the
+        // swiping has not begun, the plan has already decided), which is inside `apply`
+        // and stays exactly as it was — each kind already decides for itself what an
+        // unmoved row announces, and for a vote the answer is nothing.
         SessionEvent::Vote { source, id, vote } => {
             if !crate::session::record_vote(
                 conn,
@@ -665,8 +780,27 @@ async fn announce_cook(conn: &Connection, channel: &str) -> anyhow::Result<Vec<S
         .collect())
 }
 
+/// The plan's whole tally, as a frame — the vote's whole-state answer, and the same
+/// frame [`crate::session::socket_loop`] rehydrates a connection from.
+///
+/// A pure read, like every arm of [`truth`]: it is only ever sent to a device whose vote
+/// was refused, and a refusal must leave the plan exactly as it found it.
+async fn announce_tally(conn: &Connection, channel: &str) -> anyhow::Result<Vec<ServerMsg>> {
+    let (participants, votes) = crate::session::load_tally(conn, channel).await?;
+    Ok(vec![ServerMsg::Tally {
+        participants,
+        votes,
+    }])
+}
+
 /// The room's whole shopping checklist for one recipe, as a frame — [`announce_timers`]'
 /// rule, on the table it was written for (#131).
+///
+/// **It reads and does not seed.** The `buy_tick` arm seeds the list before it announces
+/// (#156), and that write belongs to the accepted path: this same function is the answer
+/// a *refused* tick gets ([`truth`]), and a refusal that seeded a list would be an event
+/// the plan rejected leaving a row behind it. A list nobody has asked for yet therefore
+/// answers a refused tick with no checks, which is what is recorded.
 async fn announce_buy(
     conn: &Connection,
     channel: &str,

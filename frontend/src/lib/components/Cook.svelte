@@ -38,9 +38,10 @@
      * Watching the plan rather than cooking it (#180/#200) — every countdown is
      * visible, no control is offered.
      *
-     * Not a disabled button: the server refuses a watcher's start with silence (a
-     * socket frame has nowhere to carry a refusal), so a control that looked pressable
-     * would be a control that did nothing without saying why. A timed step a watcher
+     * Not a disabled button: the server refuses a watcher's start and answers with the
+     * plan's timers exactly as they are (#222) — a fact, never a reason, because a
+     * socket frame has nowhere to carry one — so a control that looked pressable would
+     * be a control that did nothing without saying why. A timed step a watcher
      * cannot start still shows how long it takes, because that is a fact about the
      * recipe and withholding it would be inventing a difference the corpus does not
      * have.

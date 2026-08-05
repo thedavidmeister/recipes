@@ -3709,13 +3709,14 @@ mod tests {
     /// asked and where the room's frames come from.
     ///
     /// This is the transport half of what `POST /api/session/{channel}/buy` used to be,
-    /// and the tests below are the same tests it had — a refusal is now an empty answer
-    /// (nothing written, nothing announced) instead of a status code, because a socket
-    /// event has nowhere to carry a sentence (#179/#180).
+    /// and the tests below are the same tests it had — a refusal is not a status code,
+    /// because a socket event has nowhere to carry a sentence (#179/#180). Since #222 it
+    /// is not silence either: the room hears nothing and the refused device is handed the
+    /// list as it actually is, which is the pair [`tick_event_both`] answers with.
     ///
     /// The instant is `now` on both sides of `normalize`, which is what an unmeasured
     /// connection tapping right now looks like; none of these tests is about the clock.
-    async fn tick_event(
+    async fn tick_event_both(
         conn: &libsql::Connection,
         channel: &str,
         who: &str,
@@ -3723,7 +3724,7 @@ mod tests {
         id: &str,
         index: i64,
         checked: bool,
-    ) -> Vec<session::ServerMsg> {
+    ) -> events::Ingested {
         let now = events::server_now_ms();
         events::ingest(
             conn,
@@ -3741,6 +3742,22 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// The same, narrowed to what the **room** is told — the answer these tests were
+    /// written against.
+    async fn tick_event(
+        conn: &libsql::Connection,
+        channel: &str,
+        who: &str,
+        source: &str,
+        id: &str,
+        index: i64,
+        checked: bool,
+    ) -> Vec<session::ServerMsg> {
+        tick_event_both(conn, channel, who, source, id, index, checked)
+            .await
+            .room
     }
 
     /// The one `buy` frame an accepted tick announces to the room, unwrapped.
